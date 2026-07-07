@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @fluessig/emitter — the catalog printer (plan.txt Step 0; DESIGN §4).
+// @fluessig/emitter — the catalog printer (notes/plan.txt Step 0; DESIGN §4).
 //
 // ONE compile of a .tsp using the fluessig decorators → BOTH artifacts:
 //   catalog.json — the data model  (Layer A records + Layer B relations)  → schema codecs

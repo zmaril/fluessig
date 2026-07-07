@@ -1,6 +1,6 @@
 // Golden test for the emitter: run it on the full entl catalog, validate both
 // artifacts against the frozen JSON Schemas, and assert the entl invariants
-// (the 28-table accounting). The seed of the fixture corpus (plan.txt Step 0).
+// (the 28-table accounting). The seed of the fixture corpus (notes/plan.txt Step 0).
 import { emit } from "./emit.mjs";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { createRequire } from "module";

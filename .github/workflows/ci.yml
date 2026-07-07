@@ -4,11 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 7 * * 2"  # weekly: catch toolchain/dep drift even without a push
 
 jobs:
   rust:
     name: rust engine + fixture tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,6 +25,7 @@ jobs:
   emitter:
     name: emitter (TypeSpec -> catalog.json)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

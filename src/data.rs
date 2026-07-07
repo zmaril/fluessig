@@ -12,7 +12,7 @@
 //!
 //! Rows are JSON values in v1 (what entl's Arrow→JSON cell conversion already
 //! produces); the zero-copy Arrow `RecordBatch` path arrives with the Arrow
-//! front-end (plan.txt Step 2) so the arrow version can be aligned with entl's
+//! front-end (notes/plan.txt Step 2) so the arrow version can be aligned with entl's
 //! duckdb re-export once, deliberately.
 
 use std::collections::BTreeMap;

@@ -4,7 +4,7 @@
 //! dogfood catalog); `@fluessig/emitter` lowers it to `catalog.json` (the model
 //! layer) + `api.json` (the op layer). This crate is everything after the JSON:
 //! the IR ([`ir`]), the loader + validator ([`catalog`]), and — as they land —
-//! the schema back-ends, data codecs, and binding generator (DESIGN.md §4).
+//! the schema back-ends, data codecs, and binding generator (notes/design.md §4).
 
 pub mod api;
 pub mod bindgen;

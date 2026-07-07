@@ -2,7 +2,7 @@
 name = "fluessig"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "Describe a typed entity graph once (TypeSpec); project it everywhere — DDL, ORM models, format codecs, language bindings, and an Arrow-fed data plane."
 repository = "https://github.com/zmaril/fluessig"
 

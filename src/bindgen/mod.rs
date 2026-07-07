@@ -1,4 +1,4 @@
-//! Binding generation (plan.txt Step 5b) — the op layer (`api.json`) projected
+//! Binding generation (notes/plan.txt Step 5b) — the op layer (`api.json`) projected
 //! into committed per-language binding glue. The thesis (translation.md): every
 //! op has a SHAPE (ctor | unary | stream | manual), and the idiom for each
 //! shape is written ONCE per language as a genco template — AsyncTask→Promise

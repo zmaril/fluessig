@@ -1,7 +1,7 @@
 //! The IR — serde mirror of `catalog.json` (format 0, frozen by
 //! `emitter/catalog.schema.json`). Deliberately its own vocabulary: nothing here
 //! names `arrow`, TypeSpec, or any store — those are all codecs over this
-//! (DESIGN.md §2/§4).
+//! (notes/design.md §2/§4).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

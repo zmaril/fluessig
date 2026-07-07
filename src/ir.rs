@@ -14,6 +14,11 @@ pub struct Catalog {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     pub scalars: Vec<Scalar>,
+    /// Named tagged unions (format 1). The variant tag is the wire discriminator.
+    /// Defaulted so a pre-union file fails on the format gate (a real message),
+    /// not on parse.
+    #[serde(default)]
+    pub unions: Vec<UnionDef>,
     pub enums: Vec<EnumDef>,
     pub entities: Vec<Entity>,
     pub relation_properties: Vec<Struct>,
@@ -37,6 +42,26 @@ pub struct Scalar {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+}
+
+/// A named tagged union: a closed set of alternatives, each carrying a body
+/// type. Physically: twin columns (`<col>_kind` text + `<col>` json); on the
+/// wire: the `{kind, payload}` envelope. The variant tag IS the discriminator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnionDef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    pub variants: Vec<UnionVariant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnionVariant {
+    pub tag: String,
+    #[serde(rename = "type")]
+    pub ty: TypeRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +175,10 @@ pub enum TypeRef {
     List {
         of: Box<TypeRef>,
     },
+    /// A named tagged-union reference (variants live in [`Catalog::unions`]).
+    Union {
+        name: String,
+    },
 }
 
 impl TypeRef {
@@ -215,6 +244,10 @@ impl Catalog {
 
     pub fn value_struct(&self, name: &str) -> Option<&Struct> {
         self.value_structs.iter().find(|s| s.name == name)
+    }
+
+    pub fn union_def(&self, name: &str) -> Option<&UnionDef> {
+        self.unions.iter().find(|u| u.name == name)
     }
 
     /// The full primary key of an entity: inherited (family-root) members first,

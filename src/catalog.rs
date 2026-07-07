@@ -79,6 +79,7 @@ pub fn validate(c: &Catalog) -> Diagnostics {
         .chain(c.value_structs.iter().map(|s| &s.name))
         .chain(c.enums.iter().map(|e| &e.name))
         .chain(c.scalars.iter().map(|s| &s.name))
+        .chain(c.unions.iter().map(|u| &u.name))
     {
         if !seen.insert(name.clone()) {
             d.err(format!("duplicate model name: {name}"));
@@ -109,7 +110,91 @@ pub fn validate(c: &Catalog) -> Diagnostics {
         }
     }
 
+    validate_unions(c, &mut d);
+
     d
+}
+
+/// The tagged-union rules (format 1, v1 slice): named top-level unions only;
+/// unique nonempty tags; variant bodies are value structs, scalars, or enums
+/// (no entities, no nested unions); a union-typed field is data, never key,
+/// never a list element (twin-column lowering has one discriminator).
+fn validate_unions(c: &Catalog, d: &mut Diagnostics) {
+    for u in &c.unions {
+        if u.variants.is_empty() {
+            d.err(format!("union {}: no variants", u.name));
+        }
+        let mut tags = HashSet::new();
+        for v in &u.variants {
+            if !tags.insert(v.tag.clone()) {
+                d.err(format!("union {}: duplicate variant tag {}", u.name, v.tag));
+            }
+            match &v.ty {
+                TypeRef::Scalar { .. } => {}
+                TypeRef::Enum { name } => {
+                    if !c.enums.iter().any(|e| &e.name == name) {
+                        d.err(format!("union {}.{}: unknown enum {name}", u.name, v.tag));
+                    }
+                }
+                TypeRef::Ref { name, entity } => {
+                    if *entity {
+                        d.err(format!(
+                            "union {}.{}: variants cannot be entities (store a key, not a row)",
+                            u.name, v.tag
+                        ));
+                    } else if c.value_struct(name).is_none() {
+                        d.err(format!(
+                            "union {}.{}: unknown value struct {name}",
+                            u.name, v.tag
+                        ));
+                    }
+                }
+                TypeRef::Union { .. } => d.err(format!(
+                    "union {}.{}: unions cannot nest (flatten the variants)",
+                    u.name, v.tag
+                )),
+                TypeRef::List { of } => {
+                    if matches!(&**of, TypeRef::Union { .. }) {
+                        d.err(format!(
+                            "union {}.{}: unions cannot nest (flatten the variants)",
+                            u.name, v.tag
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // union-typed fields, everywhere fields occur
+    let owners = c
+        .entities
+        .iter()
+        .map(|e| (&e.name, &e.fields))
+        .chain(c.relation_properties.iter().map(|s| (&s.name, &s.fields)))
+        .chain(c.value_structs.iter().map(|s| (&s.name, &s.fields)));
+    for (owner, fields) in owners {
+        for f in fields {
+            if let TypeRef::Union { name } = &f.ty {
+                if c.union_def(name).is_none() {
+                    d.err(format!("{owner}.{}: unknown union {name}", f.name));
+                }
+                if f.key {
+                    d.err(format!(
+                        "{owner}.{}: a union field cannot be a key member",
+                        f.name
+                    ));
+                }
+            }
+            if let TypeRef::List { of } = &f.ty {
+                if matches!(&**of, TypeRef::Union { .. }) {
+                    d.err(format!(
+                        "{owner}.{}: lists of unions are not supported (one discriminator column per field)",
+                        f.name
+                    ));
+                }
+            }
+        }
+    }
 }
 
 fn validate_entity(
@@ -305,7 +390,7 @@ mod tests {
 
     fn minimal(json_patch: impl FnOnce(&mut serde_json::Value)) -> Result<Catalog, String> {
         let mut v: serde_json::Value = serde_json::json!({
-            "fluessig": { "format": 0 },
+            "fluessig": { "format": 1 },
             "scalars": [],
             "enums": [],
             "entities": [

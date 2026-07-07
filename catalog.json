@@ -1,6 +1,6 @@
 {
   "fluessig": {
-    "format": 0,
+    "format": 1,
     "emitter": "0.0.0",
     "compiler": "1.13.0"
   },
@@ -11,13 +11,10 @@
       "base": "bytes"
     },
     {
-      "name": "Json",
-      "base": "string"
-    },
-    {
       "name": "ArrowBatch"
     }
   ],
+  "unions": [],
   "enums": [
     {
       "name": "RefKind",

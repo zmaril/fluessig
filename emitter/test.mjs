@@ -87,6 +87,34 @@ const spike = await emit(resolve(dir, "../spike/entl.tsp"), mkdtempSync(resolve(
 check(validCatalog(spike.catalog), "spike catalog matches the schema");
 check(validApi(spike.api), "spike api matches the schema");
 
+// ── the tagged-union fixture (format 1) ──
+console.log("tests/fixtures/union.tsp:");
+const uni = await emit(resolve(dir, "../tests/fixtures/union.tsp"), mkdtempSync(resolve(tmpdir(), "fluessig-")));
+check(validCatalog(uni.catalog), `union catalog matches the schema${validCatalog.errors ? " — " + ajv.errorsText(validCatalog.errors) : ""}`);
+check(validApi(uni.api), `union api matches the schema${validApi.errors ? " — " + ajv.errorsText(validApi.errors) : ""}`);
+const ep = uni.catalog.unions.find((u) => u.name === "EventPayload");
+check(ep?.variants.map((v) => v.tag).join(",") === "message,log,exit", "union variants keep declaration order (tags are the discriminators)");
+const evt = uni.catalog.entities.find((e) => e.name === "Event");
+check(
+  JSON.stringify(evt.fields.find((f) => f.name === "payload").type) === '{"k":"union","name":"EventPayload"}',
+  "a union field lowers to a named reference",
+);
+check(
+  JSON.stringify(uni.api.interfaces[0].ops.find((o) => o.name === "emit").params[0].type) === '{"union":"EventPayload"}',
+  "a union op param lowers to {union: name}",
+);
+check(
+  ["AgentMessage", "LogLine", "ExitInfo"].every((m) => uni.api.models.some((am) => am.name === m)),
+  "union variant models join the referenced closure",
+);
+// drift guard: the emitted fixture must equal the committed one
+const committed = {
+  catalog: require("../tests/fixtures/catalog.json"),
+  api: require("../tests/fixtures/api.json"),
+};
+check(JSON.stringify(uni.catalog) === JSON.stringify(committed.catalog), "committed union catalog.json is fresh");
+check(JSON.stringify(uni.api) === JSON.stringify(committed.api), "committed union api.json is fresh");
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);

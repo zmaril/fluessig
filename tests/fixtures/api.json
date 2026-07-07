@@ -1,0 +1,172 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "0.0.0",
+    "compiler": "1.13.0"
+  },
+  "source": "union.tsp",
+  "models": [
+    {
+      "name": "AgentMessage",
+      "doc": "Something an agent said.",
+      "fields": [
+        {
+          "name": "role",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "text",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "LogLine",
+      "doc": null,
+      "fields": [
+        {
+          "name": "line",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "ExitInfo",
+      "doc": null,
+      "fields": [
+        {
+          "name": "code",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Event",
+      "doc": null,
+      "fields": [
+        {
+          "name": "sessionUid",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "idx",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "ts",
+          "type": "utcDateTime",
+          "nullable": false
+        },
+        {
+          "name": "payload",
+          "type": {
+            "union": "EventPayload"
+          },
+          "nullable": false
+        },
+        {
+          "name": "note",
+          "type": {
+            "union": "EventPayload"
+          },
+          "nullable": true
+        }
+      ]
+    }
+  ],
+  "unions": [
+    {
+      "name": "EventPayload",
+      "doc": "One observation's body — the union's variant tag is the wire discriminator.",
+      "variants": [
+        {
+          "tag": "message",
+          "type": {
+            "model": "AgentMessage"
+          }
+        },
+        {
+          "tag": "log",
+          "type": {
+            "model": "LogLine"
+          }
+        },
+        {
+          "tag": "exit",
+          "type": {
+            "model": "ExitInfo"
+          }
+        }
+      ]
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "Watch",
+      "doc": null,
+      "ops": [
+        {
+          "name": "open",
+          "doc": null,
+          "shape": "ctor",
+          "params": [
+            {
+              "name": "path",
+              "type": "string"
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "events",
+          "doc": "The observed events, oldest first.",
+          "shape": "stream",
+          "readonly": true,
+          "params": [
+            {
+              "name": "afterIdx",
+              "type": "int64",
+              "optional": true
+            }
+          ],
+          "returns": {
+            "model": "Event"
+          }
+        },
+        {
+          "name": "emit",
+          "doc": null,
+          "shape": "unary",
+          "params": [
+            {
+              "name": "payload",
+              "type": {
+                "union": "EventPayload"
+              }
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "clear",
+          "doc": "Drop every recorded event.",
+          "shape": "unary",
+          "destructive": true,
+          "params": [],
+          "returns": "int64"
+        }
+      ]
+    }
+  ]
+}

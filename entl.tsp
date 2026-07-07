@@ -20,8 +20,7 @@ using Fluessig;
 /** a git object id (stored as raw bytes; hex is a representation view — DESIGN §9.1) */
 scalar Oid extends bytes;
 
-/** an opaque JSON payload column (query via json_extract / ::JSON) */
-scalar Json extends string;
+// (Json is a stock Fluessig scalar now — no local declaration needed.)
 
 /** one Arrow RecordBatch, held columnar and surfaced per language: an IPC-bytes
  * getter everywhere, plus the Arrow PyCapsule protocol (zero-copy C Data

@@ -11,7 +11,30 @@ pub struct ApiDoc {
     #[serde(default)]
     pub source: Option<String>,
     pub models: Vec<ApiModel>,
+    /// Named tagged unions the op surface references (format 1). On the FFI a
+    /// union value crosses as its JSON envelope `{"kind": tag, "payload": body}`
+    /// — the same carrier as the `Json` scalar; typed surfaces come from the
+    /// per-language docs and (for MCP) the generated `oneOf` schemas.
+    #[serde(default)]
+    pub unions: Vec<ApiUnion>,
     pub interfaces: Vec<ApiInterface>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiUnion {
+    pub name: String,
+    #[serde(default)]
+    pub doc: Option<String>,
+    pub variants: Vec<ApiUnionVariant>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiUnionVariant {
+    pub tag: String,
+    #[serde(rename = "type")]
+    pub ty: ApiType,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,6 +71,12 @@ pub struct ApiOp {
     #[serde(default)]
     pub doc: Option<String>,
     pub shape: Shape,
+    /// `@readonly` — flows into the MCP `readOnlyHint` annotation.
+    #[serde(default)]
+    pub readonly: bool,
+    /// `@destructive` — flows into the MCP `destructiveHint` annotation.
+    #[serde(default)]
+    pub destructive: bool,
     pub params: Vec<ApiParam>,
     pub returns: ApiType,
 }
@@ -89,6 +118,10 @@ pub enum ApiType {
     /// `T | null` — nullable returns/params.
     Nullable {
         nullable: Box<ApiType>,
+    },
+    /// A named tagged union (see [`ApiDoc::unions`]).
+    Union {
+        union: String,
     },
 }
 

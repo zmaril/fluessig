@@ -1,41 +1,118 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://fluessig.dev/schemas/api.v0.json",
-  "title": "fluessig api.json (format 0)",
+  "$id": "https://fluessig.dev/schemas/api.v1.json",
+  "title": "fluessig api.json (format 1)",
   "description": "The op layer lowered from a .tsp: interfaces, op shapes, params, returns, and the DTO models the ops reference. The input to `fluessig bindgen`.",
   "type": "object",
-  "required": ["fluessig", "models", "interfaces"],
+  "required": [
+    "fluessig",
+    "models",
+    "unions",
+    "interfaces"
+  ],
   "additionalProperties": false,
   "properties": {
     "fluessig": {
       "type": "object",
-      "required": ["format"],
+      "required": [
+        "format"
+      ],
       "properties": {
-        "format": { "const": 0 },
-        "emitter": { "type": "string" },
-        "compiler": { "type": "string" }
+        "format": {
+          "const": 1
+        },
+        "emitter": {
+          "type": "string"
+        },
+        "compiler": {
+          "type": "string"
+        }
       }
     },
-    "source": { "type": "string" },
+    "source": {
+      "type": "string"
+    },
     "models": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "fields"],
+        "required": [
+          "name",
+          "fields"
+        ],
         "additionalProperties": false,
         "properties": {
-          "name": { "type": "string" },
-          "doc": { "type": ["string", "null"] },
+          "name": {
+            "type": "string"
+          },
+          "doc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "fields": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["name", "type", "nullable"],
+              "required": [
+                "name",
+                "type",
+                "nullable"
+              ],
               "additionalProperties": false,
               "properties": {
-                "name": { "type": "string" },
-                "type": { "$ref": "#/$defs/apiType" },
-                "nullable": { "type": "boolean" }
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "$ref": "#/$defs/apiType"
+                },
+                "nullable": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "unions": {
+      "type": "array",
+      "description": "Named tagged unions referenced by the op surface. The variant tag is the wire discriminator.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "variants"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "doc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "tag",
+                "type"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "tag": {
+                  "type": "string"
+                },
+                "type": {
+                  "$ref": "#/$defs/apiType"
+                }
               }
             }
           }
@@ -46,35 +123,81 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "ops"],
+        "required": [
+          "name",
+          "ops"
+        ],
         "additionalProperties": false,
         "properties": {
-          "name": { "type": "string" },
-          "doc": { "type": ["string", "null"] },
+          "name": {
+            "type": "string"
+          },
+          "doc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ops": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["name", "shape", "params", "returns"],
+              "required": [
+                "name",
+                "shape",
+                "params",
+                "returns"
+              ],
               "additionalProperties": false,
               "properties": {
-                "name": { "type": "string" },
-                "doc": { "type": ["string", "null"] },
-                "shape": { "enum": ["ctor", "unary", "stream", "manual"] },
+                "name": {
+                  "type": "string"
+                },
+                "doc": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "shape": {
+                  "enum": [
+                    "ctor",
+                    "unary",
+                    "stream",
+                    "manual"
+                  ]
+                },
                 "params": {
                   "type": "array",
                   "items": {
                     "type": "object",
-                    "required": ["name", "type"],
+                    "required": [
+                      "name",
+                      "type"
+                    ],
                     "additionalProperties": false,
                     "properties": {
-                      "name": { "type": "string" },
-                      "type": { "$ref": "#/$defs/apiType" },
-                      "optional": { "const": true }
+                      "name": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "$ref": "#/$defs/apiType"
+                      },
+                      "optional": {
+                        "const": true
+                      }
                     }
                   }
                 },
-                "returns": { "$ref": "#/$defs/apiType" }
+                "returns": {
+                  "$ref": "#/$defs/apiType"
+                },
+                "readonly": {
+                  "const": true
+                },
+                "destructive": {
+                  "const": true
+                }
               }
             }
           }
@@ -85,30 +208,69 @@
   "$defs": {
     "apiType": {
       "oneOf": [
-        { "type": "string", "description": "a scalar name, or \"void\"" },
         {
-          "type": "object",
-          "required": ["model"],
-          "additionalProperties": false,
-          "properties": { "model": { "type": "string" } }
+          "type": "string",
+          "description": "a scalar name, or \"void\""
         },
         {
           "type": "object",
-          "required": ["enum"],
+          "required": [
+            "model"
+          ],
           "additionalProperties": false,
-          "properties": { "enum": { "type": "string" } }
+          "properties": {
+            "model": {
+              "type": "string"
+            }
+          }
         },
         {
           "type": "object",
-          "required": ["list"],
+          "required": [
+            "enum"
+          ],
           "additionalProperties": false,
-          "properties": { "list": { "$ref": "#/$defs/apiType" } }
+          "properties": {
+            "enum": {
+              "type": "string"
+            }
+          }
         },
         {
           "type": "object",
-          "required": ["nullable"],
+          "required": [
+            "list"
+          ],
           "additionalProperties": false,
-          "properties": { "nullable": { "$ref": "#/$defs/apiType" } }
+          "properties": {
+            "list": {
+              "$ref": "#/$defs/apiType"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "nullable"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "nullable": {
+              "$ref": "#/$defs/apiType"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "union"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "union": {
+              "type": "string"
+            }
+          }
         }
       ]
     }

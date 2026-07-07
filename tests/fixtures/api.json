@@ -83,6 +83,37 @@
           "nullable": true
         }
       ]
+    },
+    {
+      "name": "Run",
+      "doc": "A run: exercises entities crossing the op layer (issue #10) — the self\nreference and the compound FK lower to key fields; the to-many is omitted.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "startedAt",
+          "type": "utcDateTime",
+          "nullable": false
+        },
+        {
+          "name": "prevId",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "lastSessionUid",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "lastIdx",
+          "type": "int64",
+          "nullable": true
+        }
+      ]
     }
   ],
   "unions": [
@@ -165,6 +196,23 @@
           "destructive": true,
           "params": [],
           "returns": "int64"
+        },
+        {
+          "name": "run",
+          "doc": "One run, flat: relations ride as their FK fields.",
+          "shape": "unary",
+          "readonly": true,
+          "params": [
+            {
+              "name": "id",
+              "type": "string"
+            }
+          ],
+          "returns": {
+            "nullable": {
+              "model": "Run"
+            }
+          }
         }
       ]
     }

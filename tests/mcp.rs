@@ -37,7 +37,7 @@ fn union_fixture_manifest() {
     // ctor doesn't project; unary + stream do
     assert_eq!(
         tool_names(&m),
-        ["watch_events", "watch_emit", "watch_clear"]
+        ["watch_events", "watch_emit", "watch_clear", "watch_run"]
     );
 
     // @readonly / @destructive flow into annotations
@@ -130,5 +130,31 @@ fn generated_module_has_the_surface() {
     let start = module.find("r###\"").unwrap() + 5;
     let end = module.rfind("\"###").unwrap();
     let embedded: serde_json::Value = serde_json::from_str(&module[start..end]).unwrap();
-    assert_eq!(embedded["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(embedded["tools"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn entities_cross_the_op_layer_flat() {
+    // issue #10: relations lower to FK fields, to-many is omitted — so the
+    // generated Rust DTO is finite (no Option<Run> self-embed, E0072-free).
+    let api = load_api(UNION_API).unwrap();
+    let run = api.models.iter().find(|m| m.name == "Run").unwrap();
+    let names: Vec<&str> = run.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["id", "startedAt", "prevId", "lastSessionUid", "lastIdx"],
+        "self-ref -> prevId; compound FK -> two key fields; to-many omitted"
+    );
+    let module = mcp_module(&api, &[], None);
+    assert!(module.contains("pub prev_id: Option<String>"), "{module}");
+    assert!(
+        module.contains("pub last_idx: Option<i64>"),
+        "typed by the target key"
+    );
+    // no recursive embed as a FIELD (`run()` returning Option<Run> is fine)
+    assert!(!module.contains(": Option<Run>,"), "no recursive embed");
+    assert!(
+        module.contains("-> anyhow::Result<Option<Run>>"),
+        "nullable return survives"
+    );
 }

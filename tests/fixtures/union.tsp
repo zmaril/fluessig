@@ -38,6 +38,26 @@ model Event {
   note?: EventPayload;
 }
 
+/** A run: exercises entities crossing the op layer (issue #10) — the self
+ * reference and the compound FK lower to key fields; the to-many is omitted. */
+@entity
+@name("runs")
+model Run {
+  @key id: string;
+  startedAt: utcDateTime;
+  /** The previous attempt, if any (lowers to prevId). */
+  @fk(#["prev_id"]) prev?: Run;
+  /** Compound FK to Event's (sessionUid, idx) key. */
+  @fk(#["last_session_uid", "last_idx"]) last?: Event;
+  /** To-many: omitted from the api DTO. */
+  @name("run_events")
+  @edge(RunEventAt)
+  observed: Event[];
+}
+model RunEventAt {
+  @key seq: int64;
+}
+
 interface Watch {
   @ctor open(path: string): void;
   /** The observed events, oldest first. */
@@ -45,4 +65,6 @@ interface Watch {
   emit(payload: EventPayload): void;
   /** Drop every recorded event. */
   @destructive clear(): int64;
+  /** One run, flat: relations ride as their FK fields. */
+  @readonly run(id: string): Run | null;
 }

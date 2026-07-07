@@ -200,6 +200,56 @@ export async function emit(inputPath, outDir) {
     })),
   }));
 
+  // ── entities crossing the op layer lower FLAT (issue #10): a to-one relation
+  // becomes its FK field(s) — the shape the ledger a consumer queries actually
+  // has — and to-many relations are omitted (fetch children by their own op).
+  // Embedding relation targets recurses (Dispatch ⇄ Session) and contradicts
+  // the physical projection.
+  const entityByName = Object.fromEntries(catalog.entities.map((e) => [e.name, e]));
+  const snakeName = (s) => s.replace(/([A-Z])/g, (m, c, i) => (i ? "_" : "") + c.toLowerCase());
+  const camelName = (s) => s.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+  const flatFields = (e) => (e.extends ? [...flatFields(entityByName[e.extends]), ...e.fields] : e.fields);
+  const flatKey = (e) => (e.extends ? [...flatKey(entityByName[e.extends]), ...e.key] : e.key);
+  // an entity's key as (physical column, scalar typeRef) pairs — relation key
+  // members expand through their target's key, mirroring sql.rs key_columns
+  const keyColumns = (e) =>
+    flatKey(e).flatMap((k) => {
+      const f = flatFields(e).find((f) => f.name === k);
+      if (!f.relation) return [{ column: f.column ?? snakeName(f.name), type: f.type }];
+      const target = entityByName[f.relation.to];
+      const targetKey = keyColumns(target);
+      const fk = f.relation.fkColumns ?? targetKey.map((c) => c.column);
+      return fk.map((col, i) => ({ column: col, type: targetKey[i].type }));
+    });
+  // one model's api-DTO fields: scalars as-is; to-one relations -> FK fields
+  // (+ camelized discriminator when polymorphic); to-many relations -> omitted
+  const dtoFields = (m) =>
+    m.fields.flatMap((f) => {
+      if (!f.relation) return [{ name: f.name, type: f.type, nullable: f.nullable, doc: f.doc }];
+      if (f.relation.cardinality === "many") return [];
+      const target = entityByName[f.relation.to];
+      const targetKey = keyColumns(target);
+      const fk = f.relation.fkColumns ?? targetKey.map((c) => c.column);
+      const fields = fk.map((col, i) => ({
+        name: camelName(col),
+        type: targetKey[i].type,
+        nullable: f.nullable,
+        doc: f.doc,
+      }));
+      if (f.relation.typeColumn) {
+        fields.unshift({
+          name: camelName(f.relation.typeColumn),
+          type: { k: "scalar", name: "string" },
+          nullable: f.nullable,
+          doc: `discriminator: which ${f.relation.to} leaf ${camelName(fk[0])} points at`,
+        });
+      }
+      return fields;
+    });
+  const loweredByName = Object.fromEntries(
+    [...catalog.valueStructs, ...catalog.entities].map((m) => [m.name, dtoFields(m)]),
+  );
+
   const referenced = new Set();
   const referencedUnions = new Set();
   // seed from op params/returns (already api-typed: {model} / {union} / {list} / {nullable})
@@ -211,9 +261,8 @@ export async function emit(inputPath, outDir) {
     if (t.nullable) seedApiType(t.nullable);
   };
   for (const i of interfaces) for (const op of i.ops) [...op.params.map((p) => p.type), op.returns].forEach(seedApiType);
-  // transitive: models referenced by referenced models' fields (e.g. SinkOptions.rename
-  // -> TableRename), unions referenced by fields, and models referenced by union variants
-  const allModels = [...catalog.valueStructs, ...catalog.entities];
+  // transitive: models referenced by referenced models' LOWERED fields (relation
+  // targets no longer join via embedding), unions via fields and their variants
   const unionByName = Object.fromEntries(catalog.unions.map((u) => [u.name, u]));
   let grew = true;
   const addTypeRef = (ty) => {
@@ -229,8 +278,8 @@ export async function emit(inputPath, outDir) {
   };
   while (grew) {
     grew = false;
-    for (const m of allModels.filter((m) => referenced.has(m.name)))
-      for (const f of m.fields) addTypeRef(f.type);
+    for (const name of [...referenced])
+      for (const f of loweredByName[name] ?? []) addTypeRef(f.type);
     for (const u of catalog.unions.filter((u) => referencedUnions.has(u.name)))
       for (const v of u.variants) addTypeRef(v.type);
   }
@@ -242,7 +291,7 @@ export async function emit(inputPath, outDir) {
       .map((m) => ({
         name: m.name,
         doc: m.doc ?? null,
-        fields: m.fields.map((f) => ({
+        fields: loweredByName[m.name].map((f) => ({
           name: f.name,
           type: apiTypeOfRef(f.type),
           nullable: f.nullable,

@@ -1,0 +1,6 @@
+# Rust build artifacts
+/target
+
+# npm installs in the typespec/ and emitter/ packages (spike/ has its own)
+node_modules/
+package-lock.json

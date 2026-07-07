@@ -1,0 +1,250 @@
+fluessig — plan
+
+The canonical design is DESIGN.md (rationale, decisions §11, non-goals §8, derived artifacts §9).
+This is the actionable checklist, tracking DESIGN §7's build order.
+
+V1 SCOPE — **COMPLETE: the rip-out list is done.** Schema templates, migrations.rs, parse_pk,
+BOOL_COLUMNS, gen_models.py, gen-tables.ts, and ALL THREE hand-written binding lib.rs files
+(node/python/ruby) are deleted/generated; every artifact drift-guarded; every suite green.
+Original statement: **bindgen + models, replacing entl's hand-written surface.** entl's schema
+templates, generated read models (tables.gen.ts / models.py), and hand-written binding glue
+(entl-node/entl-python/entl-ruby lib.rs) are the dogfood target and get ripped out in favor of
+fluessig output. So the spine is TWO verticals off one entl.tsp:
+  models:  catalog.json -> SQL DDL + SQL data codec -> live store   (Steps 1-5)
+  bindgen: api.json -> generated napi/PyO3/Magnus glue -> entl's test suites green (Step 5b)
+Fan-out (Mongo/ORM-codegen/graph/files) stays post-v1.
+
+Shape: authored .tsp (+ @fluessig/typespec decorators) --tsp compile--> catalog.json (the contract)
+--> Rust core (loader/validator + codecs) reads catalog.json (serde), no Node at data time.
+Arrow is an import + data path. Mechanism proven in spike/ — ONE entl.tsp holds both layers; one
+compile emits catalog.json (model layer) AND api.json (op layer -> generated language bindings,
+cargo-check-proven; see spike/README.md + /translation.md).
+
+v1 authoring toolchain: `cargo install --git` for the binary + ambient Node for .tsp->catalog.json
+(fine for the entl dogfood). Bundled no-Node authoring binary = a later packaging milestone (§11.4).
+
+Legend: [ ] todo  [~] in progress  [x] done
+
+## Step 0 — @fluessig/typespec + @fluessig/emitter (TS, thin)
+
+[~] Promote spike/ into a real package — STARTED: typespec/ is @fluessig/typespec (lib.tsp +
+    decorators.js), holding the core vocabulary + the acid-test additions (@abstract, @name,
+    @fk/@fkSource, @defaultValue) + the binding shapes (@ctor/@stream/@manual). PKs use TypeSpec's
+    BUILT-IN @key (no collision, matching semantics). ../entl.tsp imports it. Still to add:
+    @card(min,max), @assoc, @inverse, @index/@unique, per-codec namespaces (@Pg.*, @Mongo.*).
+[x] The full entl catalog is authored: ../entl.tsp (28/28 tables + the op surface) -> catalog.json
+    + api.json — the first fixture-corpus entries. Language findings: FINDINGS.md (4 vocabulary
+    additions, 2 loader rules, 2 entl schema follow-ups). No IR reshape needed.
+[x] The emitter is a MINIMAL catalog printer — emitter/ is @fluessig/emitter (emit.mjs, CLI
+    `fluessig-emit <schema.tsp> [--out]`): walk the checked program, serialize verbatim, stamp
+    {format, emitter, compiler} versions, exit. NO validation/naming/projection in TS.
+[x] Freeze the catalog.json + api.json formats: emitter/{catalog,api}.schema.json (JSON Schema
+    2020-12, format 0) + emitter/test.mjs (golden test: emits entl.tsp + the spike, validates both
+    against the schemas, asserts the 28-table/polymorphism/op-shape invariants). `npm test`.
+
+## Step 1 — IR + loader/validator (Rust)  [STARTED — crates/fluessig is a workspace default member]
+
+[x] ir.rs: Catalog/Entity/Field/Struct/Scalar/EnumDef serde mirror of catalog.json format 0;
+    TypeRef (Scalar{name,base}|Ref|Enum|List — our own enum, no arrow); Relation {to, cardinality,
+    kind, properties, table, fkColumns, typeColumn, sourceColumns}. Helpers: flattened_key /
+    flattened_fields (inheritance, root-first = column order), table_name (dumb snake rule).
+[x] catalog.rs: load_catalog (parse + format-version gate + validate — the one gate every
+    front-end passes through). v1 rule slice: unique names; key fields exist; relation targets
+    resolve + are entities; @edge structs exist + are flat; families = abstract roots + concrete
+    leaves, uniform key (leaves add none), roots have no table; discriminator column required for
+    abstract targets, forbidden for concrete; no composing an abstract family.
+    Tests: 7 unit (5 negative) + 4 integration on the committed entl catalog.json (28-table
+    accounting, family flattening, the three relation shapes, wire values/defaults).
+[ ] Polymorphism depth: single-level families only for now — validate/decide multi-level.
+[ ] fk-column arity vs target key (blocked on the column-sharing design, FINDINGS #2).
+[ ] Span-carrying diagnostics (today: path-ish strings). `fluessig validate` CLI (the bin target).
+[ ] Collapse the format triangle: today the catalog shape lives in THREE hand-maintained places
+    (emit.mjs output code, catalog.schema.json, ir.rs serde structs), held consistent by tests
+    (ajv golden test + deny_unknown_fields integration test). Once the format stops moving
+    (after the DDL parity gate stresses it): derive JsonSchema on ir.rs via `schemars` and
+    GENERATE catalog.schema.json from the Rust IR — Rust defines format 0, the emitter conforms
+    (ajv test), the schema file becomes a checked build artifact. Two representations, one truth.
+
+## Step 2 — Arrow front-end (Layer A)
+
+[ ] Catalog::from_arrow (field-metadata convention fluessig.type="Oid"; documented-lossy: types
+    outside our enum map by rule or fail loudly) and Entity -> arrow::Schema. Round-trip test (A-subset).
+[ ] `fluessig import-arrow` -> emit a starter .tsp scaffold.
+
+## Step 3 — SQL DDL back-end (Postgres first)
+
+[x] sql.rs: tables(&Catalog, Dialect) -> structured TableDefs (the physical projection: relations ->
+    FK columns / association+edge tables, families -> per-leaf tables, keys -> PKs incl. FK-in-PK
+    expansion and column-sharing dedup) + render() -> CREATE TABLE text in the template style +
+    ddl(). PG type map keyed by TypeSpec builtin NAME (the numeric builtins all root at `numeric`,
+    so the base is useless for width) with semantic overrides (Oid/Json/bytes -> hex text).
+[x] PARITY GATE GREEN — ALL THREE DIALECTS: tests/sql_parity.rs parses every hand-written template
+    (postgres 20, sqlite 20, duckdb 28 — the complete engine store) and holds the generated tables
+    to them — column set (name -> type + NOT NULL) strict, PK ordered-exact, DEFAULTs
+    template-lenient, column ORDER deliberately excluded (sinks address by name).
+    Caught on day one: the numeric-base type bug (TypeSpec ints all root at `numeric` — map by
+    NAME), PK column-sharing dup, AND a real modeling error (GitObject was over-keyed (oid, repo);
+    real PKs key on oid alone — fixed in entl.tsp). Dialect maps: PG/SQLite oids+bytes -> hex text,
+    SQLite bools -> 0/1 + timestamps -> RFC3339 text, DuckDB -> raw blob + native TIMESTAMP.
+    => entl's ENTIRE hand-written schema surface (all three migrations dirs) now regenerates
+    from entl.tsp.
+    RETIRED at the Step-5 swap: the templates are deleted, so the gate has nothing to parse —
+    its proof stands at the moment of deletion (commit the fluessig work + green gate FIRST,
+    the rip-out SECOND, so the equivalence proof is in history). Ongoing drift protection =
+    the regenerates-identically test + entl's behavior suites (P1/P2/P3 round-trips).
+[x] _fluessig_meta + fingerprint + extras (§9.5): sql::fingerprint(catalog, dialect, extras) =
+    sha256 content hash; ddl() emits every table + derived views + a one-row _fluessig_meta
+    (fingerprint/format/emitter/compiler, generated_at DB-defaulted so DDL text is deterministic)
+    + extras appended verbatim LAST and hashed into the fingerprint (editing extras trips drift).
+    Rebuild flow: compare fingerprints; mismatch => drop + re-apply.
+[x] Minimal @derived (§9.3 carve-out): @derived("exists"|"count", of, filter?) end-to-end —
+    decorator -> emitter -> schema -> IR (Derived) -> validator (agg whitelist; of = a to-many
+    relation on the same entity; filter keys = edge properties) -> sql::derived_views(): a
+    <table>_derived view per entity (EXISTS/count subquery over the edge table; CREATE VIEW IF
+    NOT EXISTS on sqlite). entl.tsp: isMerge carries the real spec; the stored column REMAINS for
+    template parity until the Step-5 swap (then: column drops, view is the projection).
+    NB: `of` is a string, not a checked reference — a decorator arg can't self-reference its own
+    model mid-declaration; the Rust validator resolves it instead (noted vs FINDINGS #2 taste).
+
+## Step 4 — SQL data codec (Layer C; port the driver sink)
+
+[x] data.rs: Mutation{table, op: Insert|Upsert|Delete, columns, rows} in a Transaction ->
+    SqlCodec::plan() -> a Plan of Steps. v1 posture: SQL = ONE transactional step; statements
+    topologically ordered (parents-before-children for writes, reversed for deletes; association/
+    edge tables after both endpoints, abstract endpoints after every leaf; cycles capped).
+    Strict checking: unknown table/column and delete-without-full-key are errors, never drops.
+    Rows are JSON values in v1 (what entl's Arrow->JSON conversion already produces); the
+    zero-copy RecordBatch path lands with Step 2 so the arrow version is aligned deliberately.
+[x] upsert_sql (ON CONFLICT (pk) DO UPDATE SET / DO NOTHING; $n for pg, ? for sqlite/duckdb),
+    insert_sql, delete_sql (WHERE pk-only, params bound in PK order).
+[x] PORT + DELETE parse_pk — as COMMITTED GENERATED CODE, not runtime rendering (decided):
+    `fluessig-gen <catalog.json> <out.rs>` (sql::rust_schema_module) emits a self-contained Rust
+    module — per-dialect TableSchema consts (name, pk, __table__-templated DDL, all 28 tables x 3
+    dialects) — committed as crates/entl-core/src/schema_gen.rs (the tables.gen.ts/models.py
+    convention on the Rust side). DriverSink reads it directly; entl-core has NO fluessig runtime
+    dependency and does no parsing/rendering at runtime. A regenerates-identically test in
+    fluessig guards drift (stale schema_gen.rs fails cargo test with the regen command in the
+    message). driver_tables() is catalog-driven (28 tables, was PG_TABLES' 20). Dogfood green:
+    entl-core 9/9 + fluessig 21 + napi rebuild + bun test (PGlite end-to-end + coverage).
+[ ] ON DELETE CASCADE on composition child tables — moot until a @compose relation exists in a
+    catalog (entl's faithful schema has none; FINDINGS #5). Revisit with the Mongo codec.
+[ ] Lenient coercion mode (documented whitelist: numeric widening, absent-nullable -> null).
+
+## Step 5 — prove the models vertical + dogfood entl
+
+[x] THE RIP-OUT (store + sinks + templates): db.rs and the SQLite/Postgres sinks now read the
+    generated schema_gen.rs (DUCKDB/SQLITE/PG_TABLES TableSchema consts); db.rs's drop-&-rebuild
+    hash covers the generated DDL + extras.sql. DELETED: migrations/{duckdb,sqlite,postgres}/tables
+    (68 files), migrations.rs, the hand-kept BOOL_COLUMNS (now generated — and the generated list
+    caught a real bug: the hand list missed conflicts.unresolved). extras.sql survives as the one
+    hand-written SQL (the §9.5 mechanism). Docs: fluessig-gen --docs emits schema_docs.json (the
+    physical lowering + entl.tsp docs); site/scripts/gen-reference.ts consumes it (no lowering
+    re-implemented in TS); schema.mdx regenerates from entl.tsp docs.
+    FOUND BY THE SWAP: DuckDB Appenders are positional, so generated column order is canonical —
+    two writers adapted (commit_parents: source/localkey/target; gh_comments: discriminator before
+    FK cols). NB: the pre-fix testkit pass was a false negative for this class (a consistently-
+    permuted store still round-trips P1 — both sides read the same store); the change-stream test
+    caught it. Column-order projection control remains FINDINGS #2 follow-up.
+    Regressions green: core 9, fluessig 21, testkit P1/P2/P3, node (PGlite e2e + coverage),
+    python (maturin rebuild + 4), docs examples harness. AGENTS.md conventions rewritten.
+[ ] Remaining end-to-end wiring: entl sinks emit _fluessig_meta + use sql::fingerprint (today only
+    db.rs's FNV hash gates rebuilds); the isMerge @derived swap (drop stored column, view becomes
+    the projection) — do together with a template-era cleanup pass.
+[x] ORM read-plane codegen (codegen.rs, via GENCO — adopted after a live trial): python_models
+    -> entl.models (SQLAlchemy + the read-only guards), ts_tables -> tables.gen.ts (EntlTables
+    enum), ts_drizzle -> schema.gen.ts (Drizzle pg-core) — all from the same sql::tables()
+    physical projection the DDL uses, so models/types/DDL agree by construction. DELETED:
+    gen_models.py + gen-tables.ts (the introspect-a-live-DB generator). `bun run gen` now runs
+    fluessig-gen with every output; the regenerates-identically test guards all 5 artifacts
+    (schema_gen.rs, schema_docs.json, models.py, tables.gen.ts, schema.gen.ts). Suites green:
+    pytest 3, bun test (coverage vs live introspection ✓), drizzle schema import-checked.
+    GENCO VERDICT: works well — auto import management (the sqlalchemy import line came out
+    identical to the hand generator's), whitespace-aware Python, loops/join. Gotchas: quote! input
+    is RUST-tokenized first, so python f-strings (f"…" reserved prefix) and // comments break —
+    use string concat + $("# …")/$("/** … */") interpolation for comments. DECISION: adopt genco
+    for all language-file codegen; impl_lang! for unsupported targets (Ruby/AR, SQL if ever) —
+    and Step 5b's bindgen templates are genco quote! (Rust lang + import tracking).
+    (ActiveRecord + other languages stay post-v1.)
+
+## Step 5b — bindgen vertical (v1, not fan-out): replace entl's hand-written bindings
+
+[x] `fluessig bindgen` as a Rust back-end: api.rs (serde IR of api.json, format-gated) +
+    bindgen.rs (genco quote! templates, Rust lang). Shapes -> idioms: ctor -> #[napi(constructor)],
+    unary -> per-op AsyncTask -> Promise (ts_return_type stamped), stream -> a generated class +
+    NextTask polling the ONE primitive (a generated PollStream trait), manual -> skipped with a
+    pointer comment. Ctor-less interfaces (Git) -> free functions. DTO structs #[napi(object)],
+    name-only enums -> #[napi] enums (wire-valued enums -> strings for now).
+[x] entl's full op surface authored + emitted; @manual: watch (ThreadsafeFunction re-entry) AND
+    fileAt (nullable returns aren't modelable in the op layer yet — FINDINGS). Emitter DTO
+    collection made transitive (SinkOptions.rename -> TableRename was missed).
+[x] NODE LEG SWAPPED: entl-node/src/lib.rs (~800 hand-written lines) is now generated.rs (496,
+    GENERATED + drift-guarded) + core_impl.rs (265 — the ONE hand-written GitCore/EntlCore impl
+    over entl-core; Mutex<Db> because duckdb Connection is Send-not-Sync, try_clone per call) +
+    lib.rs (161 — version + the two @manual ops). API shape changes (typed ChangeBatch/Statement
+    objects instead of JSON strings; FileDiff[] returns): sync.ts + the cookbook recipe updated.
+    Parity gate green: bun test (PGlite e2e + coverage) + docs examples harness.
+    `bun run gen` now also regenerates generated.rs; the drift guard covers 6 artifacts.
+[x] NULLABLE RETURNS modeled: `string | null` in .tsp -> {nullable: T} in api.json (schema +
+    ApiType::Nullable + bindgen Option<T> / `T | null`) — fileAt is now GENERATED, not @manual.
+    Also: RebuildOptions.from renamed `source` at the source (`from` is a Python keyword).
+[x] PYTHON LEG SWAPPED: bindgen::python_binding — shapes -> PyO3 idioms: ctor -> #[new], unary ->
+    allow_threads (GIL released) with KWARGS-FLATTENED model params (SinkOptions -> sink(repo,
+    target, path=None, github=None, ...) — the pythonic idiom the hand binding used, now derived:
+    model-typed params expand to fields, reassembled into the options struct before the trait
+    call; required-before-defaulted ordering enforced; py-reserved names get a trailing _),
+    stream -> #[pyclass] __iter__/__next__ (None -> StopIteration), DTOs -> #[pyclass(get_all)]
+    with #[new] ctors, enums -> #[pyclass(eq, eq_int)], plus a generated register() for the
+    #[pymodule]. entl-python/src/lib.rs (259 hand-written lines) -> generated.rs (GENERATED,
+    drift-guarded) + core_impl.rs (structurally identical to node's — per-crate trait types;
+    dedup is a follow-up) + a 21-line lib.rs. Returns went dicts -> typed pyclasses; tests +
+    cookbook updated. Parity: pytest 4 passed + docs examples harness green. Python also GAINED
+    the Git helpers (diffCommits/fileAt/...) — node-only before; the catalog gives them for free.
+[x] RUBY LEG SWAPPED: bindgen::ruby_binding — shapes -> Magnus idioms: ctor ->
+    define_singleton_method("new", function!), unary -> GVL-plain methods (ops with optional
+    params go VARIADIC via magnus scan_args — Magnus arities are fixed, Option params aren't
+    optional; kwargs are a follow-up), stream -> wrapped class with .next -> value|nil, OUTPUT
+    models -> #[magnus::wrap] classes with generated getters (input bags flattened away; sink's
+    `rename` not exposed yet), enums -> lowercase strings + a generated parse(), list returns ->
+    RArray (magnus has no blanket Vec<Wrapped> impl). entl-ruby/src/lib.rs -> generated.rs
+    (drift-guarded) + core_impl.rs (third structural copy) + a 21-line lib.rs. Ruby also GAINED
+    loadGit/loadGithub/changes/driverPlan/rebuild + the Git helpers (was new/sink/query/extract
+    only). Parity: minitest 3 assertions green.
+[x] core_impl dedup: entl_core::binding_core_impls! — the trait impls written ONCE as a macro
+    (bare types resolve at each binding's expansion site; one param for python's from_). Each
+    binding's core_impl.rs = a doc comment + one macro call. (Flagged by straitjacket's
+    duplication rule; was already the top follow-up here.)
+[ ] Arrow C-FFI handoff for bulk data (replace rows-as-JSON in ChangeBatch/Statement) — with Step 2.
+
+## Step 6 — fan out (independent codecs vs the frozen IR)
+
+[ ] SQLite/DuckDB DDL -> Mermaid erDiagram (cheap docs win) -> ORM codegen beyond the entl subset
+    (ActiveRecord, more languages) -> Mongo (first real Composition + (type,key) test; aggregate
+    assembly at marshal time) -> JSONL/Parquet -> Proto -> graph.
+
+## Testing (cross-cutting, not a phase) — DESIGN §7 / §11.13
+
+[ ] CI codegen-freshness gate: CI runs the FULL regeneration chain (emit entl.tsp -> catalog.json
+    + api.json; fluessig-gen -> schema_gen.rs; later: models.py / tables.gen.ts / any generated
+    artifact) and then fails if `git status --porcelain` is non-empty — uncommitted codegen drift
+    is a build failure, not a surprise. Document the chain + the one regen command in the README
+    so humans and CI run the same thing. (The regenerates-identically tests catch Rust-side
+    staleness today; the CI gate covers EVERY generated artifact uniformly, including the
+    Node-side emit step that cargo test can't run.)
+
+[ ] Static/unit: loader+validator (accept valid, reject each rule with the right error) + per-codec
+    golden outputs.
+[ ] proptest: random VALID catalogs + random Arrow batches -> invariants (arrow-import round-trip;
+    Transaction->Plan->execute->read-back == input for transactional sinks).
+[ ] Cross-codec conformance corpus: one catalog through every codec. entl (incl. annotated tags ->
+    polymorphism) is the top-level property test.
+
+## Deferred / post-v1 (DESIGN §8, §9) — non-binding on the IR until built
+
+[ ] Mongo / ORM codegen / Proto / graph codecs; n-ary relations (ends reserves the slot); entity
+    inheritance beyond abstract roots; single-table inheritance projection (@Pg.singleTable).
+[ ] Derived family beyond isMerge: §9.1 representation views, §9.2 @closure, §9.4 derived to-one,
+    @derived stored + sink-side maintenance. Extras (§9.5) itself is v1 (fingerprinted).
+[ ] Migrations tiers 2/3 (defer to ORM tooling; real diff/ALTER later). Partial Update op w/ mask.
+[ ] Bundled no-Node authoring binary. Native Rust .tsp front-end (optional; catalog stays the input).
+[ ] SQL FK policy — decide during Step 3/4 with entl's real DDL + stream ordering in front of us
+    (provisional: deferred FKs on acyclic assoc / bare columns on cycles / cascade on composition).

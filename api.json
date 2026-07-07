@@ -1,0 +1,681 @@
+{
+  "fluessig": {
+    "format": 0,
+    "emitter": "0.0.0",
+    "compiler": "1.13.0"
+  },
+  "source": "entl.tsp",
+  "models": [
+    {
+      "name": "GitStats",
+      "doc": "What one git load produced.",
+      "fields": [
+        {
+          "name": "newCommits",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "fileChanges",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "refs",
+          "type": "int64",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "GithubStats",
+      "doc": "What one GitHub load produced.",
+      "fields": [
+        {
+          "name": "events",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "pullRequests",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "reviews",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "reviewComments",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "issues",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "comments",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "workflowRuns",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "checkRuns",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "users",
+          "type": "int64",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "SinkStats",
+      "doc": "What a sink() cycle produced: git + forge counts, and rows applied to the target.",
+      "fields": [
+        {
+          "name": "newCommits",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "fileChanges",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "refs",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "pullRequests",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "issues",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "events",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "workflowRuns",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "checkRuns",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "rows",
+          "type": "int64",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "FileDiff",
+      "doc": "One changed file between two commits.",
+      "fields": [
+        {
+          "name": "path",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "oldPath",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": {
+            "enum": "FileStatus"
+          },
+          "nullable": false
+        },
+        {
+          "name": "additions",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "deletions",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "patch",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "ChangeBatch",
+      "doc": "One change-stream batch. The rows stay columnar (Arrow): `ipc` yields them as\none Arrow IPC stream (a single RecordBatch, schema included), and the Python\nclass additionally speaks the Arrow PyCapsule protocol for zero-copy import\n(`pa.record_batch(batch)`). Values are native Arrow types — oids are Binary,\ntimestamps Timestamp(µs) — unlike query()/extract()'s canonical JSON (hex\noids, RFC3339). No per-row `_op`: `op`/`table` ride this envelope.",
+      "fields": [
+        {
+          "name": "table",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "op",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "ipc",
+          "type": "ArrowBatch",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "Statement",
+      "doc": "One driver-plan statement: the host runs it verbatim against its own client.",
+      "fields": [
+        {
+          "name": "sql",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "params",
+          "type": "Json",
+          "nullable": false
+        },
+        {
+          "name": "table",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "TableRename",
+      "doc": null,
+      "fields": [
+        {
+          "name": "from",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "to",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "SinkOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "target",
+          "type": {
+            "enum": "SinkTarget"
+          },
+          "nullable": false
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "github",
+          "type": "boolean",
+          "nullable": true
+        },
+        {
+          "name": "tables",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "exclude",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "rename",
+          "type": {
+            "list": {
+              "model": "TableRename"
+            }
+          },
+          "nullable": true
+        },
+        {
+          "name": "schema",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "objects",
+          "type": "boolean",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "ExtractOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "source",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "tables",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "schema",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "RebuildOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "source",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "dest",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "out",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "schema",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "ChangesOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "github",
+          "type": "boolean",
+          "nullable": true
+        },
+        {
+          "name": "objects",
+          "type": "boolean",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "DriverPlanOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "tables",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "exclude",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "rename",
+          "type": {
+            "list": {
+              "model": "TableRename"
+            }
+          },
+          "nullable": true
+        },
+        {
+          "name": "schema",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "Git",
+      "doc": "Stateless, repo-scoped git helpers (no database handle). All unary.",
+      "ops": [
+        {
+          "name": "diffCommits",
+          "doc": "Diff two commits (`base...head` when threeDot).",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "base",
+              "type": "string"
+            },
+            {
+              "name": "head",
+              "type": "string"
+            },
+            {
+              "name": "threeDot",
+              "type": "boolean"
+            }
+          ],
+          "returns": {
+            "list": {
+              "model": "FileDiff"
+            }
+          }
+        },
+        {
+          "name": "fileAt",
+          "doc": "A file's content at a commit — null when absent or binary.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "commit",
+              "type": "string"
+            },
+            {
+              "name": "path",
+              "type": "string"
+            }
+          ],
+          "returns": {
+            "nullable": "string"
+          }
+        },
+        {
+          "name": "branchExists",
+          "doc": null,
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "name",
+              "type": "string"
+            }
+          ],
+          "returns": "boolean"
+        },
+        {
+          "name": "currentBranch",
+          "doc": null,
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            }
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "commitBodies",
+          "doc": "Commit subjects+bodies along a branch (JSON).",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "branch",
+              "type": "string"
+            }
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "lsRemoteHeads",
+          "doc": "Remote branch names matching a pattern (trailing-`*` glob). Fetches first.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "pattern",
+              "type": "string"
+            }
+          ],
+          "returns": {
+            "list": "string"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Entl",
+      "doc": "An open entl database. Heavy ops are unary (off-thread in async hosts).",
+      "ops": [
+        {
+          "name": "open",
+          "doc": "Open (or create) the .duckdb at `dbPath` and apply the schema.",
+          "shape": "ctor",
+          "params": [
+            {
+              "name": "dbPath",
+              "type": "string"
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "loadGit",
+          "doc": "Load git history from `repoPath` (one-way, incremental).",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            }
+          ],
+          "returns": {
+            "model": "GitStats"
+          }
+        },
+        {
+          "name": "loadGithub",
+          "doc": "Load GitHub data (events/PRs/issues/Actions). Needs a token.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            }
+          ],
+          "returns": {
+            "model": "GithubStats"
+          }
+        },
+        {
+          "name": "query",
+          "doc": "Run a SQL query; JSON rows back.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "sql",
+              "type": "string"
+            }
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "queryArrow",
+          "doc": "Run a SQL query; the result as one Arrow IPC stream (schema + all batches) —\nthe dataframe on-ramp (pyarrow → pandas/polars, apache-arrow JS, red-arrow).",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "sql",
+              "type": "string"
+            }
+          ],
+          "returns": "bytes"
+        },
+        {
+          "name": "sink",
+          "doc": "Pull `repoPath` and sync it into a target store, in one call.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "options",
+              "type": {
+                "model": "SinkOptions"
+              }
+            }
+          ],
+          "returns": {
+            "model": "SinkStats"
+          }
+        },
+        {
+          "name": "extract",
+          "doc": "Read a store back into canonical rows (JSON; oids hex, timestamps RFC3339).",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "options",
+              "type": {
+                "model": "ExtractOptions"
+              }
+            }
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "changes",
+          "doc": "Stream the change batches from one pull (the stream plane).",
+          "shape": "stream",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "options",
+              "type": {
+                "model": "ChangesOptions"
+              },
+              "optional": true
+            }
+          ],
+          "returns": {
+            "model": "ChangeBatch"
+          }
+        },
+        {
+          "name": "driverPlan",
+          "doc": "Backfill this store into a driver target: stream {sql, params} for the host to execute.",
+          "shape": "stream",
+          "params": [
+            {
+              "name": "options",
+              "type": {
+                "model": "DriverPlanOptions"
+              },
+              "optional": true
+            }
+          ],
+          "returns": {
+            "model": "Statement"
+          }
+        },
+        {
+          "name": "rebuild",
+          "doc": "Reconstruct a git repo from a store (needs objects: true at sink time). Returns commits rebuilt.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "options",
+              "type": {
+                "model": "RebuildOptions"
+              }
+            }
+          ],
+          "returns": "int64"
+        },
+        {
+          "name": "watch",
+          "doc": "Poll-loop sync with a host callback (ThreadsafeFunction / GVL re-entry) — hand-written per binding.",
+          "shape": "manual",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "intervalSecs",
+              "type": "int32"
+            }
+          ],
+          "returns": "void"
+        }
+      ]
+    }
+  ]
+}

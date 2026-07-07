@@ -1,0 +1,105 @@
+{
+  "models": [
+    {
+      "name": "GitStats",
+      "doc": "What one git load produced.",
+      "fields": [
+        {
+          "name": "newCommits",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "fileChanges",
+          "type": "int64",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "ChangeBatch",
+      "doc": "One change-stream batch (rows as JSON until Arrow FFI lands).",
+      "fields": [
+        {
+          "name": "table",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "op",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "rowsJson",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "Entl",
+      "doc": "An open entl database.",
+      "ops": [
+        {
+          "name": "open",
+          "doc": "Open (or create) the store at `dbPath` and apply the schema.",
+          "shape": "ctor",
+          "params": [
+            {
+              "name": "dbPath",
+              "type": "string"
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "loadGit",
+          "doc": "Load git history from `repoPath` (one-way, incremental).",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            }
+          ],
+          "returns": {
+            "model": "GitStats"
+          }
+        },
+        {
+          "name": "query",
+          "doc": "Run a SQL query; JSON rows back.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "sql",
+              "type": "string"
+            }
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "changes",
+          "doc": "Stream the change batches from one pull of `repoPath`.",
+          "shape": "stream",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "github",
+              "type": "boolean"
+            }
+          ],
+          "returns": {
+            "model": "ChangeBatch"
+          }
+        }
+      ]
+    }
+  ]
+}

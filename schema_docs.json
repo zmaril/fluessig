@@ -1,0 +1,1816 @@
+[
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": "object id — the content hash (binary; hex via `lower(hex(oid))`). Globally unique, so the family key is oid alone.",
+        "name": "oid",
+        "notNull": true,
+        "pk": true,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": "the repo this object was seen in (an association, not a key member)",
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "size",
+        "notNull": true,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": "false",
+        "desc": null,
+        "name": "is_binary",
+        "notNull": true,
+        "pk": false,
+        "type": "boolean"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "content_text",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "content_sha",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "raw file bytes (object ingest / --objects); enables `entl rebuild`",
+        "name": "content",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      }
+    ],
+    "desc": null,
+    "name": "blobs"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "commit_oid",
+        "notNull": true,
+        "pk": true,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "idx",
+        "notNull": true,
+        "pk": true,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "parent_oid",
+        "notNull": true,
+        "pk": false,
+        "type": "blob"
+      }
+    ],
+    "desc": "this commit's parents, ordered by `idx` (merges have several)",
+    "name": "commit_parents"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": "object id — the content hash (binary; hex via `lower(hex(oid))`). Globally unique, so the family key is oid alone.",
+        "name": "oid",
+        "notNull": true,
+        "pk": true,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": "the repo this object was seen in (an association, not a key member)",
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "root tree this commit points at",
+        "name": "tree_oid",
+        "notNull": true,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": "full commit message",
+        "name": "message",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "first line of the message",
+        "name": "summary",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "author_name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "author_email",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "author_when",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "author_tz",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "committer_name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "committer_email",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "committer_when",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "committer_tz",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": "0",
+        "desc": null,
+        "name": "parent_count",
+        "notNull": true,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": "false",
+        "desc": "The §9.3 v1 carve-out: a REAL derived field — true iff a second parent\nexists. Today it is ALSO a stored column (the source computes it; parity\nwith the hand-written templates) and the codec additionally emits a\n`commits_derived` view computing it from `parents`. At the Step-5 swap the\nstored column drops and the view becomes the only projection.",
+        "name": "is_merge",
+        "notNull": true,
+        "pk": false,
+        "type": "boolean"
+      },
+      {
+        "def": "false",
+        "desc": null,
+        "name": "gpg_signed",
+        "notNull": true,
+        "pk": false,
+        "type": "boolean"
+      }
+    ],
+    "desc": "One row per commit, walked from every ref. Author and committer time/identity\nare kept separate; `summary` is the first line of `message`.",
+    "name": "commits"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "hex text today, while every other oid column is blob — schema inconsistency, FINDINGS #8",
+        "name": "merge_oid",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "path",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "unresolved",
+        "notNull": true,
+        "pk": false,
+        "type": "boolean"
+      }
+    ],
+    "desc": "Merge-conflict hot zones (the north star). Populated by the `entl conflicts`\npass: replay every historical 2-parent merge with gix's 3-way tree merge and\nrecord the paths that conflicted. `unresolved` = git would have required a\nhuman, vs auto-resolved.",
+    "name": "conflicts"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "commit_oid",
+        "notNull": true,
+        "pk": true,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "path",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "old_path",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "status",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "additions",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "deletions",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "blob_oid",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "old_blob_oid",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      }
+    ],
+    "desc": "Per-commit file changes — a WEAK ENTITY: identified by (owner, path), no\nglobal id of its own. Authored as an entity with FK-in-PK; whether it should\n*also* be a",
+    "name": "file_changes"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "subject_type",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "subject_number",
+        "notNull": true,
+        "pk": true,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "user_id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      }
+    ],
+    "desc": null,
+    "name": "gh_assignees"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "commit_oid",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "status",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "conclusion",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "started_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "completed_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": null,
+    "name": "gh_check_runs"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "subject_type",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "the (type, key) pair: (subject_type, repo_id + subject_number)",
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "the (type, key) pair: (subject_type, repo_id + subject_number)",
+        "name": "subject_number",
+        "notNull": true,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "author_id",
+        "notNull": false,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "body",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": "Issue/PR comments — subject is a polymorphic reference into the GhSubject family.",
+    "name": "gh_comments"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "commit_oid",
+        "notNull": true,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "context",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "state",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "description",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "target_url",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": null,
+    "name": "gh_commit_statuses"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "type",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "denormalized pair: the association + a plain login column (FINDINGS #9)",
+        "name": "actor_id",
+        "notNull": false,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "actor_login",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": "the event's type-specific JSON",
+        "name": "payload",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "Raw GitHub event stream (the /events feed) — entl's \"did anything happen?\"\nsignal AND a queryable activity log. The feed is capped (~300 events / 90\ndays): complete going FORWARD from when polling starts.",
+    "name": "gh_events"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "number",
+        "notNull": true,
+        "pk": true,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "title",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "body",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "state",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "author_id",
+        "notNull": false,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "updated_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "closed_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": null,
+    "name": "gh_issues"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "run_id",
+        "notNull": true,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "status",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "conclusion",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "started_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "completed_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "runner_name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": null,
+    "name": "gh_jobs"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "subject_type",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "subject_number",
+        "notNull": true,
+        "pk": true,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "label_name",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      }
+    ],
+    "desc": null,
+    "name": "gh_labeled"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "color",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "description",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": null,
+    "name": "gh_labels"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "pr_number",
+        "notNull": true,
+        "pk": true,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "commit_oid",
+        "notNull": true,
+        "pk": true,
+        "type": "blob"
+      }
+    ],
+    "desc": "plain join table (PK = all columns): the PR's commits",
+    "name": "gh_pr_commits"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": "multi-column FK to a composite-keyed entity (repo_id, pr_number)",
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "multi-column FK to a composite-keyed entity (repo_id, pr_number)",
+        "name": "pr_number",
+        "notNull": true,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "reviewer_id",
+        "notNull": false,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "state",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "submitted_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "body",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "PR reviews — globally id-keyed, referencing the PR by its composite key.",
+    "name": "gh_pr_reviews"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "number",
+        "notNull": true,
+        "pk": true,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "title",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "body",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "state",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "author_id",
+        "notNull": false,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "updated_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "closed_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "merged_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "merge_commit_oid",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "head_ref",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "base_ref",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "additions",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "deletions",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "changed_files",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": "false",
+        "desc": null,
+        "name": "is_draft",
+        "notNull": true,
+        "pk": false,
+        "type": "boolean"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "mergeable",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "head commit CI rollup: SUCCESS | FAILURE | PENDING | … (open set — stays text)",
+        "name": "checks",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "PR head commit (for base...head diffs)",
+        "name": "head_oid",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": "base branch tip at fetch time",
+        "name": "base_oid",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      }
+    ],
+    "desc": "Pull requests and their lifecycle. `mergeable` + `checks` are the live\nconflict and CI signals; head/base oids drive on-demand base...head diffs.",
+    "name": "gh_pull_requests"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "pr_number",
+        "notNull": true,
+        "pk": true,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "user_id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      }
+    ],
+    "desc": "plain join table: requested reviewers",
+    "name": "gh_requested_reviewers"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "pr_number",
+        "notNull": true,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "path",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "line",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "side",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "commit_oid",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "author_id",
+        "notNull": false,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "body",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": "threaded replies — a nullable self-association",
+        "name": "in_reply_to",
+        "notNull": false,
+        "pk": false,
+        "type": "bigint"
+      }
+    ],
+    "desc": null,
+    "name": "gh_review_comments"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "job_id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "number",
+        "notNull": true,
+        "pk": true,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "status",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "conclusion",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "started_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "completed_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": "Weak entity again: a step is (job, number), no global id.",
+    "name": "gh_steps"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "login",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "type",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": null,
+    "name": "gh_users"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "workflow_id",
+        "notNull": false,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "head_oid",
+        "notNull": false,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "head_branch",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "event",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "status",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "conclusion",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "run_number",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "run_attempt",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "updated_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "run_started_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": null,
+    "name": "gh_workflow_runs"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "path",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "state",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": null,
+    "name": "gh_workflows"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "full notes ref name, e.g. `refs/notes/commits`",
+        "name": "notes_ref",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "the object the note annotates (usually a commit)",
+        "name": "annotated_oid",
+        "notNull": true,
+        "pk": true,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "note",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "A git note (`refs/notes/*`): free-form text attached to any object after the\nfact, without rewriting it. Mutable per-repo state like refs — each sync\nreplaces the repo's rows. The default ref is `refs/notes/commits`; other\nnamespaces ride the notesRef column.",
+    "name": "git_notes"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "repo_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "short ref name, e.g. `main` or `origin/main`",
+        "name": "name",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "kind",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Today: implicitly commit-typed (no discriminator column). The honest model\nis `target: GitObject` — an annotated-tag ref targets a tag object, not a\ncommit — but that adds a target_type column, i.e. a real schema change.\nAuthored as Commit for byte parity; the upgrade is FINDINGS #7.",
+        "name": "target_oid",
+        "notNull": true,
+        "pk": false,
+        "type": "blob"
+      },
+      {
+        "def": "false",
+        "desc": null,
+        "name": "is_symbolic",
+        "notNull": true,
+        "pk": false,
+        "type": "boolean"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "upstream",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "Branches, tags, remote-tracking refs, and HEAD — one row each.",
+    "name": "refs"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "path",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "remote_url",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "host",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "owner",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "from the forge (`repos/{o}/{r}`), when a GitHub sync has run",
+        "name": "default_branch",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "the repo's homepage URL from the forge, when set",
+        "name": "homepage_url",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "first_synced_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "last_synced_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": "A repository entl has synced.",
+    "name": "repos"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "resource",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "cursor",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "etag",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "watermark",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "last_synced_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "last_error",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "Per-resource sync bookkeeping (etags, cursors, watermarks).",
+    "name": "sync_state"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "tree_oid",
+        "notNull": true,
+        "pk": true,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "path",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "mode",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "entry_type",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "child_oid",
+        "notNull": true,
+        "pk": false,
+        "type": "blob"
+      }
+    ],
+    "desc": "The polymorphic edge already in production: tree_entries stores the\n(type, key) pair as (entry_type, child_oid) — exactly DESIGN §2's\nprojection of a polymorphic association.",
+    "name": "tree_entries"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": "object id — the content hash (binary; hex via `lower(hex(oid))`). Globally unique, so the family key is oid alone.",
+        "name": "oid",
+        "notNull": true,
+        "pk": true,
+        "type": "blob"
+      },
+      {
+        "def": null,
+        "desc": "the repo this object was seen in (an association, not a key member)",
+        "name": "repo_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": null,
+    "name": "trees"
+  }
+]

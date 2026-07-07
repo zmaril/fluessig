@@ -1,0 +1,3 @@
+# spike scratch — installs are per-machine, outputs are committed for reference
+node_modules/
+package-lock.json

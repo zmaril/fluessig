@@ -1,4 +1,4 @@
-//! ORM read-plane codegen (plan.txt Step 5) — the catalog projected into
+//! ORM read-plane codegen (notes/plan.txt Step 5) — the catalog projected into
 //! committed language artifacts, via **genco** (whitespace-aware quasi-quoting
 //! with automatic import management):
 //!

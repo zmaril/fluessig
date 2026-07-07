@@ -1,4 +1,4 @@
-//! The SQL DDL back-end (plan.txt Step 3) — project a validated [`Catalog`] into
+//! The SQL DDL back-end (notes/plan.txt Step 3) — project a validated [`Catalog`] into
 //! per-table DDL for all three dialects. The parity gate (`tests/sql_parity.rs`)
 //! holds the output against entl's hand-written templates in every dialect.
 //!

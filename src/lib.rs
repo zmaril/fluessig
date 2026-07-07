@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod codegen;
 pub mod data;
 pub mod ir;
+pub mod observe;
 pub mod rustfmt;
 pub mod sql;
 

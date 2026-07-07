@@ -1,40 +1,114 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://fluessig.dev/schemas/catalog.v0.json",
-  "title": "fluessig catalog.json (format 0)",
+  "$id": "https://fluessig.dev/schemas/catalog.v1.json",
+  "title": "fluessig catalog.json (format 1)",
   "description": "The model layer lowered from a .tsp: Layer A records + Layer B relations. The interchange the Rust loader/validator and every schema codec consume.",
   "type": "object",
-  "required": ["fluessig", "scalars", "enums", "entities", "relationProperties", "valueStructs"],
+  "required": [
+    "fluessig",
+    "scalars",
+    "enums",
+    "unions",
+    "entities",
+    "relationProperties",
+    "valueStructs"
+  ],
   "additionalProperties": false,
   "properties": {
-    "fluessig": { "$ref": "#/$defs/versions" },
-    "source": { "type": "string" },
+    "fluessig": {
+      "$ref": "#/$defs/versions"
+    },
+    "source": {
+      "type": "string"
+    },
     "scalars": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "additionalProperties": false,
-        "properties": { "name": { "type": "string" }, "base": { "type": "string" } }
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "unions": {
+      "type": "array",
+      "description": "Named tagged unions. The variant tag is the wire discriminator.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "variants"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "doc": {
+            "type": "string"
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "tag",
+                "type"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "tag": {
+                  "type": "string"
+                },
+                "type": {
+                  "$ref": "#/$defs/typeRef"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "enums": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "variants"],
+        "required": [
+          "name",
+          "variants"
+        ],
         "additionalProperties": false,
         "properties": {
-          "name": { "type": "string" },
+          "name": {
+            "type": "string"
+          },
           "variants": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["name"],
+              "required": [
+                "name"
+              ],
               "additionalProperties": false,
               "properties": {
-                "name": { "type": "string" },
-                "value": { "type": ["string", "number"] }
+                "name": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "number"
+                  ]
+                }
               }
             }
           }
@@ -45,16 +119,40 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "key", "fields"],
+        "required": [
+          "name",
+          "key",
+          "fields"
+        ],
         "additionalProperties": false,
         "properties": {
-          "name": { "type": "string" },
-          "table": { "type": "string" },
-          "abstract": { "const": true },
-          "extends": { "type": "string" },
-          "key": { "type": "array", "items": { "type": "string" } },
-          "doc": { "type": "string" },
-          "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } }
+          "name": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          },
+          "abstract": {
+            "const": true
+          },
+          "extends": {
+            "type": "string"
+          },
+          "key": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "doc": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/field"
+            }
+          }
         }
       }
     },
@@ -62,12 +160,24 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "fields"],
+        "required": [
+          "name",
+          "fields"
+        ],
         "additionalProperties": false,
         "properties": {
-          "name": { "type": "string" },
-          "doc": { "type": "string" },
-          "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } }
+          "name": {
+            "type": "string"
+          },
+          "doc": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/field"
+            }
+          }
         }
       }
     },
@@ -75,12 +185,24 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "fields"],
+        "required": [
+          "name",
+          "fields"
+        ],
         "additionalProperties": false,
         "properties": {
-          "name": { "type": "string" },
-          "doc": { "type": "string" },
-          "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } }
+          "name": {
+            "type": "string"
+          },
+          "doc": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/field"
+            }
+          }
         }
       }
     }
@@ -88,88 +210,234 @@
   "$defs": {
     "versions": {
       "type": "object",
-      "required": ["format"],
+      "required": [
+        "format"
+      ],
       "properties": {
-        "format": { "const": 0 },
-        "emitter": { "type": "string" },
-        "compiler": { "type": "string" }
+        "format": {
+          "const": 1
+        },
+        "emitter": {
+          "type": "string"
+        },
+        "compiler": {
+          "type": "string"
+        }
       }
     },
     "typeRef": {
       "oneOf": [
         {
           "type": "object",
-          "required": ["k", "name"],
+          "required": [
+            "k",
+            "name"
+          ],
           "additionalProperties": false,
           "properties": {
-            "k": { "const": "scalar" },
-            "name": { "type": "string" },
-            "base": { "type": "string" }
+            "k": {
+              "const": "scalar"
+            },
+            "name": {
+              "type": "string"
+            },
+            "base": {
+              "type": "string"
+            }
           }
         },
         {
           "type": "object",
-          "required": ["k", "name", "entity"],
+          "required": [
+            "k",
+            "name",
+            "entity"
+          ],
           "additionalProperties": false,
           "properties": {
-            "k": { "const": "ref" },
-            "name": { "type": "string" },
-            "entity": { "type": "boolean" }
+            "k": {
+              "const": "ref"
+            },
+            "name": {
+              "type": "string"
+            },
+            "entity": {
+              "type": "boolean"
+            }
           }
         },
         {
           "type": "object",
-          "required": ["k", "name"],
+          "required": [
+            "k",
+            "name"
+          ],
           "additionalProperties": false,
-          "properties": { "k": { "const": "enum" }, "name": { "type": "string" } }
+          "properties": {
+            "k": {
+              "const": "enum"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
         },
         {
           "type": "object",
-          "required": ["k", "of"],
+          "required": [
+            "k",
+            "of"
+          ],
           "additionalProperties": false,
-          "properties": { "k": { "const": "list" }, "of": { "$ref": "#/$defs/typeRef" } }
+          "properties": {
+            "k": {
+              "const": "list"
+            },
+            "of": {
+              "$ref": "#/$defs/typeRef"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "k",
+            "name"
+          ],
+          "additionalProperties": false,
+          "description": "a named tagged-union reference (variants live in the top-level unions section)",
+          "properties": {
+            "k": {
+              "const": "union"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
         }
       ]
     },
     "field": {
       "type": "object",
-      "required": ["name", "type", "nullable"],
+      "required": [
+        "name",
+        "type",
+        "nullable"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string" },
-        "type": { "$ref": "#/$defs/typeRef" },
-        "nullable": { "type": "boolean" },
-        "doc": { "type": "string" },
-        "key": { "const": true },
-        "column": { "type": "string" },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/typeRef"
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "doc": {
+          "type": "string"
+        },
+        "key": {
+          "const": true
+        },
+        "column": {
+          "type": "string"
+        },
         "default": {},
         "derived": {
           "type": "object",
-          "required": ["agg", "of"],
+          "required": [
+            "agg",
+            "of"
+          ],
           "additionalProperties": false,
           "properties": {
-            "agg": { "enum": ["exists", "count"] },
-            "of": { "type": "string" },
-            "filter": { "type": ["object", "null"] }
+            "agg": {
+              "enum": [
+                "exists",
+                "count"
+              ]
+            },
+            "of": {
+              "type": "string"
+            },
+            "filter": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
           }
         },
-        "relation": { "$ref": "#/$defs/relation" }
+        "relation": {
+          "$ref": "#/$defs/relation"
+        }
       }
     },
     "relation": {
       "type": "object",
-      "required": ["to", "cardinality", "kind"],
+      "required": [
+        "to",
+        "cardinality",
+        "kind"
+      ],
       "additionalProperties": false,
       "properties": {
-        "to": { "type": "string" },
-        "cardinality": { "enum": ["one", "many"] },
-        "kind": { "enum": ["association", "composition"] },
-        "properties": { "type": ["string", "null"] },
-        "table": { "type": "string" },
-        "fkColumns": { "type": ["array", "null"], "items": { "type": "string" } },
-        "typeColumn": { "type": ["string", "null"] },
-        "sourceColumns": { "type": ["array", "null"], "items": { "type": "string" } },
-        "sourceTypeColumn": { "type": ["string", "null"] }
+        "to": {
+          "type": "string"
+        },
+        "cardinality": {
+          "enum": [
+            "one",
+            "many"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "association",
+            "composition"
+          ]
+        },
+        "properties": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "table": {
+          "type": "string"
+        },
+        "fkColumns": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "typeColumn": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceColumns": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sourceTypeColumn": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     }
   }

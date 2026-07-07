@@ -126,6 +126,9 @@ fn ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
             let (r, t) = ty(api, nullable);
             (format!("Option<{r}>"), format!("{t} | null"))
         }
+        // a tagged union crosses the FFI as its JSON envelope text
+        // `{"kind": tag, "payload": body}` — the same carrier as `Json`
+        ApiType::Union { .. } => ("String".into(), "string".into()),
     }
 }
 

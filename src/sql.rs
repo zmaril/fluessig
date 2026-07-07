@@ -116,8 +116,10 @@ fn sql_type(dialect: Dialect, ty: &TypeRef) -> String {
             .unwrap_or("text")
             .to_string(),
         TypeRef::Enum { .. } => "text".to_string(), // enums store their wire value
-        // nesting → a json column (sqlite has no json type: text)
-        TypeRef::Ref { .. } | TypeRef::List { .. } => match dialect {
+        // nesting → a json column (sqlite has no json type: text). A union's
+        // payload column types the same way; its kind column is plain text
+        // (the twin-column lowering lives in `tables`).
+        TypeRef::Ref { .. } | TypeRef::List { .. } | TypeRef::Union { .. } => match dialect {
             Dialect::Postgres => "jsonb".to_string(),
             Dialect::Duckdb => "json".to_string(),
             Dialect::Sqlite => "text".to_string(),
@@ -181,6 +183,16 @@ pub fn tables(c: &Catalog, d: Dialect) -> BTreeMap<String, TableDef> {
         for f in c.flattened_fields(e) {
             match &f.relation {
                 None => {
+                    // tagged union → twin columns: `<col>_kind` (the variant tag)
+                    // + `<col>` (the variant body as json)
+                    if let TypeRef::Union { name } = &f.ty {
+                        let base = col_name(f);
+                        let kind = t.column(format!("{base}_kind"), "text", !f.nullable);
+                        kind.doc = Some(format!("discriminator for {base} (a {name} variant tag)"));
+                        let col = t.column(base, sql_type(d, &f.ty), !f.nullable);
+                        col.doc = f.doc.clone();
+                        continue;
+                    }
                     let col = t.column(col_name(f), sql_type(d, &f.ty), !f.nullable);
                     col.default = f.default.as_ref().map(sql_literal);
                     col.doc = f.doc.clone();
@@ -268,6 +280,16 @@ pub fn tables(c: &Catalog, d: Dialect) -> BTreeMap<String, TableDef> {
             let mut prop_key = Vec::new();
             if let Some(props) = rel.properties.as_deref().and_then(|p| c.edge_struct(p)) {
                 for pf in &props.fields {
+                    // union edge property → the same twin columns as entity fields
+                    if let TypeRef::Union { name: uname } = &pf.ty {
+                        let base = col_name(pf);
+                        let kind = t.column(format!("{base}_kind"), "text", !pf.nullable);
+                        kind.doc =
+                            Some(format!("discriminator for {base} (a {uname} variant tag)"));
+                        let col = t.column(base, sql_type(d, &pf.ty), !pf.nullable);
+                        col.doc = pf.doc.clone();
+                        continue;
+                    }
                     let col = t.column(col_name(pf), sql_type(d, &pf.ty), !pf.nullable);
                     col.default = pf.default.as_ref().map(sql_literal);
                     col.doc = pf.doc.clone();

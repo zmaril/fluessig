@@ -21,7 +21,9 @@ import { resolve, dirname, basename } from "path";
 import { writeFileSync } from "fs";
 
 // ── the frozen catalog/api format version (bump on any shape change) ──
-export const FORMAT_VERSION = 0;
+// format 1: named tagged unions (`unions` sections; `{k:"union", name}` /
+// `{union: name}` type references).
+export const FORMAT_VERSION = 1;
 
 const require = createRequire(import.meta.url);
 const versions = {
@@ -67,6 +69,10 @@ export async function emit(inputPath, outDir) {
       case "Enum":
         return { k: "enum", name: t.name };
       case "Union":
+        // A NAMED union is a declared tagged union — reference it; its variants
+        // live in the catalog/api `unions` section. Anonymous unions survive
+        // only as the op layer's `T | null` (lowered in apiTypeOfRef).
+        if (t.name) return { k: "union", name: t.name };
         return { k: "union", of: [...t.variants.values()].map((v) => typeRef(v.type)) };
       case "Intrinsic":
         return t.name; // "void" / "null"
@@ -121,6 +127,12 @@ export async function emit(inputPath, outDir) {
     fluessig: versions,
     source: basename(input),
     scalars: [...global.scalars.values()].map((s) => ({ name: s.name, base: s.baseScalar?.name })),
+    // named tagged unions: the variant NAME is the wire discriminator tag
+    unions: [...global.unions.values()].map((u) => ({
+      name: u.name,
+      doc: getDoc(program, u) ?? undefined,
+      variants: [...u.variants.values()].map((v) => ({ tag: v.name, type: typeRef(v.type) })),
+    })),
     enums: [...global.enums.values()].map((e) => ({
       name: e.name,
       // {name, value}: `value` is the stored wire value when it differs from the name
@@ -151,7 +163,9 @@ export async function emit(inputPath, outDir) {
   const apiTypeOfRef = (ty) => {
     if (typeof ty === "string") return ty; // void / null
     if (ty.k === "union") {
-      // `T | null` → a nullable T (the one union the op surface supports)
+      // a NAMED union → a tagged-union reference (variants ride in api.unions)
+      if (ty.name) return { union: ty.name };
+      // `T | null` → a nullable T (the one anonymous union the op surface supports)
       const parts = ty.of.filter((v) => v !== "null");
       if (parts.length === 1 && ty.of.length === 2) return { nullable: apiTypeOfRef(parts[0]) };
       throw new Error(`unsupported union in API surface: ${JSON.stringify(ty)}`);
@@ -183,29 +197,39 @@ export async function emit(inputPath, outDir) {
     })),
   }));
 
-  const referenced = new Set(
-    interfaces.flatMap((i) =>
-      i.ops.flatMap((op) =>
-        [...op.params.map((p) => p.type), op.returns]
-          .flatMap((t) => (typeof t === "object" ? [t.model ?? t.list?.model] : []))
-          .filter(Boolean),
-      ),
-    ),
-  );
-  // transitive: models referenced by referenced models' fields (e.g. SinkOptions.rename -> TableRename)
+  const referenced = new Set();
+  const referencedUnions = new Set();
+  // seed from op params/returns (already api-typed: {model} / {union} / {list} / {nullable})
+  const seedApiType = (t) => {
+    if (typeof t !== "object" || t === null) return;
+    if (t.model) referenced.add(t.model);
+    if (t.union) referencedUnions.add(t.union);
+    if (t.list) seedApiType(t.list);
+    if (t.nullable) seedApiType(t.nullable);
+  };
+  for (const i of interfaces) for (const op of i.ops) [...op.params.map((p) => p.type), op.returns].forEach(seedApiType);
+  // transitive: models referenced by referenced models' fields (e.g. SinkOptions.rename
+  // -> TableRename), unions referenced by fields, and models referenced by union variants
   const allModels = [...catalog.valueStructs, ...catalog.entities];
+  const unionByName = Object.fromEntries(catalog.unions.map((u) => [u.name, u]));
   let grew = true;
+  const addTypeRef = (ty) => {
+    const inner = ty.k === "list" ? ty.of : ty;
+    if (inner.k === "ref" && !referenced.has(inner.name)) {
+      referenced.add(inner.name);
+      grew = true;
+    }
+    if (inner.k === "union" && inner.name && !referencedUnions.has(inner.name)) {
+      referencedUnions.add(inner.name);
+      grew = true;
+    }
+  };
   while (grew) {
     grew = false;
-    for (const m of allModels.filter((m) => referenced.has(m.name))) {
-      for (const f of m.fields) {
-        const inner = f.type.k === "list" ? f.type.of : f.type;
-        if (inner.k === "ref" && !referenced.has(inner.name)) {
-          referenced.add(inner.name);
-          grew = true;
-        }
-      }
-    }
+    for (const m of allModels.filter((m) => referenced.has(m.name)))
+      for (const f of m.fields) addTypeRef(f.type);
+    for (const u of catalog.unions.filter((u) => referencedUnions.has(u.name)))
+      for (const v of u.variants) addTypeRef(v.type);
   }
   const api = {
     fluessig: versions,
@@ -221,6 +245,14 @@ export async function emit(inputPath, outDir) {
           nullable: f.nullable,
         })),
       })),
+    unions: [...referencedUnions].sort().map((name) => {
+      const u = unionByName[name];
+      return {
+        name: u.name,
+        doc: u.doc ?? null,
+        variants: u.variants.map((v) => ({ tag: v.tag, type: apiTypeOfRef(v.type) })),
+      };
+    }),
     interfaces,
   };
 

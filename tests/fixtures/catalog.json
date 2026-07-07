@@ -1,0 +1,159 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "0.0.0",
+    "compiler": "1.13.0"
+  },
+  "source": "union.tsp",
+  "scalars": [],
+  "unions": [
+    {
+      "name": "EventPayload",
+      "doc": "One observation's body — the union's variant tag is the wire discriminator.",
+      "variants": [
+        {
+          "tag": "message",
+          "type": {
+            "k": "ref",
+            "name": "AgentMessage",
+            "entity": false
+          }
+        },
+        {
+          "tag": "log",
+          "type": {
+            "k": "ref",
+            "name": "LogLine",
+            "entity": false
+          }
+        },
+        {
+          "tag": "exit",
+          "type": {
+            "k": "ref",
+            "name": "ExitInfo",
+            "entity": false
+          }
+        }
+      ]
+    }
+  ],
+  "enums": [],
+  "entities": [
+    {
+      "name": "Event",
+      "table": "events",
+      "key": [
+        "sessionUid",
+        "idx"
+      ],
+      "fields": [
+        {
+          "name": "sessionUid",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "idx",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "ts",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": false
+        },
+        {
+          "name": "payload",
+          "type": {
+            "k": "union",
+            "name": "EventPayload"
+          },
+          "nullable": false,
+          "doc": "The observation body (twin columns: payload_kind + payload)."
+        },
+        {
+          "name": "note",
+          "type": {
+            "k": "union",
+            "name": "EventPayload"
+          },
+          "nullable": true,
+          "doc": "A nullable union — both twins nullable."
+        }
+      ]
+    }
+  ],
+  "relationProperties": [],
+  "valueStructs": [
+    {
+      "name": "AgentMessage",
+      "doc": "Something an agent said.",
+      "fields": [
+        {
+          "name": "role",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "text",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "LogLine",
+      "fields": [
+        {
+          "name": "line",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "ExitInfo",
+      "fields": [
+        {
+          "name": "code",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false
+        },
+        {
+          "name": "reason",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        }
+      ]
+    }
+  ]
+}

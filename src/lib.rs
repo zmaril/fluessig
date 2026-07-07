@@ -18,8 +18,9 @@ pub mod sql;
 pub use catalog::{load_catalog, load_catalog_file, Diagnostics};
 pub use ir::{
     Cardinality, Catalog, Derived, Entity, EnumDef, Field, RelKind, Relation, Scalar, Struct,
-    TypeRef,
+    TypeRef, UnionDef, UnionVariant,
 };
 
-/// The `catalog.json` / `api.json` format this crate reads (must match the emitter's stamp).
-pub const FORMAT_VERSION: u64 = 0;
+/// The `catalog.json` / `api.json` format this crate reads (must match the
+/// emitter's stamp). Format 1: named tagged unions.
+pub const FORMAT_VERSION: u64 = 1;

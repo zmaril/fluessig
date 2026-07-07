@@ -21,18 +21,24 @@ fn tool<'a>(m: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
         .unwrap_or_else(|| panic!("tool {name} in manifest"))
 }
 
-#[test]
-fn union_fixture_manifest() {
-    let api = load_api(UNION_API).unwrap();
-    let m = mcp_manifest(&api, &[]);
-    let names: Vec<&str> = m["tools"]
+fn tool_names(m: &serde_json::Value) -> Vec<&str> {
+    m["tools"]
         .as_array()
         .unwrap()
         .iter()
         .map(|t| t["name"].as_str().unwrap())
-        .collect();
+        .collect()
+}
+
+#[test]
+fn union_fixture_manifest() {
+    let api = load_api(UNION_API).unwrap();
+    let m = mcp_manifest(&api, &[]);
     // ctor doesn't project; unary + stream do
-    assert_eq!(names, ["watch_events", "watch_emit", "watch_clear"]);
+    assert_eq!(
+        tool_names(&m),
+        ["watch_events", "watch_emit", "watch_clear"]
+    );
 
     // @readonly / @destructive flow into annotations
     assert_eq!(
@@ -76,12 +82,7 @@ fn union_fixture_manifest() {
 fn entl_manifest_skips_binary_carriers() {
     let api = load_api(ENTL_API).unwrap();
     let m = mcp_manifest(&api, &[]);
-    let names: Vec<&str> = m["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names = tool_names(&m);
 
     // JSON-speakable ops project…
     for expect in [

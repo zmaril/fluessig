@@ -216,11 +216,7 @@ impl<T> ObserverPool<T> {
 
 impl<T> Drop for ObserverPool<T> {
     fn drop(&mut self) {
-        let drained: Vec<(String, Handle)> = self.handles.lock().unwrap().drain().collect();
-        for (_, h) in drained {
-            h.stop.store(true, Ordering::Relaxed);
-            let _ = h.join.join();
-        }
+        self.shutdown();
     }
 }
 

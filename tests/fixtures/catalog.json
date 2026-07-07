@@ -94,9 +94,121 @@
           "doc": "A nullable union — both twins nullable."
         }
       ]
+    },
+    {
+      "name": "Run",
+      "table": "runs",
+      "key": [
+        "id"
+      ],
+      "doc": "A run: exercises entities crossing the op layer (issue #10) — the self\nreference and the compound FK lower to key fields; the to-many is omitted.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "startedAt",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": false
+        },
+        {
+          "name": "prev",
+          "type": {
+            "k": "ref",
+            "name": "Run",
+            "entity": true
+          },
+          "nullable": true,
+          "doc": "The previous attempt, if any (lowers to prevId).",
+          "relation": {
+            "to": "Run",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "prev_id"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "last",
+          "type": {
+            "k": "ref",
+            "name": "Event",
+            "entity": true
+          },
+          "nullable": true,
+          "doc": "Compound FK to Event's (sessionUid, idx) key.",
+          "relation": {
+            "to": "Event",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "last_session_uid",
+              "last_idx"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "observed",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "ref",
+              "name": "Event",
+              "entity": true
+            }
+          },
+          "nullable": false,
+          "doc": "To-many: omitted from the api DTO.",
+          "relation": {
+            "to": "Event",
+            "cardinality": "many",
+            "kind": "association",
+            "properties": "RunEventAt",
+            "table": "run_events",
+            "fkColumns": null,
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        }
+      ]
     }
   ],
-  "relationProperties": [],
+  "relationProperties": [
+    {
+      "name": "RunEventAt",
+      "fields": [
+        {
+          "name": "seq",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "key": true
+        }
+      ]
+    }
+  ],
   "valueStructs": [
     {
       "name": "AgentMessage",

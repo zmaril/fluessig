@@ -11,10 +11,6 @@
       "base": "bytes"
     },
     {
-      "name": "Json",
-      "base": "string"
-    },
-    {
       "name": "ArrowBatch"
     }
   ],

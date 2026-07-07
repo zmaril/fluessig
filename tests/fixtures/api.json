@@ -130,8 +130,9 @@
         },
         {
           "name": "events",
-          "doc": null,
+          "doc": "The observed events, oldest first.",
           "shape": "stream",
+          "readonly": true,
           "params": [
             {
               "name": "afterIdx",
@@ -156,6 +157,14 @@
             }
           ],
           "returns": "void"
+        },
+        {
+          "name": "clear",
+          "doc": "Drop every recorded event.",
+          "shape": "unary",
+          "destructive": true,
+          "params": [],
+          "returns": "int64"
         }
       ]
     }

@@ -56,6 +56,12 @@ extern dec stream(target: Operation);
 /** Excluded from generation; hand-written in each binding (the escape hatch). */
 extern dec manual(target: Operation);
 
+/** Reads only — no observable state change. Flows into MCP `readOnlyHint`. */
+extern dec readonly(target: Operation);
+
+/** Destroys or irreversibly alters state. Flows into MCP `destructiveHint`. */
+extern dec destructive(target: Operation);
+
 // ── stock scalars: shared vocabulary every catalog gets via `using Fluessig` ──
 // Stock scalars behave like TypeSpec builtins: they don't appear in the
 // catalog's scalars list; the generators know them by name (sql.rs lowers Json

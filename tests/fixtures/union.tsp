@@ -40,6 +40,9 @@ model Event {
 
 interface Watch {
   @ctor open(path: string): void;
-  @stream events(afterIdx?: int64): Event;
+  /** The observed events, oldest first. */
+  @readonly @stream events(afterIdx?: int64): Event;
   emit(payload: EventPayload): void;
+  /** Drop every recorded event. */
+  @destructive clear(): int64;
 }

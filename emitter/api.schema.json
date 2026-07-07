@@ -191,6 +191,12 @@
                 },
                 "returns": {
                   "$ref": "#/$defs/apiType"
+                },
+                "readonly": {
+                  "const": true
+                },
+                "destructive": {
+                  "const": true
                 }
               }
             }

@@ -71,6 +71,12 @@ pub struct ApiOp {
     #[serde(default)]
     pub doc: Option<String>,
     pub shape: Shape,
+    /// `@readonly` — flows into the MCP `readOnlyHint` annotation.
+    #[serde(default)]
+    pub readonly: bool,
+    /// `@destructive` — flows into the MCP `destructiveHint` annotation.
+    #[serde(default)]
+    pub destructive: bool,
     pub params: Vec<ApiParam>,
     pub returns: ApiType,
 }

@@ -1,6 +1,8 @@
-//! `fluessig-gen <catalog.json> <out.rs> [--docs <p>] [--py-models <p>] [--ts-tables <p>] [--ts-drizzle <p>]`
+//! `fluessig-gen <catalog.json> <out.rs> [--docs <p>] [--py-models <p>] [--ts-tables <p>] [--ts-drizzle <p>]
+//! [--api <api.json> [--node <p>] [--python <p>] [--ruby <p>] [--mcp <p>]]`
 //! — generate the committed artifacts: the Rust schema module, the docs
-//! projection, and the ORM read planes (see [`fluessig::sql`] / [`fluessig::codegen`]).
+//! projection, the ORM read planes (see [`fluessig::sql`] / [`fluessig::codegen`]),
+//! the binding surfaces, and the MCP module (see [`fluessig::bindgen`]).
 //!
 //! `--banner-note <text>` appends one extra comment line to every generated
 //! file's banner — for consumers who want a marker in their generated code
@@ -23,6 +25,7 @@ fn main() {
     let node = flag("--node");
     let python = flag("--python");
     let ruby = flag("--ruby");
+    let mcp = flag("--mcp");
     let py_models = flag("--py-models");
     let ts_tables = flag("--ts-tables");
     let ts_drizzle = flag("--ts-drizzle");
@@ -61,9 +64,9 @@ fn main() {
     if let Some(p) = ts_drizzle {
         write(&p, fluessig::codegen::ts_drizzle(&catalog, note));
     }
-    if let Some(p) = node {
+    if node.is_some() || python.is_some() || ruby.is_some() || mcp.is_some() {
         let Some(ap) = api_path.as_deref() else {
-            eprintln!("--node requires --api <api.json>");
+            eprintln!("--node/--python/--ruby/--mcp require --api <api.json>");
             std::process::exit(2);
         };
         let api = fluessig::api::load_api_file(ap).unwrap_or_else(|e| {
@@ -81,12 +84,17 @@ fn main() {
                 )
             })
             .collect();
-        write(&p, fluessig::bindgen::node_binding(&api, &enums, note));
+        if let Some(p) = node {
+            write(&p, fluessig::bindgen::node_binding(&api, &enums, note));
+        }
         if let Some(py) = python {
             write(&py, fluessig::bindgen::python_binding(&api, &enums, note));
         }
         if let Some(rb) = ruby {
             write(&rb, fluessig::bindgen::ruby_binding(&api, &enums, note));
+        }
+        if let Some(m) = mcp {
+            write(&m, fluessig::bindgen::mcp_module(&api, &enums, note));
         }
     }
 }

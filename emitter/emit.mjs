@@ -188,6 +188,9 @@ export async function emit(inputPath, outDir) {
            : hasDeco(op, "stream") ? "stream"
            : hasDeco(op, "manual") ? "manual"
            : "unary",
+      // MCP tool annotations (readOnlyHint / destructiveHint); omitted when unset
+      ...(hasDeco(op, "readonly") ? { readonly: true } : {}),
+      ...(hasDeco(op, "destructive") ? { destructive: true } : {}),
       params: [...op.parameters.properties.values()].map((p) => ({
         name: p.name,
         type: apiType(p.type),

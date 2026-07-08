@@ -4,3 +4,7 @@
 # npm installs in the typespec/ and emitter/ packages (spike/ has its own)
 node_modules/
 package-lock.json
+
+# vale downloads style packages here via `vale sync`; only styles/config is tracked
+styles/*
+!styles/config

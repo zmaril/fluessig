@@ -242,6 +242,12 @@ what sampo **cannot infer**:
 - a sensible `tag_format` (with `{package_name}`, per the §4 snag);
 - a release GitHub Action workflow.
 
+**Decision: the fixed group is the fleet's chosen versioning model.** All of a
+library's binding packages (core, cli, node, python, ruby) share **one coherent
+version** and move together — the simplest mental model, one version number for
+the whole library, where a changeset naming any member bumps the group (§7 records
+the tradeoff).
+
 This is the **same shape as the in-flight README-multiplexing work**
 (`src/readme.rs`, PR #16), which renders non-code text artifacts from the
 catalog. A workflow/config generator is that shape again: plain strings, no
@@ -290,7 +296,13 @@ entl) stays on a side script until sampo grows a gem adapter.
 
 **Adopt sampo directly, per-repo.** It is a strong fit for the cargo / npm / PyPI
 release problem, and the dry-run proved the core mechanics — fixed-group cascade
-and a correct topological publish plan — actually work. **Have fluessig
+and a correct topological publish plan — actually work. **Release each library as
+one `fixed` versioning group** — its binding packages (core, cli, node, python,
+ruby) share a single version, the simplest mental model: one version number per
+library, and a changeset naming any member moves the whole group together. The
+tradeoff, taken knowingly: `fixed` republishes **all** group members at the new
+version on every release even when only one changed — harmless (they are real new
+versions), but the unchanged packages' version numbers advance too. **Have fluessig
 contribute only a thin, opt-in scaffold generator** (npm workspace root +
 `.sampo/config.toml` template + release workflow), **not** a `fluessig publish`
 runtime wrapper, and build it **only once ≥2 consumers need it**. **Sequence the

@@ -204,9 +204,8 @@ fixed = [["cargo/disponent-core", "cargo/disponent-cli", "cargo/disponent-node"]
 ignore_unpublished = false
 ```
 
-That config is committed as a static example at
-`notes/examples/sampo/disponent.config.toml` — it is **not** added into the real
-disponent repo.
+This is reproduced verbatim from the prototype and was **not** added into the
+real disponent repo.
 
 ## 5. What "fluessig wraps sampo" should look like (Q2)
 
@@ -299,13 +298,11 @@ to sampo).
 
 **sampo source (quoted paths):**
 
-- `crates/sampo-core/src/adapters.rs` — the adapter dispatch.
-- `crates/sampo-core/src/adapters/cargo.rs:54` — the `cargo publish` adapter.
-- `crates/sampo-core/src/adapters/pypi/pip.rs:257` — the `uv build` / `uv publish`
-  adapter.
-- `crates/sampo-core/src/config.rs:17-38` — the recognized ecosystem set
-  (cargo / npm / hex / pypi / packagist — no Ruby).
-- `crates/sampo/src/cli.rs` — the `sampo add` / `release` / `publish` CLI.
+- `crates/sampo-core/src/adapters.rs` — where publishing dispatches per ecosystem.
+- `crates/sampo-core/src/adapters/cargo.rs:54` — the crates.io path (`cargo publish`).
+- `crates/sampo-core/src/adapters/pypi/pip.rs:257` — the PyPI path (`uv build`, then `uv publish`).
+- `crates/sampo-core/src/config.rs:17-38` — which ecosystems are recognized (cargo, npm, hex, pypi, packagist; Ruby absent).
+- `crates/sampo/src/cli.rs` — the `add`, `release`, and `publish` subcommands.
 
 **Fleet manifests:**
 
@@ -322,6 +319,6 @@ to sampo).
 (README-multiplexing) — the codegen-of-text-artifacts pattern a release-scaffold
 generator would follow.
 
-**Prototype:** the full dry-run evidence (verbatim tool output, the `.sampo/`
-config, the no-side-effects check) lives with this branch / PR; the example
-config is at `notes/examples/sampo/disponent.config.toml`.
+**Prototype:** the full dry-run evidence — verbatim tool output, the `.sampo/`
+config (reproduced in §4), and the no-side-effects check — lives with this branch
+/ PR.

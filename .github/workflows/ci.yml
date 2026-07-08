@@ -8,8 +8,39 @@ on:
     - cron: "0 7 * * 2"  # weekly: catch toolchain/dep drift even without a push
 
 jobs:
+  # Fan-out: decide whether a PR actually touches anything the rust engine
+  # depends on. A docs-only PR skips the compile/clippy/test below — and a
+  # skipped required check still reports green, so branch protection stays happy.
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'src/**'
+              - 'tests/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'catalog.json'
+              - 'api.json'
+              - 'schema_docs.json'
+              - 'entl.tsp'
+              - 'typespec/**'
+              - 'emitter/**'
+              - '.github/workflows/ci.yml'
+
   rust:
     name: rust engine + fixture tests
+    needs: changes
+    # Always run on push/schedule; on PRs, only when rust-relevant files changed.
+    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

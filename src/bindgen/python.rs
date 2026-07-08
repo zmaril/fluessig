@@ -431,6 +431,21 @@ pub fn python_binding(
                 let (signature, fn_params, prelude, args) = py_op_pieces(api, op);
                 let (ret, _) = ty(api, &op.returns);
                 match op.shape {
+                    // Emit the signature attr + the struct-reassembly prelude only
+                    // when the ctor actually needs them — a flattened options DTO
+                    // (non-empty prelude) or defaulted params (`=None`). A plain
+                    // all-required scalar ctor stays bare, as pyo3 infers it.
+                    Shape::Ctor if signature.contains("=None") || !prelude.trim().is_empty() => {
+                        quote_in! { methods =>
+                            $['\r']
+                            #[new]
+                            #[pyo3(signature = ($(&signature)))]
+                            fn new($(&fn_params)) -> PyResult<Self> {
+                                $prelude
+                                Ok(Self { core: Arc::new(<$(&impl_path) as $(&trait_name)>::$(&name)($(&args)).map_err(err)?) })
+                            }
+                        }
+                    }
                     Shape::Ctor => quote_in! { methods =>
                         $['\r']
                         #[new]

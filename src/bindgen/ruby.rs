@@ -32,6 +32,44 @@ fn output_models(api: &ApiDoc) -> Vec<String> {
     out
 }
 
+/// The non-string enums that actually cross the Ruby boundary as values and so
+/// need IntoValue/TryConvert: those appearing as a field of an OUTPUT model (a
+/// getter returns the enum) or as the element of a `List` (an enum-list input
+/// param). A scalar enum that only rides an input DTO is flattened to a String
+/// and parsed in the prelude, so it needs neither.
+fn crossing_enums(api: &ApiDoc) -> std::collections::HashSet<String> {
+    let outputs = output_models(api);
+    let mut set = std::collections::HashSet::new();
+    for m in &api.models {
+        let is_output = outputs.contains(&m.name);
+        for f in &m.fields {
+            match &f.ty {
+                ApiType::Enum { r#enum } if is_output => {
+                    set.insert(r#enum.clone());
+                }
+                ApiType::List { list } => {
+                    if let ApiType::Enum { r#enum } = &**list {
+                        set.insert(r#enum.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for i in &api.interfaces {
+        for op in &i.ops {
+            for p in &op.params {
+                if let ApiType::List { list } = &p.ty {
+                    if let ApiType::Enum { r#enum } = &**list {
+                        set.insert(r#enum.clone());
+                    }
+                }
+            }
+        }
+    }
+    set
+}
+
 /// Ruby flattening: like Python's, plus — enum fields arrive as Strings (parsed
 /// in the prelude) and input-model-typed fields (e.g. `rename: TableRename[]`)
 /// are not exposed (passed as None; a kwargs follow-up).
@@ -141,56 +179,81 @@ fn rb_op_pieces(api: &ApiDoc, op: &ApiOp) -> RbPieces {
     let scan = if has_optional {
         let req: Vec<&RbParam> = flat.iter().filter(|p| !p.optional).collect();
         let opt: Vec<&RbParam> = flat.iter().filter(|p| p.optional).collect();
-        let req_tys = req
-            .iter()
-            .map(|p| p.rust_ty.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let opt_tys = opt
-            .iter()
-            .map(|p| p.rust_ty.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let req_names = req
-            .iter()
-            .map(|p| p.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let opt_names = opt
-            .iter()
-            .map(|p| p.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let req_tuple = if req.is_empty() {
-            "()".to_string()
+        // scan_args handles the common case, but two shapes need positional
+        // extraction by hand: an op with >9 optionals (scan_args' tuples cap at
+        // 9 — disponent's DispatchSpec) and a ctor with optionals (a caller
+        // passes `nil` to skip an earlier optional and set a later one, e.g.
+        // `open(nil, "none")`, which scan_args rejects). Manual extraction maps
+        // a missing-or-nil arg to `None` and is a superset of the scan_args form.
+        if opt.len() > 9 || op.shape == Shape::Ctor {
+            let mut out = String::new();
+            for (i, p) in req.iter().enumerate() {
+                out.push_str(&format!(
+                    "let {n}: {ty} = magnus::TryConvert::try_convert(args.get({i}).copied().ok_or_else(|| rberr(\"wrong number of arguments\"))?)?;\n",
+                    n = p.name, ty = p.rust_ty
+                ));
+            }
+            for (j, p) in opt.iter().enumerate() {
+                let i = req.len() + j;
+                out.push_str(&format!(
+                    "let {n}: {ty} = match args.get({i}).copied() {{ Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?), _ => None }};\n",
+                    n = p.name, ty = p.rust_ty
+                ));
+            }
+            Some(out)
         } else {
-            format!("({req_tys},)")
-        };
-        let mut out = format!(
-            "let a = magnus::scan_args::scan_args::<{req_tuple}, ({opt_tys},), (), (), (), ()>(args)?;
-"
-        );
-        if !req.is_empty() {
-            out.push_str(&format!(
-                "let ({req_names},) = a.required;
-"
-            ));
+            let req_tys = req
+                .iter()
+                .map(|p| p.rust_ty.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let opt_tys = opt
+                .iter()
+                .map(|p| p.rust_ty.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let req_names = req
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let opt_names = opt
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let req_tuple = if req.is_empty() {
+                "()".to_string()
+            } else {
+                format!("({req_tys},)")
+            };
+            let mut out = format!(
+                "let a = magnus::scan_args::scan_args::<{req_tuple}, ({opt_tys},), (), (), (), ()>(args)?;\n"
+            );
+            if !req.is_empty() {
+                out.push_str(&format!("let ({req_names},) = a.required;\n"));
+            }
+            out.push_str(&format!("let ({opt_names},) = a.optional;\n"));
+            Some(out)
         }
-        out.push_str(&format!(
-            "let ({opt_names},) = a.optional;
-"
-        ));
-        Some(out)
     } else {
         None
     };
     let mut prelude = String::new();
     for p in flat.iter().filter(|p| p.parse_enum.is_some()) {
         let e = p.parse_enum.as_ref().unwrap();
-        prelude.push_str(&format!(
-            "let {n} = {e}::parse(&{n}).map_err(rberr)?;\n",
-            n = p.name
-        ));
+        if p.optional {
+            // an optional enum arrives as Option<String>: parse the inner value.
+            prelude.push_str(&format!(
+                "let {n} = {n}.map(|s| {e}::parse(&s)).transpose().map_err(rberr)?;\n",
+                n = p.name
+            ));
+        } else {
+            prelude.push_str(&format!(
+                "let {n} = {e}::parse(&{n}).map_err(rberr)?;\n",
+                n = p.name
+            ));
+        }
     }
     for (model, var, skipped) in &groups {
         let mut fields: Vec<String> = flat
@@ -238,13 +301,24 @@ pub fn ruby_binding(
     banner_note: Option<&str>,
 ) -> String {
     let outputs = output_models(api);
+    // The Ruby module/root class name: the stateful (ctor-bearing) interface's
+    // name — the class the DTO classes nest under and stateless interfaces hang
+    // their singleton methods on. entl → "Entl"; disponent → "Disponent".
+    let module = api
+        .interfaces
+        .iter()
+        .find(|i| i.ops.iter().any(|o| o.shape == Shape::Ctor))
+        .or_else(|| api.interfaces.first())
+        .map(|i| i.name.clone())
+        .unwrap_or_else(|| "Root".to_string());
+    let gvl_panic = format!("{} called outside the Ruby GVL", module.to_lowercase());
     let mut t: rust::Tokens = quote! {
         use std::sync::Arc;
         use std::time::Duration;
         use magnus::{function, method, prelude::*, Error, Ruby};
 
         fn rberr(e: impl std::fmt::Display) -> Error {
-            let ruby = magnus::Ruby::get().expect("entl called outside the Ruby GVL");
+            let ruby = magnus::Ruby::get().expect($(quoted(&gvl_panic)));
             Error::new(ruby.exception_runtime_error(), e.to_string())
         }
 
@@ -270,6 +344,7 @@ pub fn ruby_binding(
     t.line();
 
     // ── enums: plain Rust + parse-from-string (Ruby passes lowercase names) ──
+    let crossing = crossing_enums(api);
     for (name, variants) in enums {
         if is_string_enum(api, name) {
             continue;
@@ -299,6 +374,40 @@ pub fn ruby_binding(
                 }
             }
         };
+        // Only enums that cross as values (an output field, or an enum-list
+        // input) get the value codecs; a scalar enum on an input DTO is passed
+        // as a String and parsed in the prelude, so it needs none of this.
+        if crossing.contains(name) {
+            let wire_arms: Vec<String> = variants
+                .iter()
+                .map(|v| format!("Self::{} => {:?},", pascal(v), v.to_lowercase()))
+                .collect();
+            quote_in! { t =>
+                $['\r']
+                impl $name {
+                    pub fn wire(&self) -> &$("'static") str {
+                        match self {
+                            $(for a in &wire_arms join ($['\r']) => $a)
+                        }
+                    }
+                }
+                $("/// A getter returning this enum hands Ruby its wire string.")
+                impl magnus::IntoValue for $name {
+                    fn into_value_with(self, ruby: &magnus::Ruby) -> magnus::Value {
+                        ruby.str_new(self.wire()).as_value()
+                    }
+                }
+                impl magnus::TryConvert for $name {
+                    fn try_convert(val: magnus::Value) -> Result<Self, magnus::Error> {
+                        Self::parse(&<String as magnus::TryConvert>::try_convert(val)?).map_err(rberr)
+                    }
+                }
+                $("// SAFETY: the enum owns its data (a Copy discriminant) — no borrow from")
+                $("// the Ruby value survives, so it is sound in owning positions like")
+                $("// `Vec<Self>` (an enum-list input param).")
+                unsafe impl magnus::try_convert::TryConvertOwned for $name {}
+            };
+        }
     }
     t.line();
 
@@ -338,7 +447,7 @@ pub fn ruby_binding(
             let ipc = snake(&af.name);
             quote_in! { t =>
                 $['\r']
-                #[magnus::wrap(class = $(quoted(format!("Entl::{}", m.name))), free_immediately, size)]
+                #[magnus::wrap(class = $(quoted(format!("{module}::{}", m.name))), free_immediately, size)]
                 #[derive(Clone)]
                 pub struct $(&m.name) {
                     $(for f in &storage join ($['\r']) => $f)
@@ -391,7 +500,7 @@ pub fn ruby_binding(
                 .collect();
             quote_in! { t =>
                 $['\r']
-                #[magnus::wrap(class = $(quoted(format!("Entl::{}", m.name))), free_immediately, size)]
+                #[magnus::wrap(class = $(quoted(format!("{module}::{}", m.name))), free_immediately, size)]
                 #[derive(Clone)]
                 pub struct $(&m.name) {
                     $(for f in &fields join ($['\r']) => $f)
@@ -450,7 +559,7 @@ pub fn ruby_binding(
             quote_in! { t =>
                 $['\r']
                 $(format!("/// Poll-based stream from `{}.{}` — `.next` returns the next item or nil.", i.name, op.name))
-                #[magnus::wrap(class = $(quoted(format!("Entl::{class}"))), free_immediately, size)]
+                #[magnus::wrap(class = $(quoted(format!("{module}::{class}"))), free_immediately, size)]
                 pub struct $(&class) {
                     stream: Box<dyn PollStream<$(&item)>>,
                 }
@@ -616,9 +725,9 @@ pub fn ruby_binding(
 
     quote_in! { t =>
         $['\r']
-        $("/// Register the Entl class + every generated method (called from #[magnus::init]).")
+        $(format!("/// Register the {module} class + every generated method (called from #[magnus::init])."))
         pub fn register(ruby: &Ruby) -> Result<(), Error> {
-            let class = ruby.define_class("Entl", ruby.class_object())?;
+            let class = ruby.define_class($(quoted(&module)), ruby.class_object())?;
             $(for r in &registrations join ($['\r']) => $r)
             Ok(())
         }

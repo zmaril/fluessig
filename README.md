@@ -41,6 +41,55 @@ Generated-file banners are consumer-agnostic: fluessig names the banner after th
 catalog's own `source` and bakes in no consumer paths; pass anything project-specific
 (a lint-suppression marker, a regenerate hint) via `--banner-note`.
 
+## README multiplexing
+
+`fluessig-gen` also renders **one Markdown template per target language**, so a
+single quickstart shows Rust, Node/Bun, Python, or Ruby code depending on the
+output target. The template stays valid Markdown — every directive is an HTML
+comment on its own line, so it reads fine on GitHub unrendered.
+
+```sh
+# fan out over every language: {lang} in the path expands to the slug
+cargo run --bin fluessig-gen -- catalog.json out/schema_gen.rs \
+  --readme quickstart.tpl.md --readme-out 'out/README.{lang}.md' --readme-pkg entl
+
+# or render a single language to a fixed path
+cargo run --bin fluessig-gen -- catalog.json out/schema_gen.rs \
+  --readme quickstart.tpl.md --readme-out README.md --readme-lang rust
+```
+
+Flags:
+
+| flag | meaning |
+| --- | --- |
+| `--readme <template.md>` | activate README rendering |
+| `--readme-out <pattern>` | output path; a `{lang}` in it fans out over every target |
+| `--readme-lang <slug>` | the single target when `--readme-out` has no `{lang}` |
+| `--readme-langs <slug,…>` | subset to render when the pattern has `{lang}` (default: all four) |
+| `--readme-pkg <name>` | package name for `{pkg}` in install lines (default: the catalog name, else `yourpkg`) |
+
+The four language slugs are `rust`, `node`, `python`, `ruby`.
+
+### Template directives
+
+- **Interpolation** — `{{ key }}` (whitespace inside the braces is flexible).
+  Keys: `lang` (display name, e.g. `Python`), `lang.slug`, `lang.fence` (the
+  code-fence tag), `lang.install` (the install one-liner with `{pkg}` already
+  substituted), `lang.ext` (source extension), `pkg`, and `catalog.name`. An
+  unknown key is an error — the renderer never silently drops.
+- **`<!-- fl:only SLUG [SLUG…] -->` … `<!-- fl:end -->`** — keep the enclosed
+  lines only for the listed targets. **`<!-- fl:except SLUG [SLUG…] -->`** keeps
+  them for every target *but* those listed. Slugs are space- or comma-separated.
+- **`<!-- fl:each -->` … `<!-- fl:end -->`** — the multiplexer. Inside,
+  `<!-- fl:lang SLUG -->` markers split the block into per-language sections;
+  anything before the first marker is a shared preamble emitted for every target.
+  Only the section matching the target is emitted. `<!-- fl:lang default -->` is a
+  fallback; with no match and no default, rendering fails (strict).
+
+Blocks nest (an `fl:only` around an `fl:each`, interpolation anywhere). An
+unterminated block, a stray `fl:end`/`fl:lang`, or a missing variant is an error,
+so a broken template fails the build rather than emitting something wrong.
+
 ## Layout
 
 ```

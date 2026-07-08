@@ -13,6 +13,7 @@ pub mod codegen;
 pub mod data;
 pub mod ir;
 pub mod observe;
+pub mod readme;
 pub mod rustfmt;
 pub mod sql;
 

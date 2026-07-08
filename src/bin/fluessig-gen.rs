@@ -9,6 +9,12 @@
 //! (e.g. a lint-suppression line). Off by default: fluessig doesn't bake any
 //! tool-specific markers into its output.
 //!
+//! `--readme <template.md> --readme-out <pattern>` renders one Markdown template
+//! per target language (see [`fluessig::readme`]). A `{lang}` in the pattern
+//! fans out over `--readme-langs <slugs>` (default: all four); without it,
+//! `--readme-lang <slug>` names the single target. `--readme-pkg <name>` sets
+//! the package name in install lines (default: the catalog name, else `yourpkg`).
+//!
 //! straitjacket-allow-file:duplication — the catalog→enums extraction here mirrors
 //! the one in fluessig's regen test (tests/entl_catalog.rs); both feed the bindgen.
 
@@ -29,6 +35,11 @@ fn main() {
     let py_models = flag("--py-models");
     let ts_tables = flag("--ts-tables");
     let ts_drizzle = flag("--ts-drizzle");
+    let readme = flag("--readme");
+    let readme_out = flag("--readme-out");
+    let readme_lang = flag("--readme-lang");
+    let readme_langs = flag("--readme-langs");
+    let readme_pkg = flag("--readme-pkg");
     let banner_note = flag("--banner-note");
     let note = banner_note.as_deref();
     let [catalog_path, out_path] = args.as_slice() else {
@@ -96,5 +107,90 @@ fn main() {
         if let Some(m) = mcp {
             write(&m, fluessig::bindgen::mcp_module(&api, &enums, note));
         }
+    }
+
+    if let Some(tpl_path) = readme {
+        render_readme(
+            &catalog,
+            &tpl_path,
+            readme_out.as_deref(),
+            readme_lang.as_deref(),
+            readme_langs.as_deref(),
+            readme_pkg.as_deref(),
+            &write,
+        );
+    }
+}
+
+/// Render a README template per target language and write each output. Errors
+/// (bad flags, template parse/render) print a message and exit non-zero.
+#[allow(clippy::too_many_arguments)]
+fn render_readme(
+    catalog: &fluessig::Catalog,
+    tpl_path: &str,
+    out: Option<&str>,
+    lang: Option<&str>,
+    langs: Option<&str>,
+    pkg: Option<&str>,
+    write: &impl Fn(&str, String),
+) {
+    use fluessig::readme;
+
+    let fail = |msg: String| -> ! {
+        eprintln!("{msg}");
+        std::process::exit(2);
+    };
+
+    let Some(out_pattern) = out else {
+        fail("--readme requires --readme-out <pattern>".into());
+    };
+    let template =
+        std::fs::read_to_string(tpl_path).unwrap_or_else(|e| fail(format!("read {tpl_path}: {e}")));
+
+    let catalog_name = catalog
+        .source
+        .as_deref()
+        .map(readme::catalog_name_from_source);
+    let pkg = pkg
+        .map(str::to_string)
+        .or_else(|| catalog_name.clone())
+        .unwrap_or_else(|| "yourpkg".to_string());
+    let ctx = readme::RenderCtx { pkg, catalog_name };
+
+    // Resolve a slug list to registry languages, exiting on an unknown slug.
+    let resolve = |csv: &str| -> Vec<&'static readme::Language> {
+        csv.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                readme::by_slug(s)
+                    .unwrap_or_else(|| fail(format!("unknown --readme language slug: {s}")))
+            })
+            .collect()
+    };
+
+    let targets: Vec<&readme::Language> = if out_pattern.contains("{lang}") {
+        if lang.is_some() {
+            fail("--readme-lang is for a single-file --readme-out; use --readme-langs with a {lang} pattern".into());
+        }
+        match langs {
+            Some(csv) => resolve(csv),
+            None => readme::languages().iter().collect(),
+        }
+    } else {
+        if langs.is_some() {
+            fail("--readme-langs needs a {lang} pattern in --readme-out; use --readme-lang for a single file".into());
+        }
+        let slug = lang.unwrap_or_else(|| {
+            fail("--readme-out without {lang} needs --readme-lang <slug>".into())
+        });
+        vec![readme::by_slug(slug)
+            .unwrap_or_else(|| fail(format!("unknown --readme-lang slug: {slug}")))]
+    };
+
+    let rendered = readme::render_files(&template, out_pattern, &targets, &ctx)
+        .unwrap_or_else(|e| fail(format!("render {tpl_path}: {e}")));
+    for (path, content) in rendered {
+        write(&path, content);
     }
 }

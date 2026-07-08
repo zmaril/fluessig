@@ -5,6 +5,11 @@ and what should the wrapper actually be?*
 
 **Status:** exploration — 2026-07-08
 
+<!-- straitjacket-allow-file[:duplication] — §4 quotes verbatim sampo CLI output
+(the release / publish plans and the config), which necessarily repeats the same
+three crate names and package identifiers; that repetition is captured evidence,
+not prose duplication, so it must stay verbatim. -->
+
 ---
 
 ## 1. The problem

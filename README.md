@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="fluessig" width="200"></p>
+
 # fluessig
 
 Describe a typed entity graph **once** (TypeSpec); project it **everywhere** — DDL,

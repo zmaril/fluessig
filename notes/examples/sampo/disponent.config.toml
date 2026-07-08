@@ -1,0 +1,31 @@
+# Static EXAMPLE — the .sampo/config.toml settled on by the sampo × disponent
+# dry-run prototype (see ../../sampo.md). This file is documentation only: it is
+# NOT wired into the real disponent repo, and nothing here was ever published.
+#
+# Sampo configuration
+version = 1
+
+[github]
+repository = "zmaril/disponent"
+
+[git]
+# Tags are PER PACKAGE, so {package_name} is required for uniqueness — a single
+# shared tag (e.g. "disponent-v{version}") makes every crate render the same tag
+# and sampo aborts with a tag conflict. The fixed group already guarantees one
+# shared VERSION; the tag just namespaces each unit under it.
+tag_format = "{package_name}-v{version}"
+
+[changelog]
+show_commit_hash = true
+show_acknowledgments = true
+
+[packages]
+# disponent's publishable units release together as ONE version (the logical
+# library). Modeled on sampo's own fixed = [["cargo/sampo", "npm/sampo"]].
+#
+# NOTE: only the three cargo crates are discoverable — disponent has no npm
+# workspace root, so the @disponent/node npm package is NOT discovered and
+# cannot be referenced as npm/@disponent/node (the cdylib crate is discovered
+# as cargo/disponent-node instead).
+fixed = [["cargo/disponent-core", "cargo/disponent-cli", "cargo/disponent-node"]]
+ignore_unpublished = false

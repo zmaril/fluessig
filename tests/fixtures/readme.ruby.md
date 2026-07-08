@@ -30,3 +30,5 @@ Run it with the Ruby toolchain and you should see five rows.
 ## Learn more
 
 See the full reference for the rest of the `entl` op surface.
+
+<!-- straitjacket-allow-file:duplication — parallel per-language renders of one template -->

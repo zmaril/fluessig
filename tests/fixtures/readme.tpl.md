@@ -68,3 +68,5 @@ Run it with the {{ lang }} toolchain and you should see five rows.
 ## Learn more
 
 See the full reference for the rest of the `{{ catalog.name }}` op surface.
+
+<!-- straitjacket-allow-file:duplication — parallel per-language renders of one template -->

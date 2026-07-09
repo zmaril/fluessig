@@ -1,0 +1,199 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "fk_graph_demo",
+  "scalars": [],
+  "unions": [],
+  "enums": [],
+  "entities": [
+    {
+      "name": "Repo",
+      "table": "repos",
+      "key": [
+        "id"
+      ],
+      "doc": "A repository — a single-column-keyed reference target.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The repo id (a path hash).",
+          "key": true
+        },
+        {
+          "name": "remote_url",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "The remote URL, when known."
+        }
+      ]
+    },
+    {
+      "name": "GhUser",
+      "table": "gh_users",
+      "key": [
+        "id"
+      ],
+      "doc": "A GitHub user — the target of the nullable author/reviewer FKs.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The GitHub user id.",
+          "key": true
+        },
+        {
+          "name": "login",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The login handle."
+        }
+      ]
+    },
+    {
+      "name": "PullRequest",
+      "table": "pull_requests",
+      "key": [
+        "repo_id",
+        "number"
+      ],
+      "doc": "A pull request — a **composite-key** entity: identified by `(repo_id,\nnumber)`. `ref_cols(number = \"pr_number\")` declares that referencing sites\nspell the `number` key part as the column `pr_number` (and `repo_id` as-is);\nthe spelling lives here, on the target, not at each referencing site.",
+      "fields": [
+        {
+          "name": "repo_id",
+          "type": {
+            "k": "ref",
+            "name": "Repo",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The repo the PR belongs to — a single-column FK that is also a key member\n(FK-in-PK).",
+          "key": true,
+          "relation": {
+            "to": "Repo",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo_id"
+            ]
+          }
+        },
+        {
+          "name": "number",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The PR number within the repo.",
+          "key": true
+        },
+        {
+          "name": "title",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "The PR title."
+        },
+        {
+          "name": "author_id",
+          "type": {
+            "k": "ref",
+            "name": "GhUser",
+            "entity": true
+          },
+          "nullable": true,
+          "doc": "The PR author — a nullable FK to `gh_users`.",
+          "relation": {
+            "to": "GhUser",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "author_id"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Review",
+      "table": "reviews",
+      "key": [
+        "id"
+      ],
+      "doc": "A PR review — globally id-keyed, referencing the composite-keyed\n`PullRequest` by a single `Id<PullRequest>` field that expands to the two FK\ncolumns `(repo_id, pr_number)`.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The review id.",
+          "key": true
+        },
+        {
+          "name": "pr",
+          "type": {
+            "k": "ref",
+            "name": "PullRequest",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The reviewed pull request — a composite FK `(repo_id, pr_number)`.",
+          "relation": {
+            "to": "PullRequest",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo_id",
+              "pr_number"
+            ]
+          }
+        },
+        {
+          "name": "reviewer_id",
+          "type": {
+            "k": "ref",
+            "name": "GhUser",
+            "entity": true
+          },
+          "nullable": true,
+          "doc": "The reviewer — a nullable FK to `gh_users`.",
+          "relation": {
+            "to": "GhUser",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "reviewer_id"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "relationProperties": [],
+  "valueStructs": []
+}

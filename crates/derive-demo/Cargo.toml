@@ -3,7 +3,7 @@ name = "derive-demo"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Slice 1 demo: a scalar-only entity authored with #[derive(Entity)] and emitted to catalog.json."
+description = "Derive front-end demo: a scalar entity (Slice 1) and a foreign-key graph with Id<T> references + composite keys (Slice 2), authored with #[derive(Entity)] and emitted to catalog.json."
 repository = "https://github.com/zmaril/fluessig"
 publish = false
 
@@ -12,7 +12,12 @@ fluessig-derive = { path = "../fluessig-derive" }
 
 [dev-dependencies]
 fluessig = { path = "../.." }
+fluessig-derive = { path = "../fluessig-derive" }
 
 [[bin]]
 name = "fluessig-emit"
 path = "src/bin/fluessig-emit.rs"
+
+[[bin]]
+name = "fluessig-emit-graph"
+path = "src/bin/fluessig-emit-graph.rs"

@@ -1,19 +1,23 @@
-//! Proc-macros for the fluessig Rust derive front end (Slice 1).
+//! Proc-macros for the fluessig Rust derive front end (Slices 1–2).
 //!
 //! Two macros, mirroring `derive-front-end.md` §1 "derive → descriptor →
 //! exporter":
 //!
-//! * [`macro@Entity`] expands a plain scalar-only struct to an
+//! * [`macro@Entity`] expands a plain struct to an
 //!   `impl fluessig_derive::Entity` carrying a `&'static EntityDescriptor` —
 //!   pure data, no runtime behaviour, no file writes.
 //! * [`catalog!`] collects a list of `#[derive(Entity)]` types into a callable
 //!   that produces the `catalog.json` structure the existing Rust loader
 //!   consumes.
 //!
-//! Slice 1 is deliberately scalar-only: no `Id<T>` / foreign keys, no edges, no
-//! polymorphism, no op surface. Those are Slices 2–5 (see
-//! `notes/derive-front-end-decisions.md`). The attribute grammar here is parsed
-//! with plain `syn`; the richer `darling`-tier grammar lands in Slice 3.
+//! Slice 1 was scalar-only. Slice 2 adds **references**: a field typed `Id<T>`
+//! (or `Option<Id<T>>`) is resolved by `syn` path parsing to a foreign key
+//! targeting `T` (so `@fk` disappears), and a composite-key target spells its
+//! reference columns once via `#[fluessig(ref_cols(field = "col", …))]`. Still
+//! out of scope: edges, `flatten`/inheritance, polymorphism (`abstract_root`),
+//! the op surface, and spans — Slices 3–6 (`notes/derive-front-end-decisions.md`).
+//! The attribute grammar here is parsed with plain `syn`; the richer
+//! `darling`-tier grammar lands in Slice 3.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -24,7 +28,7 @@ use syn::{
     Data, DeriveInput, Fields, GenericArgument, Ident, LitStr, PathArguments, Token, Type,
 };
 
-/// Derive a `&'static EntityDescriptor` for a scalar-only entity struct.
+/// Derive a `&'static EntityDescriptor` for an entity struct.
 ///
 /// ```ignore
 /// #[derive(Entity)]
@@ -35,6 +39,25 @@ use syn::{
 ///     pub login: String,
 ///     pub name: Option<String>,    // Option<T> ⇒ nullable
 ///     pub admin: bool,
+/// }
+///
+/// #[derive(Entity)]
+/// #[fluessig(name = "reviews")]
+/// pub struct Review {
+///     #[key] pub id: i64,
+///     pub pr: Id<PullRequest>,             // a foreign key, resolved from the type
+///     pub reviewer: Option<Id<User>>,      // Option<Id<T>> ⇒ a nullable FK
+/// }
+/// ```
+///
+/// A composite-key target declares how referencing sites spell its columns:
+///
+/// ```ignore
+/// #[derive(Entity)]
+/// #[fluessig(name = "pull_requests", ref_cols(number = "pr_number"))]
+/// pub struct PullRequest {
+///     #[key] pub repo_id: Id<Repo>,
+///     #[key] pub number: i32,
 /// }
 /// ```
 #[proc_macro_derive(Entity, attributes(fluessig, key))]
@@ -62,19 +85,24 @@ fn expand_entity(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         ));
     };
 
-    // container attribute: #[fluessig(name = "table")]
-    let table = container_table(&input)?;
+    // container attributes: #[fluessig(name = "table", ref_cols(field = "col", …))]
+    let ContainerAttrs { table, ref_cols } = container_attrs(&input)?;
     let table_tokens = match table {
         Some(name) => quote! { ::core::option::Option::Some(#name) },
         None => quote! { ::core::option::Option::None },
     };
+    let ref_col_tokens = ref_cols.iter().map(|(field, column)| {
+        quote! {
+            ::fluessig_derive::RefColDescriptor { field: #field, column: #column }
+        }
+    });
 
     let mut field_descriptors = Vec::new();
     for field in &named.named {
         let fname = field.ident.as_ref().expect("named field").to_string();
         let is_key = has_key_attr(field);
         let doc = doc_string(&field.attrs);
-        let (scalar_kind, nullable) = map_field_type(&field.ty)?;
+        let (kind, nullable) = map_field_type(&field.ty)?;
 
         let doc_tokens = match doc {
             Some(d) => quote! { ::core::option::Option::Some(#d) },
@@ -84,7 +112,7 @@ fn expand_entity(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         field_descriptors.push(quote! {
             ::fluessig_derive::FieldDescriptor {
                 name: #fname,
-                scalar: #scalar_kind,
+                kind: #kind,
                 nullable: #nullable,
                 key: #is_key,
                 doc: #doc_tokens,
@@ -108,15 +136,17 @@ fn expand_entity(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     table: #table_tokens,
                     doc: #entity_doc_tokens,
                     fields: &[ #( #field_descriptors ),* ],
+                    ref_cols: &[ #( #ref_col_tokens ),* ],
                 };
         }
     })
 }
 
-/// Map a Rust field type to a `ScalarKind` token and its nullability.
-/// `Option<T>` ⇒ nullable, unwrapping to the inner scalar. Slice 1 accepts only
-/// primitive scalars; anything else (a reference type, `Id<T>`, a nested
-/// container) is a Slice 2+ concern and is rejected with a pointed message.
+/// Map a Rust field type to a `FieldKind` token and its nullability.
+/// `Option<T>` ⇒ nullable, unwrapping to the inner type. A field typed `Id<T>`
+/// lowers to `FieldKind::Reference("T")` (Slice 2); a primitive scalar lowers to
+/// `FieldKind::Scalar(…)` (Slice 1). Anything else (an edge, a nested container)
+/// is a Slice 3+ concern and is rejected with a pointed message.
 fn map_field_type(ty: &Type) -> syn::Result<(proc_macro2::TokenStream, bool)> {
     if let Some(inner) = option_inner(ty) {
         let (kind, already_opt) = map_field_type(inner)?;
@@ -128,8 +158,63 @@ fn map_field_type(ty: &Type) -> syn::Result<(proc_macro2::TokenStream, bool)> {
         }
         return Ok((kind, true));
     }
-    let kind = scalar_kind(ty)?;
+    let kind = field_kind(ty)?;
     Ok((kind, false))
+}
+
+/// Resolve a non-`Option` field type to its `FieldKind` token: `Id<T>` ⇒ a
+/// foreign-key reference to `T`, else a scalar primitive.
+fn field_kind(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
+    if let Some(target) = id_target(ty)? {
+        let name = target.to_string();
+        return Ok(quote! { ::fluessig_derive::FieldKind::Reference(#name) });
+    }
+    let kind = scalar_kind(ty)?;
+    Ok(quote! { ::fluessig_derive::FieldKind::Scalar(#kind) })
+}
+
+/// A field typed `Id<T>` (Slice 2) → `Some(T)`, resolved by `syn` path parsing.
+/// The macro sees the literal `T` token, so a typo'd target is a plain rustc
+/// "cannot find type" error at the field. `Id` with anything but one type
+/// argument (`Id`, `Id<A, B>`, `Id<'a>`) is an authoring error.
+fn id_target(ty: &Type) -> syn::Result<Option<Ident>> {
+    let Type::Path(tp) = ty else {
+        return Ok(None);
+    };
+    if tp.qself.is_some() {
+        return Ok(None);
+    }
+    let seg = match tp.path.segments.last() {
+        Some(seg) if seg.ident == "Id" => seg,
+        _ => return Ok(None),
+    };
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "Id<T> needs a single entity type argument, e.g. Id<Repo>",
+        ));
+    };
+    let types: Vec<&Type> = args
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let [Type::Path(target)] = types.as_slice() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "Id<T> takes exactly one entity type argument, e.g. Id<Repo>",
+        ));
+    };
+    match target.path.segments.last() {
+        Some(seg) if matches!(seg.arguments, PathArguments::None) => Ok(Some(seg.ident.clone())),
+        _ => Err(syn::Error::new_spanned(
+            ty,
+            "Id<T>'s target must be a plain entity name, e.g. Id<Repo>",
+        )),
+    }
 }
 
 /// The primitive-type → `ScalarKind` mapping. Kept in lock-step with the
@@ -167,10 +252,10 @@ fn scalar_kind(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
 fn unsupported(ty: &Type) -> syn::Error {
     syn::Error::new_spanned(
         ty,
-        "unsupported field type for Slice 1 — only scalar primitives \
-         (i8..i64, u8..u64, f32/f64, bool, String) and Option<…> of them are \
-         supported. Foreign keys (Id<T>), edges, and polymorphism arrive in \
-         Slices 2–4.",
+        "unsupported field type — supported so far: scalar primitives \
+         (i8..i64, u8..u64, f32/f64, bool, String), foreign keys Id<T>, and \
+         Option<…> of either. Edges, inheritance (flatten), and polymorphism \
+         arrive in Slices 3–4.",
     )
 }
 
@@ -190,9 +275,19 @@ fn option_inner(ty: &Type) -> Option<&Type> {
     })
 }
 
-/// Container-level `#[fluessig(name = "table")]` → the physical table override.
-fn container_table(input: &DeriveInput) -> syn::Result<Option<String>> {
+/// The container-level `#[fluessig(…)]` attributes the derive understands.
+struct ContainerAttrs {
+    /// `name = "table"` — the physical table override.
+    table: Option<String>,
+    /// `ref_cols(field = "column", …)` — how referencing `Id<Self>` sites spell
+    /// this entity's key columns (Slice 2). `(key_field, column)` pairs.
+    ref_cols: Vec<(String, String)>,
+}
+
+/// Parse `#[fluessig(name = "table", ref_cols(field = "col", …))]`.
+fn container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
     let mut table = None;
+    let mut ref_cols = Vec::new();
     for attr in &input.attrs {
         if !attr.path().is_ident("fluessig") {
             continue;
@@ -203,12 +298,28 @@ fn container_table(input: &DeriveInput) -> syn::Result<Option<String>> {
                 let lit: LitStr = value.parse()?;
                 table = Some(lit.value());
                 Ok(())
+            } else if meta.path.is_ident("ref_cols") {
+                // ref_cols(field = "col", field2 = "col2", …)
+                meta.parse_nested_meta(|rc| {
+                    let field = rc
+                        .path
+                        .get_ident()
+                        .ok_or_else(|| rc.error("ref_cols entry must be `field = \"column\"`"))?
+                        .to_string();
+                    let value = rc.value()?;
+                    let lit: LitStr = value.parse()?;
+                    ref_cols.push((field, lit.value()));
+                    Ok(())
+                })
             } else {
-                Err(meta.error("unknown fluessig attribute — Slice 1 supports only `name = \"…\"`"))
+                Err(meta.error(
+                    "unknown fluessig attribute — supported: `name = \"…\"`, \
+                     `ref_cols(field = \"col\", …)`",
+                ))
             }
         })?;
     }
-    Ok(table)
+    Ok(ContainerAttrs { table, ref_cols })
 }
 
 fn has_key_attr(field: &syn::Field) -> bool {

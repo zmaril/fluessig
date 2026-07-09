@@ -1,0 +1,11 @@
+[package]
+name = "cargo-fluessig"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "cargo subcommand for the fluessig derive front end; `cargo fluessig emit` writes catalog.json."
+repository = "https://github.com/zmaril/fluessig"
+
+[[bin]]
+name = "cargo-fluessig"
+path = "src/main.rs"

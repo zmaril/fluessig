@@ -1,3 +1,11 @@
+[workspace]
+members = [
+    "crates/fluessig-derive-macros",
+    "crates/fluessig-derive",
+    "crates/cargo-fluessig",
+    "crates/derive-demo",
+]
+
 [package]
 name = "fluessig"
 version = "0.1.0"

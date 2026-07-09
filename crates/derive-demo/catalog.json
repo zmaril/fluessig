@@ -1,0 +1,62 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "user_demo",
+  "scalars": [],
+  "unions": [],
+  "enums": [],
+  "entities": [
+    {
+      "name": "User",
+      "table": "users",
+      "key": [
+        "id"
+      ],
+      "doc": "A minimal user record — the scalar-only end-to-end skeleton for the derive\nfront end.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The user's unique id.",
+          "key": true
+        },
+        {
+          "name": "login",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The login handle."
+        },
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Display name, if the user set one."
+        },
+        {
+          "name": "admin",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": false,
+          "doc": "Whether the user is a site admin."
+        }
+      ]
+    }
+  ],
+  "relationProperties": [],
+  "valueStructs": []
+}

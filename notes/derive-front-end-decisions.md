@@ -151,14 +151,18 @@ fluessig::catalog! {
 ## What it will take
 
 Build `fluessig-derive` as a **second front end against the frozen catalog**, prove it by
-migration, then retire TypeSpec. Sliced so each step ends at a byte-diffable checkpoint
-against the existing TypeSpec output.
+migration, then retire TypeSpec. Sliced so each step ends at a **semantic-equivalence
+checkpoint**: the derived catalog loads clean through the Rust validator and drives
+`fluessig-gen` to equivalent output — not a byte-for-byte JSON diff against the TypeSpec
+emitter (front-end identity fields — the emitter/compiler stamp and `source` name —
+legitimately differ). Byte-identity was dropped as the gate by the owner.
 
 - **Slice 1 — end-to-end skeleton.** New `fluessig-derive` crate: `#[derive(Entity)]` →
   `&'static EntityDescriptor` for one simple entity (scalar fields + `#[key]`); `catalog!`
-  collecting it; `cargo fluessig emit` writing `catalog.json`. Gate: byte-identical to the
-  TypeSpec emitter's output for that one entity. This is the whole pattern in miniature —
-  everything after is filling in descriptor richness.
+  collecting it; `cargo fluessig emit` writing `catalog.json`. Gate: the emitted catalog
+  loads clean through the existing Rust loader/validator and drives `fluessig-gen` to
+  equivalent output (same DDL/PK) for that one entity. This is the whole pattern in
+  miniature — everything after is filling in descriptor richness.
 - **Slice 2 — references.** `Id<T>` typed keys with foreign-key resolution via `syn` path
   parsing (`@fk` disappears); composite keys via `ref_cols(...)` declared on the referenced
   entity. Gate: an entity graph with single + composite FKs matches.
@@ -177,9 +181,11 @@ against the existing TypeSpec output.
 - **Slice 7 — drift guard.** The regenerate-validate-diff `#[test]`, wired into CI the way
   the `node` drift job is today.
 - **Slice 8 — migration + retirement.** Port `entl.tsp` (all 28 tables — the acid test)
-  then `disponent.tsp` to derives; confirm both catalogs are byte-identical; then delete the
-  TypeSpec emitter and remove Node from the toolchain.
+  then `disponent.tsp` to derives; confirm both catalogs are semantically equivalent (each
+  loads clean and drives every consumer to the same output); then delete the TypeSpec
+  emitter and remove Node from the toolchain.
 
 The **first implementation slice** is Slice 1: it is small, it exercises the entire
-derive → descriptor → exporter → `fluessig-gen` path, and its byte-diff gate is the
-cheapest possible test of the core claim before any of the ergonomic surface is built.
+derive → descriptor → exporter → `fluessig-gen` path, and its load-clean-and-drive-`fluessig-gen`
+gate is the cheapest possible test of the core claim before any of the ergonomic surface is
+built.

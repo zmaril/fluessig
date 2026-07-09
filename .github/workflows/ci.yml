@@ -25,6 +25,7 @@ jobs:
           filters: |
             rust:
               - 'src/**'
+              - 'crates/**'
               - 'tests/**'
               - 'Cargo.toml'
               - 'Cargo.lock'

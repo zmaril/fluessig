@@ -15,10 +15,17 @@ pub trait Adapter {
     fn name(&self) -> &'static str;
     /// Stamp the explicit version into the staged manifest.
     fn stamp_version(&self, staging: &Path, version: &str) -> Result<()>;
-    /// Drop `readme` into the staged package as README.md.
-    fn place_readme(&self, staging: &Path, readme: &Path) -> Result<()>;
-    /// Place prebuilt artifacts into the staged package.
-    fn place_artifacts(&self, staging: &Path, artifacts: &[PathBuf]) -> Result<()>;
+    /// Drop `readme` into the staged package as README.md. The default just
+    /// copies the file in; adapters whose manifest must also point at it
+    /// (crates) override this.
+    fn place_readme(&self, staging: &Path, readme: &Path) -> Result<()> {
+        copy_readme(staging, readme)
+    }
+    /// Place prebuilt artifacts into the staged package root. Adapters that need
+    /// a different layout (pypi → `dist/`) override this.
+    fn place_artifacts(&self, staging: &Path, artifacts: &[PathBuf]) -> Result<()> {
+        copy_artifacts_into(staging, artifacts, None)
+    }
     /// Run the registry dry-run (or, with `confirm`, the real publish).
     fn run_publish(&self, staging: &Path, confirm: bool) -> Result<Outcome>;
 }
@@ -56,6 +63,23 @@ fn copy_artifacts_into(staging: &Path, artifacts: &[PathBuf], subdir: Option<&st
         fs::copy(art, &dst)
             .with_context(|| format!("copying artifact {} -> {}", art.display(), dst.display()))?;
     }
+    Ok(())
+}
+
+/// Read the fixed-named `filename` manifest from `staging`, rewrite it with
+/// `stamp`, and write it back. Shared by the crates/npm/pypi adapters, whose
+/// version stamping differs only in the file name and the stamping function.
+fn stamp_manifest(
+    staging: &Path,
+    filename: &str,
+    version: &str,
+    stamp: impl Fn(&str, &str) -> Result<String>,
+) -> Result<()> {
+    let manifest = staging.join(filename);
+    let contents =
+        fs::read_to_string(&manifest).with_context(|| format!("reading {}", manifest.display()))?;
+    let stamped = stamp(&contents, version)?;
+    fs::write(&manifest, stamped).with_context(|| format!("writing {}", manifest.display()))?;
     Ok(())
 }
 
@@ -101,12 +125,7 @@ impl Adapter for CargoAdapter {
     }
 
     fn stamp_version(&self, staging: &Path, version: &str) -> Result<()> {
-        let manifest = staging.join("Cargo.toml");
-        let contents = fs::read_to_string(&manifest)
-            .with_context(|| format!("reading {}", manifest.display()))?;
-        let stamped = stamp_cargo_toml(&contents, version)?;
-        fs::write(&manifest, stamped).with_context(|| format!("writing {}", manifest.display()))?;
-        Ok(())
+        stamp_manifest(staging, "Cargo.toml", version, stamp_cargo_toml)
     }
 
     fn place_readme(&self, staging: &Path, readme: &Path) -> Result<()> {
@@ -120,10 +139,6 @@ impl Adapter for CargoAdapter {
         }
         fs::write(&manifest, doc.to_string())?;
         Ok(())
-    }
-
-    fn place_artifacts(&self, staging: &Path, artifacts: &[PathBuf]) -> Result<()> {
-        copy_artifacts_into(staging, artifacts, None)
     }
 
     fn run_publish(&self, staging: &Path, confirm: bool) -> Result<Outcome> {
@@ -181,20 +196,7 @@ impl Adapter for NpmAdapter {
     }
 
     fn stamp_version(&self, staging: &Path, version: &str) -> Result<()> {
-        let manifest = staging.join("package.json");
-        let contents = fs::read_to_string(&manifest)
-            .with_context(|| format!("reading {}", manifest.display()))?;
-        let stamped = stamp_package_json(&contents, version)?;
-        fs::write(&manifest, stamped)?;
-        Ok(())
-    }
-
-    fn place_readme(&self, staging: &Path, readme: &Path) -> Result<()> {
-        copy_readme(staging, readme)
-    }
-
-    fn place_artifacts(&self, staging: &Path, artifacts: &[PathBuf]) -> Result<()> {
-        copy_artifacts_into(staging, artifacts, None)
+        stamp_manifest(staging, "package.json", version, stamp_package_json)
     }
 
     fn run_publish(&self, staging: &Path, confirm: bool) -> Result<Outcome> {
@@ -245,16 +247,7 @@ impl Adapter for PypiAdapter {
     }
 
     fn stamp_version(&self, staging: &Path, version: &str) -> Result<()> {
-        let manifest = staging.join("pyproject.toml");
-        let contents = fs::read_to_string(&manifest)
-            .with_context(|| format!("reading {}", manifest.display()))?;
-        let stamped = stamp_pyproject_toml(&contents, version)?;
-        fs::write(&manifest, stamped)?;
-        Ok(())
-    }
-
-    fn place_readme(&self, staging: &Path, readme: &Path) -> Result<()> {
-        copy_readme(staging, readme)
+        stamp_manifest(staging, "pyproject.toml", version, stamp_pyproject_toml)
     }
 
     fn place_artifacts(&self, staging: &Path, artifacts: &[PathBuf]) -> Result<()> {
@@ -323,9 +316,19 @@ pub fn stamp_gemspec(contents: &str, version: &str) -> Result<String> {
 /// If `line` is a `<recv>.version = <quote>...<quote>` assignment, return the
 /// line with the version replaced; otherwise None.
 fn replace_version_line(line: &str, version: &str) -> Option<String> {
-    // Find `.version` followed (after whitespace) by `=`.
+    // Find `.version` as a whole token followed (after optional whitespace) by
+    // `=`. Reject continuations like `.version_requirement` / `.versions`: if
+    // the char right after `version` continues an identifier, this isn't the
+    // `.version =` assignment we mean to rewrite.
     let idx = line.find(".version")?;
     let after = &line[idx + ".version".len()..];
+    if after
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
     let after_trim = after.trim_start();
     let mut rest = after_trim.strip_prefix('=')?;
     rest = rest.trim_start();
@@ -351,14 +354,6 @@ impl Adapter for GemsAdapter {
         let stamped = stamp_gemspec(&contents, version)?;
         fs::write(&gemspec, stamped)?;
         Ok(())
-    }
-
-    fn place_readme(&self, staging: &Path, readme: &Path) -> Result<()> {
-        copy_readme(staging, readme)
-    }
-
-    fn place_artifacts(&self, staging: &Path, artifacts: &[PathBuf]) -> Result<()> {
-        copy_artifacts_into(staging, artifacts, None)
     }
 
     fn run_publish(&self, staging: &Path, confirm: bool) -> Result<Outcome> {
@@ -496,6 +491,38 @@ mod tests {
         let out = stamp_gemspec(input, "8.8.8").unwrap();
         assert!(out.contains("spec.version = \"8.8.8\""), "{out}");
         assert!(out.contains("spec.name = \"foo\""));
+    }
+
+    #[test]
+    fn gemspec_version_requirement_line_is_not_rewritten() {
+        // A `.version_requirement` (or any `.version<ident>`) line must survive
+        // untouched — only a real `.version =` assignment gets stamped.
+        let input = "Gem::Specification.new do |spec|\n  \
+             spec.required_ruby_version = \">= 3.0\"\n  \
+             spec.add_dependency \"dep\", spec.version_requirement\n  \
+             spec.version = \"0.0.1\"\nend\n";
+        let out = stamp_gemspec(input, "8.8.8").unwrap();
+        // The real version line was stamped.
+        assert!(out.contains("spec.version = \"8.8.8\""), "{out}");
+        // The look-alike lines were left exactly as they were.
+        assert!(out.contains("spec.version_requirement"), "{out}");
+        assert!(
+            out.contains("spec.required_ruby_version = \">= 3.0\""),
+            "{out}"
+        );
+        assert!(!out.contains("version_requirement = \"8.8.8\""), "{out}");
+    }
+
+    #[test]
+    fn replace_version_line_rejects_identifier_continuations() {
+        // Not the assignment we mean: identifier continues past `version`.
+        assert!(replace_version_line("  spec.version_requirement = \">= 1\"", "9.9.9").is_none());
+        assert!(replace_version_line("  spec.versions = [\"1\"]", "9.9.9").is_none());
+        // The real thing IS rewritten.
+        assert_eq!(
+            replace_version_line("  spec.version = \"0.0.1\"", "9.9.9").as_deref(),
+            Some("  spec.version = \"9.9.9\"")
+        );
     }
 
     #[test]

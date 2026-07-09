@@ -86,10 +86,6 @@ pub struct PublishArgs {
     #[arg(long)]
     pub readme: Option<PathBuf>,
 
-    /// Optional explicit manifest path override (currently informational).
-    #[arg(long)]
-    pub manifest: Option<PathBuf>,
-
     /// Actually publish. Without this flag, everything is a DRY RUN.
     #[arg(long)]
     pub confirm: bool,

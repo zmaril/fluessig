@@ -29,7 +29,6 @@ fluessig publish
   --package <NAME>              optional label for messages
   --artifact <PATH>             repeatable: prebuilt outputs to include (.node, wheel, .gem)
   --readme <PATH>               optional: dropped into the package as README.md
-  --manifest <PATH>             optional: explicit manifest path override
   --confirm                     actually publish. WITHOUT it, everything is a DRY RUN.
 ```
 
@@ -52,9 +51,9 @@ Nothing in your source tree is ever mutated. On each run the tool:
 
 | Registry | Native tool         | Version stamped in         | Dry-run                          |
 |----------|---------------------|----------------------------|----------------------------------|
-| `crates` | `cargo`             | `[package].version` (TOML) | `cargo publish --dry-run`        |
-| `npm`    | `npm`               | `"version"` (package.json) | `npm publish --dry-run`          |
-| `pypi`   | `uv`                | `[project].version` (TOML) | `uv publish --dry-run`           |
+| `crates` | `cargo`             | `[package].version` (Cargo.toml)   | `cargo publish --dry-run`  |
+| `npm`    | `npm`               | `"version"` (package.json)         | `npm publish --dry-run`    |
+| `pypi`   | `uv`                | `[project].version` (pyproject.toml) | `uv publish --dry-run`   |
 | `gems`   | `gem`               | `.version` line (gemspec)  | **none exists** — see below      |
 
 - **crates** — `cargo publish --dry-run --allow-dirty --no-verify`. With

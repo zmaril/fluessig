@@ -1,0 +1,18 @@
+[package]
+name = "derive-demo"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Slice 1 demo: a scalar-only entity authored with #[derive(Entity)] and emitted to catalog.json."
+repository = "https://github.com/zmaril/fluessig"
+publish = false
+
+[dependencies]
+fluessig-derive = { path = "../fluessig-derive" }
+
+[dev-dependencies]
+fluessig = { path = "../.." }
+
+[[bin]]
+name = "fluessig-emit"
+path = "src/bin/fluessig-emit.rs"

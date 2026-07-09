@@ -1,0 +1,41 @@
+//! Slice 1 demo: one scalar-only entity authored entirely in Rust with the new
+//! `#[derive(Entity)]`, collected by `catalog!`. Compare against the TypeSpec a
+//! `.tsp` author would write for the same table:
+//!
+//! ```tsp
+//! @name("users")
+//! model User {
+//!   @key id: int64;
+//!   login: string;
+//!   name?: string;
+//!   admin: boolean;
+//! }
+//! ```
+//!
+//! Here the struct *is* the schema — no `.tsp`, no Node.
+
+use fluessig_derive::{catalog, Entity};
+
+/// A minimal user record — the scalar-only end-to-end skeleton for the derive
+/// front end.
+#[derive(Entity)]
+#[fluessig(name = "users")]
+pub struct User {
+    /// The user's unique id.
+    #[key]
+    pub id: i64,
+    /// The login handle.
+    pub login: String,
+    /// Display name, if the user set one.
+    pub name: Option<String>,
+    /// Whether the user is a site admin.
+    pub admin: bool,
+}
+
+// The exporter half: `catalog!` collects the listed entities and expands to a
+// `fluessig_catalog` module that can print the `catalog.json` the loader consumes.
+catalog! {
+    name: "user_demo",
+    version: "0.1.0",
+    entities: [User],
+}

@@ -1,3 +1,4 @@
+<!-- straitjacket-allow-file:duplication — this doc quotes its companion sketch (entl_derive_sketch.rs) verbatim by design. -->
 # fluessig — the Rust derive front end (design exploration)
 
 Companion to [design.md](./design.md). **Status: exploration, not scheduled.** Nothing here

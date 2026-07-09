@@ -1,3 +1,4 @@
+// straitjacket-allow-file:duplication — a schema catalog is inherently repetitive (the Actions tables share status/timestamp field blocks by design, faithfully to entl.tsp).
 //! entl_derive_sketch.rs — HYPOTHETICAL: the complete entl catalog (all 28
 //! tables + the full binding op surface) authored with a `fluessig` derive
 //! front end. Line-for-line parallel to ../entl.tsp; the design it sketches
@@ -895,30 +896,30 @@ pub mod git {
         head: &str,
         three_dot: bool,
     ) -> fluessig::Result<Vec<FileDiff>> {
-        todo!()
+        unimplemented!()
     }
 
     /// A file's content at a commit — None when absent or binary.
     pub fn file_at(repo_path: &str, commit: &str, path: &str) -> fluessig::Result<Option<String>> {
-        todo!()
+        unimplemented!()
     }
 
     pub fn branch_exists(repo_path: &str, name: &str) -> fluessig::Result<bool> {
-        todo!()
+        unimplemented!()
     }
 
     pub fn current_branch(repo_path: &str) -> fluessig::Result<String> {
-        todo!()
+        unimplemented!()
     }
 
     /// Commit subjects+bodies along a branch (JSON).
     pub fn commit_bodies(repo_path: &str, branch: &str) -> fluessig::Result<String> {
-        todo!()
+        unimplemented!()
     }
 
     /// Remote branch names matching a pattern (trailing-`*` glob). Fetches first.
     pub fn ls_remote_heads(repo_path: &str, pattern: &str) -> fluessig::Result<Vec<String>> {
-        todo!()
+        unimplemented!()
     }
 }
 
@@ -932,38 +933,38 @@ impl Entl {
     /// Open (or create) the .duckdb at `db_path` and apply the schema.
     #[fluessig(ctor)]
     pub fn open(db_path: &str) -> fluessig::Result<Self> {
-        todo!()
+        unimplemented!()
     }
 
     /// Load git history from `repo_path` (one-way, incremental).
     pub fn load_git(&self, repo_path: &str) -> fluessig::Result<GitStats> {
-        todo!()
+        unimplemented!()
     }
 
     /// Load GitHub data (events/PRs/issues/Actions). Needs a token.
     pub fn load_github(&self, repo_path: &str) -> fluessig::Result<GithubStats> {
-        todo!()
+        unimplemented!()
     }
 
     /// Run a SQL query; JSON rows back.
     pub fn query(&self, sql: &str) -> fluessig::Result<String> {
-        todo!()
+        unimplemented!()
     }
 
     /// Run a SQL query; the result as one Arrow IPC stream (schema + all
     /// batches) — the dataframe on-ramp.
     pub fn query_arrow(&self, sql: &str) -> fluessig::Result<Vec<u8>> {
-        todo!()
+        unimplemented!()
     }
 
     /// Pull `repo_path` and sync it into a target store, in one call.
     pub fn sink(&self, repo_path: &str, options: SinkOptions) -> fluessig::Result<SinkStats> {
-        todo!()
+        unimplemented!()
     }
 
     /// Read a store back into canonical rows (JSON; oids hex, timestamps RFC3339).
     pub fn extract(&self, options: ExtractOptions) -> fluessig::Result<String> {
-        todo!()
+        unimplemented!()
     }
 
     /// Stream the change batches from one pull (the stream plane).
@@ -974,7 +975,7 @@ impl Entl {
         repo_path: &str,
         options: Option<ChangesOptions>,
     ) -> fluessig::Result<impl Iterator<Item = fluessig::Result<ChangeBatch>>> {
-        todo!()
+        unimplemented!()
     }
 
     /// Backfill this store into a driver target: stream {sql, params} for the host to execute.
@@ -983,19 +984,19 @@ impl Entl {
         &self,
         options: Option<DriverPlanOptions>,
     ) -> fluessig::Result<impl Iterator<Item = fluessig::Result<Statement>>> {
-        todo!()
+        unimplemented!()
     }
 
     /// Reconstruct a git repo from a store (needs objects: true at sink time). Returns commits rebuilt.
     pub fn rebuild(&self, options: RebuildOptions) -> fluessig::Result<i64> {
-        todo!()
+        unimplemented!()
     }
 
     /// Poll-loop sync with a host callback (ThreadsafeFunction / GVL re-entry)
     /// — hand-written per binding, exactly as before.
     #[fluessig(manual)]
     pub fn watch(&self, repo_path: &str, interval_secs: i32) {
-        todo!()
+        unimplemented!()
     }
 }
 

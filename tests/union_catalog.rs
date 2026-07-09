@@ -110,6 +110,48 @@ fn union_crosses_the_op_layer() {
 }
 
 #[test]
+fn node_name_only_enums_lower_to_snake_case_string_enums() {
+    // A name-only vocabulary (not in the wire-valued allowlist) must lower to a
+    // napi *string* enum whose variants carry their snake_case wire token, so JS
+    // sees `CapabilityKind.Dispatch === "dispatch"` — the same tokens the ruby
+    // emitter hands out via `wire()`, not the magic discriminant number a plain
+    // `#[napi]` enum emits.
+    let api = fluessig::api::load_api(API).unwrap();
+    let enums = vec![(
+        "CapabilityKind".to_string(),
+        vec!["dispatch".to_string(), "isolation_vm".to_string()],
+    )];
+    let node = fluessig::bindgen::node_binding(&api, &enums, None);
+    assert!(
+        node.contains("#[napi(string_enum)]"),
+        "string enum, not numeric:\n{node}"
+    );
+    assert!(
+        node.contains("pub enum CapabilityKind"),
+        "enum type is still emitted:\n{node}"
+    );
+    assert!(
+        node.contains("#[napi(value = \"dispatch\")]"),
+        "explicit wire token:\n{node}"
+    );
+    assert!(
+        node.contains("#[napi(value = \"isolation_vm\")]"),
+        "snake_case wire token, underscore preserved:\n{node}"
+    );
+    // the Rust variant ident is unchanged (a consumer's core_impl keeps
+    // constructing `CapabilityKind::IsolationVm`).
+    assert!(node.contains("IsolationVm,"), "variant ident:\n{node}");
+
+    // ruby parity: the node string token is exactly the token ruby maps in its
+    // enum codec (here the always-emitted `parse()` arm).
+    let ruby = fluessig::bindgen::ruby_binding(&api, &enums, None);
+    assert!(
+        ruby.contains("\"isolation_vm\" => Ok(Self::IsolationVm)"),
+        "ruby token parity:\n{ruby}"
+    );
+}
+
+#[test]
 fn union_validation_rejects_the_bad_shapes() {
     let base = |unions: &str, fields: &str| {
         format!(

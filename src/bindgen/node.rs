@@ -50,20 +50,31 @@ pub fn node_binding(
     }
     t.line();
 
-    // ── enums (name-only variants → napi enums; wire-valued → strings) ──
+    // ── enums (name-only variants → napi string enums; wire-valued → strings) ──
+    // A name-only enum lowers to a napi *string* enum whose variants carry an
+    // explicit snake_case wire token (`#[napi(value = "…")]`), so JS sees
+    // `CapabilityKind.Dispatch === "dispatch"` — the same tokens the ruby
+    // emitter hands out via `wire()`, not the magic discriminant number a plain
+    // `#[napi]` enum would emit. The Rust variant idents are unchanged, so a
+    // consumer's core_impl keeps constructing `CapabilityKind::Dispatch`.
     for (name, variants) in enums {
         if is_string_enum(api, name) {
             continue;
         }
-        let vs: Vec<String> = variants.iter().map(|v| pascal(v)).collect();
+        // each line: `#[napi(value = "<wire token>")] <PascalVariant>,` — the
+        // token is the catalog member lowercased, identical to ruby's `wire()`.
+        let vs: Vec<String> = variants
+            .iter()
+            .map(|v| format!("#[napi(value = {:?})] {},", v.to_lowercase(), pascal(v)))
+            .collect();
         // napi 3 no longer auto-derives Clone/Copy on #[napi] enums; option
         // structs that carry one derive Clone, so the enum must too.
         quote_in! { t =>
             $['\n']
-            #[napi]
+            #[napi(string_enum)]
             #[derive(Clone, Copy)]
             pub enum $name {
-                $(for v in &vs join ($['\r']) => $v,)
+                $(for v in &vs join ($['\r']) => $v)
             }
         };
     }

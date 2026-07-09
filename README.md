@@ -108,6 +108,9 @@ tests/              tool tests. entl.tsp + catalog.json + api.json are a committ
 
 ## Build & test
 
+Run `scripts/dev.sh` once to stand up the dev environment — it builds the Rust
+workspace and installs the emitter's npm deps. Then:
+
 ```sh
 cargo test                                    # the Rust engine + fixture tests
 (cd emitter && npm install && node test.mjs)  # the emitter

@@ -106,31 +106,21 @@ struct RefCols(Vec<(String, String)>);
 
 impl FromMeta for RefCols {
     fn from_list(items: &[NestedMeta]) -> darling::Result<Self> {
-        let mut out = Vec::new();
-        let mut errors = darling::Error::accumulator();
-        for item in items {
-            match item {
-                NestedMeta::Meta(syn::Meta::NameValue(nv)) => {
-                    let Some(key) = nv.path.get_ident() else {
-                        errors.push(
-                            darling::Error::custom("ref_cols entry must be `field = \"column\"`")
-                                .with_span(&nv.path),
-                        );
-                        continue;
-                    };
-                    match lit_str(&nv.value) {
-                        Ok(col) => out.push((key.to_string(), col)),
-                        Err(e) => errors.push(e),
-                    }
-                }
-                other => errors.push(
-                    darling::Error::custom("ref_cols entries must be `field = \"column\"`")
-                        .with_span(other),
-                ),
+        parse_meta_list(items, |item| match item {
+            NestedMeta::Meta(syn::Meta::NameValue(nv)) => {
+                let key = nv.path.get_ident().ok_or_else(|| {
+                    darling::Error::custom("ref_cols entry must be `field = \"column\"`")
+                        .with_span(&nv.path)
+                })?;
+                let col = lit_str(&nv.value)?;
+                Ok((key.to_string(), col))
             }
-        }
-        errors.finish()?;
-        Ok(RefCols(out))
+            other => Err(
+                darling::Error::custom("ref_cols entries must be `field = \"column\"`")
+                    .with_span(other),
+            ),
+        })
+        .map(RefCols)
     }
 }
 
@@ -140,26 +130,39 @@ struct Shares(Vec<String>);
 
 impl FromMeta for Shares {
     fn from_list(items: &[NestedMeta]) -> darling::Result<Self> {
-        let mut out = Vec::new();
-        let mut errors = darling::Error::accumulator();
-        for item in items {
-            match item {
-                NestedMeta::Meta(syn::Meta::Path(p)) => match p.get_ident() {
-                    Some(id) => out.push(id.to_string()),
-                    None => errors.push(
-                        darling::Error::custom("shares(col) expects a bare column name")
-                            .with_span(p),
-                    ),
-                },
-                other => errors.push(
-                    darling::Error::custom("shares(col, …) expects bare column names")
-                        .with_span(other),
-                ),
+        parse_meta_list(items, |item| match item {
+            NestedMeta::Meta(syn::Meta::Path(p)) => {
+                p.get_ident().map(|id| id.to_string()).ok_or_else(|| {
+                    darling::Error::custom("shares(col) expects a bare column name").with_span(p)
+                })
             }
-        }
-        errors.finish()?;
-        Ok(Shares(out))
+            other => Err(
+                darling::Error::custom("shares(col, …) expects bare column names").with_span(other),
+            ),
+        })
+        .map(Shares)
     }
+}
+
+/// Walk a nested meta-list, mapping each item with `parse` and accumulating any
+/// per-item errors — so one malformed entry reports against its own span
+/// without discarding the rest. Returns the collected items, or every
+/// accumulated error. The shared spine behind the hand-written `FromMeta` impls
+/// (`RefCols`, `Shares`); each supplies only its per-item match.
+fn parse_meta_list<T>(
+    items: &[NestedMeta],
+    parse: impl Fn(&NestedMeta) -> darling::Result<T>,
+) -> darling::Result<Vec<T>> {
+    let mut out = Vec::new();
+    let mut errors = darling::Error::accumulator();
+    for item in items {
+        match parse(item) {
+            Ok(v) => out.push(v),
+            Err(e) => errors.push(e),
+        }
+    }
+    errors.finish()?;
+    Ok(out)
 }
 
 /// Extract a string-literal value from an attribute expression.

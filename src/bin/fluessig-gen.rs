@@ -84,7 +84,8 @@ fn main() {
             eprintln!("{e}");
             std::process::exit(1);
         });
-        // name-only enums from the catalog become napi enums; wire-valued ones are strings
+        // name-only enums from the catalog become napi string enums (snake_case
+        // wire tokens); wire-valued ones are plain strings
         let enums: Vec<(String, Vec<String>)> = catalog
             .enums
             .iter()

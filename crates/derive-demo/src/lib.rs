@@ -19,6 +19,10 @@ use fluessig_derive::{catalog, Entity};
 /// Slice 2: the foreign-key entity graph (`Id<T>` references + composite keys).
 pub mod graph;
 
+/// Slice 3: the attribute grammar — flatten embedding, edge structs, and column
+/// sharing (`#[fluessig(flatten)]`, `#[derive(Edge)]`, `#[fluessig(shares(…))]`).
+pub mod advanced;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

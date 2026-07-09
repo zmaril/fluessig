@@ -3,7 +3,7 @@ name = "fluessig-derive-macros"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Proc-macros for the fluessig Rust derive front end: #[derive(Entity)] and catalog!."
+description = "Proc-macros for the fluessig Rust derive front end: #[derive(Entity)], #[derive(Edge)], and catalog!."
 repository = "https://github.com/zmaril/fluessig"
 
 [lib]
@@ -13,3 +13,4 @@ proc-macro = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+darling = "0.23"

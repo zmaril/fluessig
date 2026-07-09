@@ -1,32 +1,181 @@
-//! Proc-macros for the fluessig Rust derive front end (Slices 1–2).
+//! Proc-macros for the fluessig Rust derive front end (Slices 1–3).
 //!
-//! Two macros, mirroring `derive-front-end.md` §1 "derive → descriptor →
+//! Three macros, mirroring `derive-front-end.md` §1 "derive → descriptor →
 //! exporter":
 //!
 //! * [`macro@Entity`] expands a plain struct to an
 //!   `impl fluessig_derive::Entity` carrying a `&'static EntityDescriptor` —
 //!   pure data, no runtime behaviour, no file writes.
-//! * [`catalog!`] collects a list of `#[derive(Entity)]` types into a callable
-//!   that produces the `catalog.json` structure the existing Rust loader
-//!   consumes.
+//! * [`macro@Edge`] expands an edge struct to an `impl fluessig_derive::Edge`
+//!   carrying a `&'static EdgeDescriptor` (`derive-front-end.md` §2.4).
+//! * [`catalog!`] collects `#[derive(Entity)]` / `#[derive(Edge)]` types into a
+//!   callable that produces the `catalog.json` structure the existing Rust
+//!   loader consumes.
 //!
-//! Slice 1 was scalar-only. Slice 2 adds **references**: a field typed `Id<T>`
-//! (or `Option<Id<T>>`) is resolved by `syn` path parsing to a foreign key
-//! targeting `T` (so `@fk` disappears), and a composite-key target spells its
-//! reference columns once via `#[fluessig(ref_cols(field = "col", …))]`. Still
-//! out of scope: edges, `flatten`/inheritance, polymorphism (`abstract_root`),
-//! the op surface, and spans — Slices 3–6 (`notes/derive-front-end-decisions.md`).
-//! The attribute grammar here is parsed with plain `syn`; the richer
-//! `darling`-tier grammar lands in Slice 3.
+//! Slice 1 was scalar-only; Slice 2 added `Id<T>` **references**. Slice 3 makes
+//! the **attribute grammar real** — it is parsed with [`darling`] rather than
+//! hand-rolled `syn`, and unlocks three shapes:
+//!
+//! * `#[fluessig(flatten)]` — a field embeds another struct's columns inline
+//!   (inheritance / abstract-root-carries-only-its-key, §2.3);
+//! * `#[derive(Edge)] #[fluessig(edge(from = A, to = B))]` — an edge as its own
+//!   row struct (§2.4);
+//! * `#[fluessig(shares(col))]` — a reference's leading FK column shares a
+//!   physical column as a declared fact (§2.5).
+//!
+//! Field type mapping (`Id<T>`, scalars, `Option<…>`) stays `syn`-level — the
+//! macro sees the literal tokens, which is more direct than reconstructing from a
+//! monomorphised type (`notes/derive-front-end-decisions.md`, decision #4).
+//! Still out of scope: polymorphism (`abstract_root`), the op surface, and spans
+//! — Slices 4–6.
 
+use darling::ast::{Data, NestedMeta};
+use darling::util::Ignored;
+use darling::{FromDeriveInput, FromField, FromMeta};
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
-    Data, DeriveInput, Fields, GenericArgument, Ident, LitStr, PathArguments, Token, Type,
+    GenericArgument, Ident, LitStr, PathArguments, Token, Type,
 };
+
+// ─────────────────────────── darling attribute grammar ───────────────────────────
+
+/// The container-level options on an `#[derive(Entity)]` struct:
+/// `#[fluessig(name = "table", ref_cols(field = "col", …))]`.
+#[derive(FromDeriveInput)]
+#[darling(attributes(fluessig), supports(struct_named), forward_attrs(doc))]
+struct EntityOpts {
+    ident: Ident,
+    attrs: Vec<syn::Attribute>,
+    data: Data<Ignored, FluField>,
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    ref_cols: RefCols,
+}
+
+/// The container-level options on an `#[derive(Edge)]` struct:
+/// `#[fluessig(name = "table", edge(from = A, to = B, expose = "field"))]`.
+#[derive(FromDeriveInput)]
+#[darling(attributes(fluessig), supports(struct_named), forward_attrs(doc))]
+struct EdgeOpts {
+    ident: Ident,
+    attrs: Vec<syn::Attribute>,
+    data: Data<Ignored, FluField>,
+    #[darling(default)]
+    name: Option<String>,
+    edge: EdgeMeta,
+}
+
+/// The `edge(from = A, to = B, expose = "field")` nested meta-list.
+#[derive(FromMeta)]
+struct EdgeMeta {
+    from: syn::Path,
+    to: syn::Path,
+    #[darling(default)]
+    expose: Option<String>,
+}
+
+/// A field's `#[fluessig(…)]` options, shared by entities and edges. `#[key]`
+/// (the Slice 1/2 spelling) and `#[fluessig(key)]` (the edge-struct spelling
+/// from §2.4) both mark a key; `flatten` embeds, `shares(col, …)` declares
+/// column sharing.
+#[derive(FromField)]
+#[darling(attributes(fluessig), forward_attrs(doc, key))]
+struct FluField {
+    ident: Option<Ident>,
+    ty: Type,
+    attrs: Vec<syn::Attribute>,
+    #[darling(default, rename = "flatten")]
+    is_flatten: bool,
+    #[darling(default)]
+    key: bool,
+    #[darling(default)]
+    shares: Shares,
+}
+
+/// `ref_cols(field = "col", …)` — arbitrary field-name keys → column names.
+/// darling has no first-class arbitrary-key map, so this is a hand-written
+/// `FromMeta` over the nested list (the one place the grammar leans on a custom
+/// impl rather than a derive; see the PR notes).
+#[derive(Default)]
+struct RefCols(Vec<(String, String)>);
+
+impl FromMeta for RefCols {
+    fn from_list(items: &[NestedMeta]) -> darling::Result<Self> {
+        let mut out = Vec::new();
+        let mut errors = darling::Error::accumulator();
+        for item in items {
+            match item {
+                NestedMeta::Meta(syn::Meta::NameValue(nv)) => {
+                    let Some(key) = nv.path.get_ident() else {
+                        errors.push(
+                            darling::Error::custom("ref_cols entry must be `field = \"column\"`")
+                                .with_span(&nv.path),
+                        );
+                        continue;
+                    };
+                    match lit_str(&nv.value) {
+                        Ok(col) => out.push((key.to_string(), col)),
+                        Err(e) => errors.push(e),
+                    }
+                }
+                other => errors.push(
+                    darling::Error::custom("ref_cols entries must be `field = \"column\"`")
+                        .with_span(other),
+                ),
+            }
+        }
+        errors.finish()?;
+        Ok(RefCols(out))
+    }
+}
+
+/// `shares(col, …)` — bare column names a reference's leading FK columns share.
+#[derive(Default)]
+struct Shares(Vec<String>);
+
+impl FromMeta for Shares {
+    fn from_list(items: &[NestedMeta]) -> darling::Result<Self> {
+        let mut out = Vec::new();
+        let mut errors = darling::Error::accumulator();
+        for item in items {
+            match item {
+                NestedMeta::Meta(syn::Meta::Path(p)) => match p.get_ident() {
+                    Some(id) => out.push(id.to_string()),
+                    None => errors.push(
+                        darling::Error::custom("shares(col) expects a bare column name")
+                            .with_span(p),
+                    ),
+                },
+                other => errors.push(
+                    darling::Error::custom("shares(col, …) expects bare column names")
+                        .with_span(other),
+                ),
+            }
+        }
+        errors.finish()?;
+        Ok(Shares(out))
+    }
+}
+
+/// Extract a string-literal value from an attribute expression.
+fn lit_str(expr: &syn::Expr) -> darling::Result<String> {
+    if let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(s),
+        ..
+    }) = expr
+    {
+        Ok(s.value())
+    } else {
+        Err(darling::Error::custom("expected a string literal").with_span(expr))
+    }
+}
+
+// ─────────────────────────── #[derive(Entity)] ───────────────────────────
 
 /// Derive a `&'static EntityDescriptor` for an entity struct.
 ///
@@ -40,92 +189,53 @@ use syn::{
 ///     pub name: Option<String>,    // Option<T> ⇒ nullable
 ///     pub admin: bool,
 /// }
-///
-/// #[derive(Entity)]
-/// #[fluessig(name = "reviews")]
-/// pub struct Review {
-///     #[key] pub id: i64,
-///     pub pr: Id<PullRequest>,             // a foreign key, resolved from the type
-///     pub reviewer: Option<Id<User>>,      // Option<Id<T>> ⇒ a nullable FK
-/// }
 /// ```
 ///
-/// A composite-key target declares how referencing sites spell its columns:
+/// Slice 3 adds `#[fluessig(flatten)]` — embed a root struct's columns inline —
+/// and `#[fluessig(shares(col))]` on a reference field:
 ///
 /// ```ignore
 /// #[derive(Entity)]
-/// #[fluessig(name = "pull_requests", ref_cols(number = "pr_number"))]
-/// pub struct PullRequest {
-///     #[key] pub repo_id: Id<Repo>,
-///     #[key] pub number: i32,
+/// #[fluessig(name = "commits")]
+/// pub struct Commit {
+///     #[fluessig(flatten)] pub object: GitObject,  // contributes (oid, repo_id)
+///     pub message: String,
 /// }
 /// ```
 #[proc_macro_derive(Entity, attributes(fluessig, key))]
 pub fn derive_entity(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    match expand_entity(input) {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    let opts = match EntityOpts::from_derive_input(&input) {
+        Ok(o) => o,
+        Err(e) => return e.write_errors().into(),
+    };
+    match expand_entity(opts) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-fn expand_entity(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    let ident = &input.ident;
+fn expand_entity(opts: EntityOpts) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = &opts.ident;
+    let fields = opts
+        .data
+        .take_struct()
+        .expect("supports(struct_named) guarantees a struct")
+        .fields;
 
-    let Data::Struct(data) = &input.data else {
-        return Err(syn::Error::new_spanned(
-            ident,
-            "#[derive(Entity)] only supports structs",
-        ));
-    };
-    let Fields::Named(named) = &data.fields else {
-        return Err(syn::Error::new_spanned(
-            ident,
-            "#[derive(Entity)] requires a struct with named fields",
-        ));
-    };
-
-    // container attributes: #[fluessig(name = "table", ref_cols(field = "col", …))]
-    let ContainerAttrs { table, ref_cols } = container_attrs(&input)?;
-    let table_tokens = match table {
-        Some(name) => quote! { ::core::option::Option::Some(#name) },
-        None => quote! { ::core::option::Option::None },
-    };
-    let ref_col_tokens = ref_cols.iter().map(|(field, column)| {
+    let table_tokens = option_str(opts.name.as_deref());
+    let ref_col_tokens = opts.ref_cols.0.iter().map(|(field, column)| {
         quote! {
             ::fluessig_derive::RefColDescriptor { field: #field, column: #column }
         }
     });
 
     let mut field_descriptors = Vec::new();
-    for field in &named.named {
-        let fname = field.ident.as_ref().expect("named field").to_string();
-        let is_key = has_key_attr(field);
-        let doc = doc_string(&field.attrs);
-        let (kind, nullable) = map_field_type(&field.ty)?;
-
-        let doc_tokens = match doc {
-            Some(d) => quote! { ::core::option::Option::Some(#d) },
-            None => quote! { ::core::option::Option::None },
-        };
-
-        field_descriptors.push(quote! {
-            ::fluessig_derive::FieldDescriptor {
-                name: #fname,
-                kind: #kind,
-                nullable: #nullable,
-                key: #is_key,
-                doc: #doc_tokens,
-            }
-        });
+    for field in &fields {
+        field_descriptors.push(field_descriptor_tokens(field)?);
     }
 
-    let entity_doc = doc_string(&input.attrs);
-    let entity_doc_tokens = match entity_doc {
-        Some(d) => quote! { ::core::option::Option::Some(#d) },
-        None => quote! { ::core::option::Option::None },
-    };
-
+    let entity_doc_tokens = option_str(doc_string(&opts.attrs).as_deref());
     let name_str = ident.to_string();
 
     Ok(quote! {
@@ -142,11 +252,158 @@ fn expand_entity(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     })
 }
 
+// ─────────────────────────── #[derive(Edge)] ───────────────────────────
+
+/// Derive a `&'static EdgeDescriptor` for an edge struct — the edge as its own
+/// row type (`derive-front-end.md` §2.4).
+///
+/// ```ignore
+/// #[derive(Edge)]
+/// #[fluessig(name = "commit_parents", edge(from = Commit, to = Commit, expose = "parents"))]
+/// pub struct CommitParent {
+///     pub commit_oid: Id<Commit>,      // source-side FK
+///     pub parent_oid: Id<Commit>,      // target-side FK
+///     #[fluessig(key)] pub idx: i32,   // local key (edge PK = source key + local key)
+/// }
+/// ```
+///
+/// An `Id<from>` field becomes a source column, an `Id<to>` field a target
+/// column (for a self-edge the first is the source, the second the target, by
+/// declaration order); every other field is an edge property.
+#[proc_macro_derive(Edge, attributes(fluessig, key))]
+pub fn derive_edge(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    let opts = match EdgeOpts::from_derive_input(&input) {
+        Ok(o) => o,
+        Err(e) => return e.write_errors().into(),
+    };
+    match expand_edge(opts) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_edge(opts: EdgeOpts) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = &opts.ident;
+    let fields = opts
+        .data
+        .take_struct()
+        .expect("supports(struct_named) guarantees a struct")
+        .fields;
+
+    let from = path_ident(&opts.edge.from)?;
+    let to = path_ident(&opts.edge.to)?;
+    let from_str = from.to_string();
+    let to_str = to.to_string();
+
+    let table_tokens = option_str(opts.name.as_deref());
+    let expose_tokens = option_str(opts.edge.expose.as_deref());
+    let edge_doc_tokens = option_str(doc_string(&opts.attrs).as_deref());
+    let name_str = ident.to_string();
+
+    // Classify each field: the first Id<from> is the source, the first Id<to> is
+    // the target (a self-edge takes them in declaration order), everything else
+    // is an edge property.
+    let mut source_taken = false;
+    let mut target_taken = false;
+    let mut edge_fields = Vec::new();
+    for field in &fields {
+        let role = match ref_target(&field.ty)? {
+            Some(t) if t == from && !source_taken => {
+                source_taken = true;
+                quote! { ::fluessig_derive::EdgeRole::Source }
+            }
+            Some(t) if t == to && !target_taken => {
+                target_taken = true;
+                quote! { ::fluessig_derive::EdgeRole::Target }
+            }
+            _ => quote! { ::fluessig_derive::EdgeRole::Property },
+        };
+        let fd = field_descriptor_tokens(field)?;
+        edge_fields.push(quote! {
+            ::fluessig_derive::EdgeFieldDescriptor { field: #fd, role: #role }
+        });
+    }
+
+    Ok(quote! {
+        impl ::fluessig_derive::Edge for #ident {
+            const DESCRIPTOR: &'static ::fluessig_derive::EdgeDescriptor =
+                &::fluessig_derive::EdgeDescriptor {
+                    name: #name_str,
+                    table: #table_tokens,
+                    doc: #edge_doc_tokens,
+                    from: #from_str,
+                    to: #to_str,
+                    expose: #expose_tokens,
+                    fields: &[ #( #edge_fields ),* ],
+                };
+        }
+    })
+}
+
+// ─────────────────────────── shared field lowering ───────────────────────────
+
+/// Emit the `FieldDescriptor { … }` tokens for one struct field, honouring
+/// `flatten`, `#[key]` / `#[fluessig(key)]`, `shares(…)`, doc comments, and the
+/// scalar / `Id<T>` type mapping.
+fn field_descriptor_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenStream> {
+    let fname = field.ident.as_ref().expect("named field").to_string();
+    let is_key = field.key || has_bare_key(&field.attrs);
+    let doc_tokens = option_str(doc_string(&field.attrs).as_deref());
+    let shares = &field.shares.0;
+    let shares_tokens = quote! { &[ #( #shares ),* ] };
+
+    let (kind, nullable) = if field.is_flatten {
+        let ty = &field.ty;
+        (
+            quote! { ::fluessig_derive::FieldKind::Flatten(
+                <#ty as ::fluessig_derive::Entity>::DESCRIPTOR
+            ) },
+            false,
+        )
+    } else {
+        map_field_type(&field.ty)?
+    };
+
+    Ok(quote! {
+        ::fluessig_derive::FieldDescriptor {
+            name: #fname,
+            kind: #kind,
+            nullable: #nullable,
+            key: #is_key,
+            doc: #doc_tokens,
+            shares: #shares_tokens,
+        }
+    })
+}
+
+/// `Some("s")` / `None` tokens from an optional string.
+fn option_str(s: Option<&str>) -> proc_macro2::TokenStream {
+    match s {
+        Some(v) => quote! { ::core::option::Option::Some(#v) },
+        None => quote! { ::core::option::Option::None },
+    }
+}
+
+/// The last path segment as an `Ident` — the entity name in `edge(from = …)`.
+fn path_ident(p: &syn::Path) -> syn::Result<Ident> {
+    p.segments
+        .last()
+        .map(|s| s.ident.clone())
+        .ok_or_else(|| syn::Error::new_spanned(p, "expected an entity name"))
+}
+
+/// `Id<T>` (or `Option<Id<T>>`) → `Some(T)`: the reference target for edge-field
+/// role classification.
+fn ref_target(ty: &Type) -> syn::Result<Option<Ident>> {
+    let inner = option_inner(ty).unwrap_or(ty);
+    id_target(inner)
+}
+
 /// Map a Rust field type to a `FieldKind` token and its nullability.
 /// `Option<T>` ⇒ nullable, unwrapping to the inner type. A field typed `Id<T>`
-/// lowers to `FieldKind::Reference("T")` (Slice 2); a primitive scalar lowers to
-/// `FieldKind::Scalar(…)` (Slice 1). Anything else (an edge, a nested container)
-/// is a Slice 3+ concern and is rejected with a pointed message.
+/// lowers to `FieldKind::Reference("T")`; a primitive scalar lowers to
+/// `FieldKind::Scalar(…)`.
 fn map_field_type(ty: &Type) -> syn::Result<(proc_macro2::TokenStream, bool)> {
     if let Some(inner) = option_inner(ty) {
         let (kind, already_opt) = map_field_type(inner)?;
@@ -173,10 +430,10 @@ fn field_kind(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
     Ok(quote! { ::fluessig_derive::FieldKind::Scalar(#kind) })
 }
 
-/// A field typed `Id<T>` (Slice 2) → `Some(T)`, resolved by `syn` path parsing.
-/// The macro sees the literal `T` token, so a typo'd target is a plain rustc
-/// "cannot find type" error at the field. `Id` with anything but one type
-/// argument (`Id`, `Id<A, B>`, `Id<'a>`) is an authoring error.
+/// A field typed `Id<T>` → `Some(T)`, resolved by `syn` path parsing. The macro
+/// sees the literal `T` token, so a typo'd target is a plain rustc "cannot find
+/// type" error at the field. `Id` with anything but one type argument (`Id`,
+/// `Id<A, B>`, `Id<'a>`) is an authoring error.
 fn id_target(ty: &Type) -> syn::Result<Option<Ident>> {
     let Type::Path(tp) = ty else {
         return Ok(None);
@@ -253,9 +510,9 @@ fn unsupported(ty: &Type) -> syn::Error {
     syn::Error::new_spanned(
         ty,
         "unsupported field type — supported so far: scalar primitives \
-         (i8..i64, u8..u64, f32/f64, bool, String), foreign keys Id<T>, and \
-         Option<…> of either. Edges, inheritance (flatten), and polymorphism \
-         arrive in Slices 3–4.",
+         (i8..i64, u8..u64, f32/f64, bool, String), foreign keys Id<T>, \
+         Option<…> of either, and a #[fluessig(flatten)] embedded struct. \
+         Polymorphism (abstract_root) arrives in Slice 4.",
     )
 }
 
@@ -275,55 +532,8 @@ fn option_inner(ty: &Type) -> Option<&Type> {
     })
 }
 
-/// The container-level `#[fluessig(…)]` attributes the derive understands.
-struct ContainerAttrs {
-    /// `name = "table"` — the physical table override.
-    table: Option<String>,
-    /// `ref_cols(field = "column", …)` — how referencing `Id<Self>` sites spell
-    /// this entity's key columns (Slice 2). `(key_field, column)` pairs.
-    ref_cols: Vec<(String, String)>,
-}
-
-/// Parse `#[fluessig(name = "table", ref_cols(field = "col", …))]`.
-fn container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
-    let mut table = None;
-    let mut ref_cols = Vec::new();
-    for attr in &input.attrs {
-        if !attr.path().is_ident("fluessig") {
-            continue;
-        }
-        attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("name") {
-                let value = meta.value()?;
-                let lit: LitStr = value.parse()?;
-                table = Some(lit.value());
-                Ok(())
-            } else if meta.path.is_ident("ref_cols") {
-                // ref_cols(field = "col", field2 = "col2", …)
-                meta.parse_nested_meta(|rc| {
-                    let field = rc
-                        .path
-                        .get_ident()
-                        .ok_or_else(|| rc.error("ref_cols entry must be `field = \"column\"`"))?
-                        .to_string();
-                    let value = rc.value()?;
-                    let lit: LitStr = value.parse()?;
-                    ref_cols.push((field, lit.value()));
-                    Ok(())
-                })
-            } else {
-                Err(meta.error(
-                    "unknown fluessig attribute — supported: `name = \"…\"`, \
-                     `ref_cols(field = \"col\", …)`",
-                ))
-            }
-        })?;
-    }
-    Ok(ContainerAttrs { table, ref_cols })
-}
-
-fn has_key_attr(field: &syn::Field) -> bool {
-    field.attrs.iter().any(|a| a.path().is_ident("key"))
+fn has_bare_key(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("key"))
 }
 
 /// Collect `///` doc comments (lowered by rustc to `#[doc = "…"]`) into one
@@ -369,6 +579,7 @@ struct CatalogInput {
     name: LitStr,
     version: LitStr,
     entities: Vec<Ident>,
+    edges: Vec<Ident>,
 }
 
 impl Parse for CatalogInput {
@@ -376,6 +587,7 @@ impl Parse for CatalogInput {
         let mut name = None;
         let mut version = None;
         let mut entities = None;
+        let mut edges = Vec::new();
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -383,19 +595,14 @@ impl Parse for CatalogInput {
             match key.to_string().as_str() {
                 "name" => name = Some(input.parse::<LitStr>()?),
                 "version" => version = Some(parse_version(input)?),
-                "entities" => {
-                    let content;
-                    syn::bracketed!(content in input);
-                    let list: Punctuated<Ident, Token![,]> =
-                        Punctuated::parse_terminated(&content)?;
-                    entities = Some(list.into_iter().collect());
-                }
+                "entities" => entities = Some(parse_ident_list(input)?),
+                "edges" => edges = parse_ident_list(input)?,
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown catalog! field `{other}` — Slice 1 supports \
-                             name, version, entities"
+                            "unknown catalog! field `{other}` — supported: \
+                             name, version, entities, edges"
                         ),
                     ))
                 }
@@ -413,8 +620,17 @@ impl Parse for CatalogInput {
                 .ok_or_else(|| syn::Error::new(input.span(), "catalog! is missing `version`"))?,
             entities: entities
                 .ok_or_else(|| syn::Error::new(input.span(), "catalog! is missing `entities`"))?,
+            edges,
         })
     }
+}
+
+/// Parse `[A, B, C]` into a list of idents.
+fn parse_ident_list(input: ParseStream) -> syn::Result<Vec<Ident>> {
+    let content;
+    syn::bracketed!(content in input);
+    let list: Punctuated<Ident, Token![,]> = Punctuated::parse_terminated(&content)?;
+    Ok(list.into_iter().collect())
 }
 
 /// Accept `version: "0.1.0"` or `version: 0` (both spellings appear in the design
@@ -428,7 +644,7 @@ fn parse_version(input: ParseStream) -> syn::Result<LitStr> {
     }
 }
 
-/// Collect `#[derive(Entity)]` types into a catalog exporter.
+/// Collect `#[derive(Entity)]` / `#[derive(Edge)]` types into a catalog exporter.
 ///
 /// Expands to a module `fluessig_catalog` exposing:
 /// * `catalog() -> fluessig::Catalog` — the validated in-memory IR;
@@ -436,9 +652,10 @@ fn parse_version(input: ParseStream) -> syn::Result<LitStr> {
 ///
 /// ```ignore
 /// fluessig_derive::catalog! {
-///     name: "user_demo",
+///     name: "git_demo",
 ///     version: "0.1.0",
-///     entities: [User],
+///     entities: [Repo, Commit],
+///     edges: [CommitParent],
 /// }
 /// ```
 #[proc_macro]
@@ -447,21 +664,29 @@ pub fn catalog(input: TokenStream) -> TokenStream {
         name,
         version,
         entities,
+        edges,
     } = parse_macro_input!(input as CatalogInput);
 
     // The generated `fluessig_catalog` module nests one level below the
-    // invocation scope, so entity paths are reached through `super::`.
-    let descriptors = entities.iter().map(|e| {
+    // invocation scope, so entity/edge paths are reached through `super::`.
+    let entity_descriptors = entities.iter().map(|e| {
         quote! { <super::#e as ::fluessig_derive::Entity>::DESCRIPTOR }
+    });
+    let edge_descriptors = edges.iter().map(|e| {
+        quote! { <super::#e as ::fluessig_derive::Edge>::DESCRIPTOR }
     });
 
     quote! {
         /// Generated by `fluessig_derive::catalog!` — the exporter half of the
         /// derive front end (`derive-front-end.md` §2.8).
         pub mod fluessig_catalog {
-            /// The catalog descriptors listed in `catalog!`, in declaration order.
+            /// The entity descriptors listed in `catalog!`, in declaration order.
             pub const ENTITIES: &[&'static ::fluessig_derive::EntityDescriptor] =
-                &[ #( #descriptors ),* ];
+                &[ #( #entity_descriptors ),* ];
+
+            /// The edge descriptors listed in `catalog!`, in declaration order.
+            pub const EDGES: &[&'static ::fluessig_derive::EdgeDescriptor] =
+                &[ #( #edge_descriptors ),* ];
 
             /// The catalog name as declared in `catalog!`.
             pub const NAME: &str = #name;
@@ -470,12 +695,12 @@ pub fn catalog(input: TokenStream) -> TokenStream {
 
             /// Build the in-memory `fluessig::Catalog` IR from the descriptors.
             pub fn catalog() -> ::fluessig_derive::fluessig::Catalog {
-                ::fluessig_derive::build_catalog(NAME, VERSION, ENTITIES)
+                ::fluessig_derive::build_catalog_with_edges(NAME, VERSION, ENTITIES, EDGES)
             }
 
             /// Render the `catalog.json` text the existing Rust loader consumes.
             pub fn to_json() -> ::std::string::String {
-                ::fluessig_derive::to_catalog_json(NAME, VERSION, ENTITIES)
+                ::fluessig_derive::to_catalog_json_with_edges(NAME, VERSION, ENTITIES, EDGES)
             }
         }
     }

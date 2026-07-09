@@ -1,0 +1,242 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "git_gh_demo",
+  "scalars": [],
+  "unions": [],
+  "enums": [],
+  "entities": [
+    {
+      "name": "Repo",
+      "table": "repos",
+      "key": [
+        "id"
+      ],
+      "doc": "A repository — the single-column-keyed reference target shared by both\nfamilies.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The repo id (a path hash).",
+          "key": true
+        }
+      ]
+    },
+    {
+      "name": "Commit",
+      "table": "commits",
+      "key": [
+        "oid"
+      ],
+      "doc": "One commit. `#[fluessig(flatten)]` embeds `GitObject`, so `commits` carries\nthe root's `oid` (key) and `repo_id` columns inline, then its own fields.",
+      "fields": [
+        {
+          "name": "oid",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "Object id — the content hash. Globally unique, so the family key is `oid`.",
+          "key": true
+        },
+        {
+          "name": "repo_id",
+          "type": {
+            "k": "ref",
+            "name": "Repo",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The repo this object was seen in (an association, not a key member).",
+          "relation": {
+            "to": "Repo",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo_id"
+            ]
+          }
+        },
+        {
+          "name": "message",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The full commit message."
+        },
+        {
+          "name": "summary",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The first line of the message."
+        },
+        {
+          "name": "parents",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "ref",
+              "name": "Commit",
+              "entity": true
+            }
+          },
+          "nullable": false,
+          "doc": "The commit-parent edge — its own row struct (§2.4). A self-edge from `Commit`\nto `Commit`: the first `Id<Commit>` is the source, the second the target. The\nlocal key `idx` orders a merge's parents; the edge PK is `(commit_oid, idx)`.",
+          "relation": {
+            "to": "Commit",
+            "cardinality": "many",
+            "kind": "association",
+            "properties": "CommitParent",
+            "table": "commit_parents",
+            "fkColumns": [
+              "parent_oid"
+            ],
+            "sourceColumns": [
+              "commit_oid"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GhIssue",
+      "table": "gh_issues",
+      "key": [
+        "repo_id",
+        "number"
+      ],
+      "doc": "A GitHub issue — composite-keyed on `(repo_id, number)`. `ref_cols` spells the\n`number` key part as `issue_number` at referencing sites.",
+      "fields": [
+        {
+          "name": "repo_id",
+          "type": {
+            "k": "ref",
+            "name": "Repo",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The repo the issue belongs to.",
+          "key": true,
+          "relation": {
+            "to": "Repo",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo_id"
+            ]
+          }
+        },
+        {
+          "name": "number",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The issue number within the repo.",
+          "key": true
+        },
+        {
+          "name": "labels",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "ref",
+              "name": "GhLabel",
+              "entity": true
+            }
+          },
+          "nullable": false,
+          "doc": "The issue-label edge — a join edge with no local key. The `label` reference\n`#[fluessig(shares(repo_id))]` declares that the label's leading FK column is\nthe shared physical column `repo_id` — the same repo the issue is in — so the\n`gh_issue_labels` table carries `repo_id` **once**, not a separate\n`label_repo_id`.",
+          "relation": {
+            "to": "GhLabel",
+            "cardinality": "many",
+            "kind": "association",
+            "table": "gh_issue_labels",
+            "fkColumns": [
+              "repo_id",
+              "label_name"
+            ],
+            "sourceColumns": [
+              "repo_id",
+              "issue_number"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GhLabel",
+      "table": "gh_labels",
+      "key": [
+        "repo_id",
+        "name"
+      ],
+      "doc": "A GitHub label — composite-keyed on `(repo_id, name)`. `ref_cols` spells how\nreferencing sites name those key parts: `label_repo_id` / `label_name`.",
+      "fields": [
+        {
+          "name": "repo_id",
+          "type": {
+            "k": "ref",
+            "name": "Repo",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The repo the label belongs to.",
+          "key": true,
+          "relation": {
+            "to": "Repo",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo_id"
+            ]
+          }
+        },
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The label text.",
+          "key": true
+        }
+      ]
+    }
+  ],
+  "relationProperties": [
+    {
+      "name": "CommitParent",
+      "doc": "The commit-parent edge — its own row struct (§2.4). A self-edge from `Commit`\nto `Commit`: the first `Id<Commit>` is the source, the second the target. The\nlocal key `idx` orders a merge's parents; the edge PK is `(commit_oid, idx)`.",
+      "fields": [
+        {
+          "name": "idx",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "Parent ordinal — the edge's local key.",
+          "key": true
+        }
+      ]
+    }
+  ],
+  "valueStructs": []
+}

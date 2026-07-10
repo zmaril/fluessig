@@ -23,11 +23,24 @@
 //! * `#[fluessig(shares(col))]` — a reference's leading FK column shares a
 //!   physical column as a declared fact (§2.5).
 //!
-//! Field type mapping (`Id<T>`, scalars, `Option<…>`) stays `syn`-level — the
-//! macro sees the literal tokens, which is more direct than reconstructing from a
-//! monomorphised type (`notes/derive-front-end-decisions.md`, decision #4).
-//! Still out of scope: polymorphism (`abstract_root`), the op surface, and spans
-//! — Slices 4–6.
+//! Slice 4 adds **polymorphism** (Decision #3):
+//!
+//! * [`macro@AbstractRoot`] — `#[derive(AbstractRoot)]` with
+//!   `#[fluessig(abstract_root(Commit, Tree, Blob), tag_col = …, ref_col = …)]`
+//!   generates the native key enum `<Root>Id` (one variant per leaf, each
+//!   carrying the family key — heterogeneous across families), an
+//!   `impl AbstractRoot for <Root>` alias, and the root's (abstract) `Entity`
+//!   descriptor.
+//! * A leaf declares `#[fluessig(extends = Root)]`; a polymorphic reference site
+//!   names the generated enum natively (`subject: GhSubjectId`) and lowers to the
+//!   (tag, key) pair, with an optional per-site `#[fluessig(cols(tag = …,
+//!   key = …))]` override.
+//!
+//! Field type mapping (`Id<T>`, `<Root>Id`, scalars, `Option<…>`) stays
+//! `syn`-level — the macro sees the literal tokens, which is more direct than
+//! reconstructing from a monomorphised type
+//! (`notes/derive-front-end-decisions.md`, decision #4). Still out of scope: the
+//! op surface and spans — Slices 5–6.
 
 use darling::ast::{Data, NestedMeta};
 use darling::util::Ignored;
@@ -55,6 +68,35 @@ struct EntityOpts {
     name: Option<String>,
     #[darling(default)]
     ref_cols: RefCols,
+    /// `extends = Root` — this entity is a concrete leaf of the family rooted at
+    /// `Root` (Slice 4). Lowered to the catalog `extends`.
+    #[darling(default)]
+    extends: Option<syn::Path>,
+}
+
+/// The container-level options on an `#[derive(AbstractRoot)]` family root:
+/// `#[fluessig(abstract_root(A, B, …), tag_col = "…", ref_col = "…", ref_cols(…))]`
+/// (Slice 4). The root is also an `Entity` (abstract); the derive additionally
+/// generates the `<Root>Id` key enum + the `AbstractRoot` alias.
+#[derive(FromDeriveInput)]
+#[darling(attributes(fluessig), supports(struct_named), forward_attrs(doc))]
+struct AbstractRootOpts {
+    ident: Ident,
+    attrs: Vec<syn::Attribute>,
+    data: Data<Ignored, FluField>,
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    ref_cols: RefCols,
+    /// The closed leaf set: `abstract_root(Commit, Tree, Blob)`.
+    abstract_root: AbstractLeaves,
+    /// The discriminator column a polymorphic reference to this family spells.
+    #[darling(default)]
+    tag_col: Option<String>,
+    /// For a single-column-keyed family: the key column a polymorphic reference
+    /// spells by default. Composite families use `ref_cols(…)` instead.
+    #[darling(default)]
+    ref_col: Option<String>,
 }
 
 /// The container-level options on an `#[derive(Edge)]` struct:
@@ -95,6 +137,43 @@ struct FluField {
     key: bool,
     #[darling(default)]
     shares: Shares,
+    /// `cols(tag = "…", key = "…")` — a per-site column-spelling override on a
+    /// polymorphic reference field (Slice 4). Only meaningful when the field is
+    /// typed `<Root>Id`.
+    #[darling(default)]
+    cols: Option<ColsMeta>,
+}
+
+/// `cols(tag = "…", key = "…")` — the per-site spelling override of a polymorphic
+/// reference's (tag, key) columns (Slice 4, entl FINDINGS #7).
+#[derive(FromMeta, Default)]
+struct ColsMeta {
+    #[darling(default)]
+    tag: Option<String>,
+    #[darling(default)]
+    key: Option<String>,
+}
+
+/// `abstract_root(Commit, Tree, Blob)` — the closed leaf set of a family, as bare
+/// idents (they name the generated `<Root>Id` enum variants; the leaf entities
+/// point back via `extends`).
+#[derive(Default)]
+struct AbstractLeaves(Vec<Ident>);
+
+impl FromMeta for AbstractLeaves {
+    fn from_list(items: &[NestedMeta]) -> darling::Result<Self> {
+        parse_meta_list(items, |item| match item {
+            NestedMeta::Meta(syn::Meta::Path(p)) => p.get_ident().cloned().ok_or_else(|| {
+                darling::Error::custom("abstract_root(Leaf, …) expects bare leaf names")
+                    .with_span(p)
+            }),
+            other => Err(
+                darling::Error::custom("abstract_root(Leaf, …) expects bare leaf names")
+                    .with_span(other),
+            ),
+        })
+        .map(AbstractLeaves)
+    }
 }
 
 /// `ref_cols(field = "col", …)` — arbitrary field-name keys → column names.
@@ -219,27 +298,72 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 }
 
 fn expand_entity(opts: EntityOpts) -> syn::Result<proc_macro2::TokenStream> {
-    let ident = &opts.ident;
     let fields = opts
         .data
         .take_struct()
         .expect("supports(struct_named) guarantees a struct")
         .fields;
+    // `extends = Root` names the abstract family this leaf belongs to.
+    let extends = opts
+        .extends
+        .as_ref()
+        .map(path_ident)
+        .transpose()?
+        .map(|i| i.to_string());
+    entity_descriptor_impl(EntityDescriptorArgs {
+        ident: &opts.ident,
+        attrs: &opts.attrs,
+        fields: &fields,
+        name: opts.name.as_deref(),
+        ref_cols: &opts.ref_cols,
+        extends: extends.as_deref(),
+        abstract_leaves: &[],
+        id_enum: None,
+        tag_col: None,
+        ref_col: None,
+    })
+}
 
-    let table_tokens = option_str(opts.name.as_deref());
-    let ref_col_tokens = opts.ref_cols.0.iter().map(|(field, column)| {
+/// The inputs to [`entity_descriptor_impl`] — the one place a
+/// `&'static EntityDescriptor` `impl Entity` is emitted, shared by
+/// `#[derive(Entity)]` (plain entities + leaves) and `#[derive(AbstractRoot)]`
+/// (family roots). Grouped in a struct so the polymorphic fields don't balloon
+/// the arity (and to keep the two callers a single lowering, not a copy).
+struct EntityDescriptorArgs<'a> {
+    ident: &'a Ident,
+    attrs: &'a [syn::Attribute],
+    fields: &'a [FluField],
+    name: Option<&'a str>,
+    ref_cols: &'a RefCols,
+    extends: Option<&'a str>,
+    abstract_leaves: &'a [String],
+    id_enum: Option<&'a str>,
+    tag_col: Option<&'a str>,
+    ref_col: Option<&'a str>,
+}
+
+/// Emit `impl fluessig_derive::Entity` carrying the `&'static EntityDescriptor`.
+fn entity_descriptor_impl(a: EntityDescriptorArgs) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = a.ident;
+    let table_tokens = option_str(a.name);
+    let ref_col_tokens = a.ref_cols.0.iter().map(|(field, column)| {
         quote! {
             ::fluessig_derive::RefColDescriptor { field: #field, column: #column }
         }
     });
 
     let mut field_descriptors = Vec::new();
-    for field in &fields {
+    for field in a.fields {
         field_descriptors.push(field_descriptor_tokens(field)?);
     }
 
-    let entity_doc_tokens = option_str(doc_string(&opts.attrs).as_deref());
+    let entity_doc_tokens = option_str(doc_string(a.attrs).as_deref());
     let name_str = ident.to_string();
+    let extends_tokens = option_str(a.extends);
+    let leaves_tokens = a.abstract_leaves.iter().map(|l| quote! { #l });
+    let id_enum_tokens = option_str(a.id_enum);
+    let tag_col_tokens = option_str(a.tag_col);
+    let ref_col_tokens_single = option_str(a.ref_col);
 
     Ok(quote! {
         impl ::fluessig_derive::Entity for #ident {
@@ -250,8 +374,111 @@ fn expand_entity(opts: EntityOpts) -> syn::Result<proc_macro2::TokenStream> {
                     doc: #entity_doc_tokens,
                     fields: &[ #( #field_descriptors ),* ],
                     ref_cols: &[ #( #ref_col_tokens ),* ],
+                    extends: #extends_tokens,
+                    abstract_leaves: &[ #( #leaves_tokens ),* ],
+                    id_enum: #id_enum_tokens,
+                    tag_col: #tag_col_tokens,
+                    ref_col: #ref_col_tokens_single,
                 };
         }
+    })
+}
+
+// ─────────────────────────── #[derive(AbstractRoot)] ───────────────────────────
+
+/// Derive a polymorphic family root (Slice 4, Decision #3).
+///
+/// ```ignore
+/// #[derive(AbstractRoot)]
+/// #[fluessig(abstract_root(Commit, Tree, Blob), tag_col = "obj_type", ref_col = "obj_oid")]
+/// pub struct GitObject {
+///     #[key] pub oid: String,
+///     pub repo_id: Id<Repo>,
+/// }
+/// // generates: pub enum GitObjectId { Commit(String), Tree(String), Blob(String) }
+/// //            impl AbstractRoot for GitObject { type Id = GitObjectId; }
+/// //            impl Entity for GitObject { … abstract, carries (oid, repo_id) … }
+/// ```
+///
+/// The enum carries the family key per variant — heterogeneous across families
+/// (a composite-keyed root generates `GhSubjectId { GhPullRequest(Id<Repo>, i32),
+/// … }`). Leaves point back with `#[fluessig(extends = GitObject)]`.
+#[proc_macro_derive(AbstractRoot, attributes(fluessig, key))]
+pub fn derive_abstract_root(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    let opts = match AbstractRootOpts::from_derive_input(&input) {
+        Ok(o) => o,
+        Err(e) => return e.write_errors().into(),
+    };
+    match expand_abstract_root(opts) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_abstract_root(opts: AbstractRootOpts) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = &opts.ident;
+    let fields = opts
+        .data
+        .take_struct()
+        .expect("supports(struct_named) guarantees a struct")
+        .fields;
+
+    let leaves = &opts.abstract_root.0;
+    if leaves.is_empty() {
+        return Err(syn::Error::new_spanned(
+            ident,
+            "abstract_root(...) needs at least one leaf, e.g. abstract_root(Commit, Tree, Blob)",
+        ));
+    }
+
+    // The family key's field types, in declaration order — the payload each
+    // generated enum variant carries. Heterogeneous families fall out for free:
+    // the tokens are whatever the key fields are typed (a scalar, an `Id<T>`, …).
+    let key_types: Vec<&Type> = fields
+        .iter()
+        .filter(|f| f.key || has_bare_key(&f.attrs))
+        .map(|f| &f.ty)
+        .collect();
+    if key_types.is_empty() {
+        return Err(syn::Error::new_spanned(
+            ident,
+            "an abstract_root must declare the family key with #[key]",
+        ));
+    }
+
+    let id_enum = Ident::new(&format!("{ident}Id"), ident.span());
+    let variants = leaves
+        .iter()
+        .map(|leaf| quote! { #leaf ( #( #key_types ),* ) });
+
+    let leaf_names: Vec<String> = leaves.iter().map(|l| l.to_string()).collect();
+    let id_enum_str = id_enum.to_string();
+    let descriptor = entity_descriptor_impl(EntityDescriptorArgs {
+        ident,
+        attrs: &opts.attrs,
+        fields: &fields,
+        name: opts.name.as_deref(),
+        ref_cols: &opts.ref_cols,
+        extends: None,
+        abstract_leaves: &leaf_names,
+        id_enum: Some(&id_enum_str),
+        tag_col: opts.tag_col.as_deref(),
+        ref_col: opts.ref_col.as_deref(),
+    })?;
+
+    Ok(quote! {
+        /// The generated family key enum (Slice 4, Decision #3): one variant per
+        /// leaf, each carrying the family key. Discoverable as
+        /// `<Root as fluessig_derive::AbstractRoot>::Id`.
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum #id_enum { #( #variants ),* }
+
+        impl ::fluessig_derive::AbstractRoot for #ident {
+            type Id = #id_enum;
+        }
+
+        #descriptor
     })
 }
 
@@ -364,6 +591,17 @@ fn field_descriptor_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenSt
             ) },
             false,
         )
+    } else if let Some((id_enum, poly_nullable)) = poly_ref_type(&field.ty) {
+        // A field typed `<Root>Id` is a polymorphic family reference (Slice 4);
+        // `cols(tag = …, key = …)` carries any per-site spelling override.
+        let tag = option_str(field.cols.as_ref().and_then(|c| c.tag.as_deref()));
+        let key = option_str(field.cols.as_ref().and_then(|c| c.key.as_deref()));
+        (
+            quote! { ::fluessig_derive::FieldKind::PolyReference(
+                ::fluessig_derive::PolyRef { id_enum: #id_enum, tag_col: #tag, ref_col: #key }
+            ) },
+            poly_nullable,
+        )
     } else {
         map_field_type(&field.ty)?
     };
@@ -401,6 +639,35 @@ fn path_ident(p: &syn::Path) -> syn::Result<Ident> {
 fn ref_target(ty: &Type) -> syn::Result<Option<Ident>> {
     let inner = option_inner(ty).unwrap_or(ty);
     id_target(inner)
+}
+
+/// A field typed `<Root>Id` — a bare single-segment path identifier ending in
+/// `Id` (capital I), NOT the generic `Id<T>` and NOT `Id` itself — is a
+/// polymorphic family reference (Slice 4, Decision #3: reference sites name the
+/// generated key enum natively). Returns the enum type name + nullability;
+/// `Id<T>` (angle-bracketed) and scalar primitives fall through to the Slice-2
+/// mapping. The `<Root>Id` naming convention is the signal — the enum resolves to
+/// its family at lowering, so a name that doesn't is caught there, not here.
+fn poly_ref_type(ty: &Type) -> Option<(String, bool)> {
+    let (inner, nullable) = match option_inner(ty) {
+        Some(i) => (i, true),
+        None => (ty, false),
+    };
+    let Type::Path(tp) = inner else {
+        return None;
+    };
+    if tp.qself.is_some() || tp.path.segments.len() != 1 {
+        return None;
+    }
+    let seg = &tp.path.segments[0];
+    // a generic (`Id<T>`, `Option<…>`) is not a family enum name
+    if !matches!(seg.arguments, PathArguments::None) {
+        return None;
+    }
+    let name = seg.ident.to_string();
+    // `<Root>Id`: ends in "Id" with a nonempty root before it. (Bare `Id` is the
+    // Slice-2 FK marker; scalars like `Oid` end in a lowercase "id" and miss.)
+    (name.len() > 2 && name.ends_with("Id")).then_some((name, nullable))
 }
 
 /// Map a Rust field type to a `FieldKind` token and its nullability.
@@ -514,8 +781,8 @@ fn unsupported(ty: &Type) -> syn::Error {
         ty,
         "unsupported field type — supported so far: scalar primitives \
          (i8..i64, u8..u64, f32/f64, bool, String), foreign keys Id<T>, \
-         Option<…> of either, and a #[fluessig(flatten)] embedded struct. \
-         Polymorphism (abstract_root) arrives in Slice 4.",
+         polymorphic family references <Root>Id, Option<…> of any, and a \
+         #[fluessig(flatten)] embedded struct.",
     )
 }
 

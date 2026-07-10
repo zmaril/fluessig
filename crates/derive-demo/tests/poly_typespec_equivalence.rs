@@ -1,0 +1,34 @@
+//! Slice 4 semantic-equivalence check: the derive-authored polymorphic-family
+//! catalog (`src/poly.rs`) and the TypeSpec-authored one (`poly.tsp`) project to
+//! the **same physical tables** — same table names, columns (name + type +
+//! nullability), and primary keys — even though they spell families and
+//! polymorphic references differently at the front end (`#[derive(AbstractRoot)]`
+//! + generated `<Root>Id` enum + `extends` vs `@abstract` + `extends` + `@fk(…,
+//! typeColumn)`).
+//!
+//! The TypeSpec catalog is produced out-of-band by the Node emitter
+//! (`node emitter/emit.mjs crates/derive-demo/poly.tsp --out <dir>`), so this test
+//! only runs when its path is provided:
+//!
+//! ```sh
+//! TMP=$(mktemp -d)
+//! node emitter/emit.mjs crates/derive-demo/poly.tsp --out "$TMP"
+//! FLUESSIG_TSP_CATALOG_POLY="$TMP/catalog.json" \
+//!   cargo test -p derive-demo --test poly_typespec_equivalence -- --nocapture
+//! ```
+//!
+//! Without the env var it prints a skip note and passes, so CI (which has no Node
+//! toolchain on the derive-crate job) stays green while the equivalence stays
+//! reproducible on demand.
+
+mod common;
+
+#[test]
+fn derive_and_typespec_project_to_the_same_tables() {
+    common::assert_typespec_equivalent(
+        &derive_demo::poly::fluessig_catalog::to_json(),
+        "FLUESSIG_TSP_CATALOG_POLY",
+        "derive (src/poly.rs)",
+        "typespec (poly.tsp)",
+    );
+}

@@ -27,7 +27,21 @@ The pipeline has two stages: a **front end** lowers your schema to
 this repo's root — generates code from those artifacts. The store is a derived
 cache: regenerate and re-ingest on any schema change.
 
-## Two front ends
+## Install
+
+There's no published crate yet — build the engine from a checkout:
+
+```sh
+cargo build --release      # -> target/release/fluessig-gen
+```
+
+The TypeSpec front end also needs the emitter's npm deps (`cd emitter && npm
+install`); the derive front end needs only the Rust workspace.
+
+## Usage
+
+fluessig has **two front ends** — reach for the derive front end for new work,
+the TypeSpec one for parity with today's consumers.
 
 ### The derive front end (Rust-first — the direction)
 
@@ -123,6 +137,14 @@ TypeSpec emitter plus `fluessig-gen` from their own `scripts/gen.sh`.
 
 [entl]: https://github.com/zmaril/entl
 [disponent]: https://github.com/zmaril/disponent
+
+## Contributing
+
+Issues and PRs welcome. PR titles follow [Conventional Commits] (`type(scope):
+summary`) — CI checks it. Run `cargo fmt`, `cargo clippy -- -D warnings`, and
+`cargo test` (plus the emitter's `node test.mjs`) before pushing.
+
+[Conventional Commits]: https://www.conventionalcommits.org
 
 ## Conventions & gotchas
 

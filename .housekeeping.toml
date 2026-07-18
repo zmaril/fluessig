@@ -5,3 +5,9 @@ fleet = "zmaril/powderworks"
 website = "off"
 # Adopted on enrollment; the fleet default is "recommended".
 conventional-commits = "required"
+
+[scripts]
+# Deliberate keeper: the publish crate's dry-run verifier lives beside the
+# crate's tests (not scripts/) so `cargo test` and the README reference it in
+# place.
+allow = ["crates/fluessig-publish/tests/verify_dry_run.sh"]

@@ -2,7 +2,7 @@
 //! (a DDL default) and `#[fluessig(derived(exists|count, of = "rel", filter(k = v)))]`
 //! (a derived field). Split out of the crate root to keep it under the file-size
 //! budget; the shared field helpers (`lit_str`, `option_str`, `parse_meta_list`)
-//! are the root module's, re-used here.
+//! are the root module's, reused here.
 
 use darling::ast::NestedMeta;
 use darling::FromMeta;

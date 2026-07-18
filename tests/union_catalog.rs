@@ -103,7 +103,7 @@ fn union_crosses_the_op_layer() {
 
     // bindgen: union values cross as the JSON envelope (String carrier), and
     // the generated surface still renders for every language
-    let enums: Vec<(String, Vec<String>)> = Vec::new();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     let node = fluessig::bindgen::node_binding(&api, &enums, None);
     assert!(
         node.contains("pub payload: String"),
@@ -121,7 +121,7 @@ fn union_crosses_the_op_layer() {
 
 fn node_fixture() -> String {
     let api = fluessig::api::load_api(API).unwrap();
-    let enums: Vec<(String, Vec<String>)> = Vec::new();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     fluessig::bindgen::node_binding(&api, &enums, None)
 }
 
@@ -218,7 +218,7 @@ fn node_annotated_stream_op_yields_error_event_never_throws() {
       ] } ]
     }"#;
     let api = fluessig::api::load_api(json).unwrap();
-    let enums: Vec<(String, Vec<String>)> = Vec::new();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     let node = fluessig::bindgen::node_binding(&api, &enums, None);
     // pi-shaped error-event struct (bare `@streamError` → defaults)
     let s = node
@@ -291,7 +291,7 @@ fn node_annotated_stream_error_event_is_configurable() {
       ] } ]
     }"#;
     let api = fluessig::api::load_api(json).unwrap();
-    let enums: Vec<(String, Vec<String>)> = Vec::new();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     let node = fluessig::bindgen::node_binding(&api, &enums, None);
     assert!(node.contains("pub struct TicksErrorEvent"), "{node}");
     assert!(
@@ -359,9 +359,14 @@ fn node_name_only_enums_lower_to_snake_case_string_enums() {
     // emitter hands out via `wire()`, not the magic discriminant number a plain
     // `#[napi]` enum emits.
     let api = fluessig::api::load_api(API).unwrap();
-    let enums = vec![(
+    // The shared enum form with no pins: both variants fall back to the default
+    // `to_lowercase()` wire token — proving un-pinned emission is unchanged.
+    let enums: Vec<fluessig::bindgen::EnumDesc> = vec![(
         "CapabilityKind".to_string(),
-        vec!["dispatch".to_string(), "isolation_vm".to_string()],
+        vec![
+            fluessig::bindgen::EnumVariant::plain("dispatch"),
+            fluessig::bindgen::EnumVariant::plain("isolation_vm"),
+        ],
     )];
     let node = fluessig::bindgen::node_binding(&api, &enums, None);
     assert!(
@@ -478,7 +483,7 @@ fn stream_op_projects_async_iterable_and_retains_poll_cursor() {
     // `impl AsyncGenerator`) AND the retained `next()` poll cursor. The class is
     // `Events`, the item `Event`. Substrings match the rustfmt'd emission.
     let api = fluessig::api::load_api(API).unwrap();
-    let enums: Vec<(String, Vec<String>)> = Vec::new();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     let node = fluessig::bindgen::node_binding(&api, &enums, None);
 
     // async-iterable surface

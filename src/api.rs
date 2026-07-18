@@ -2,7 +2,11 @@
 //! `emitter/api.schema.json`): interfaces, ops with shapes, params, returns,
 //! and the DTO models the ops reference. The input to [`crate::bindgen`].
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
+
+pub use crate::ir::SymbolBinding;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -27,6 +31,10 @@ pub struct ApiUnion {
     #[serde(default)]
     pub doc: Option<String>,
     pub variants: Vec<ApiUnionVariant>,
+    /// Per-language export-name / package / module pins for this union symbol
+    /// (see [`SymbolBinding`]). Empty ⇒ every backend's default rule.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, SymbolBinding>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,6 +52,10 @@ pub struct ApiModel {
     #[serde(default)]
     pub doc: Option<String>,
     pub fields: Vec<ApiField>,
+    /// Per-language export-name / package / module pins for this model symbol
+    /// (see [`SymbolBinding`]). Empty ⇒ every backend's default rule.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, SymbolBinding>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +65,13 @@ pub struct ApiField {
     #[serde(rename = "type")]
     pub ty: ApiType,
     pub nullable: bool,
+    /// Per-language export-name pins for this field (see [`SymbolBinding`]).
+    /// `bindings["node"].name` ⇒ `#[napi(js_name = "…")]`, `bindings["python"]`
+    /// ⇒ `#[pyo3(name = "…")]`, `bindings["php"]` ⇒ the ext-php-rs
+    /// `#[rename("…")]`, etc. — each backend overrides ONLY its own casing rule.
+    /// Empty ⇒ default behaviour, byte-identical to before this slot existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, SymbolBinding>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,6 +110,10 @@ pub struct ApiOp {
     pub stream_error: Option<StreamErrorShape>,
     pub params: Vec<ApiParam>,
     pub returns: ApiType,
+    /// Per-language export-name / package / module pins for this op symbol (see
+    /// [`SymbolBinding`]). Empty ⇒ every backend's default rule.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, SymbolBinding>,
 }
 
 /// The JS shape of a stream op's terminal error event (event-mode only, i.e. when

@@ -10,6 +10,13 @@ use crate::api::{ApiDoc, ApiType, Shape};
 
 use super::*;
 
+/// This backend's language slug — the key it reads out of every symbol's
+/// `bindings` map via the shared [`pinned_name`] / [`variant_token`] resolver.
+/// PHP hardcodes no pin; ext-php-rs (0.13.x / derive 0.10.2) renames methods to
+/// camelCase by default, and its per-method rename lever is the bare
+/// `#[rename("…")]` attribute — the only two things this backend owns.
+const LANG: &str = "php";
+
 /// The PHP-visible type name for an [`ApiType`] — what PHP's own type system
 /// sees (`string`/`int`/`float`/`bool`/`array`), used only in the generated
 /// method docblocks. ext-php-rs signatures themselves speak Rust types, so the
@@ -55,11 +62,7 @@ fn php_sig_note(iface: &str, op: &crate::api::ApiOp) -> String {
 /// traits, per-interface `#[php_class]`/`#[php_impl]` surfaces (a stateful
 /// handle with a `__construct`, or a stateless class of static methods),
 /// `next()`-null stream cursors, and the `#[php_module]` registrar.
-pub fn php_binding(
-    api: &ApiDoc,
-    enums: &[(String, Vec<String>)],
-    banner_note: Option<&str>,
-) -> String {
+pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
     let mut t: rust::Tokens = quote! {
         $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
         use std::sync::Arc;
@@ -100,18 +103,27 @@ pub fn php_binding(
         if is_string_enum(api, name) {
             continue;
         }
-        let vs: Vec<String> = variants.iter().map(|v| pascal(v)).collect();
+        // The wire token comes from the shared resolver (a `php` pin wins, then
+        // the neutral `Variant.value`, else `to_lowercase()`); un-pinned is
+        // exactly the old `to_lowercase()`, so the emission is byte-identical.
+        let vs: Vec<String> = variants.iter().map(|v| pascal(&v.name)).collect();
         let arms: Vec<String> = variants
             .iter()
-            .map(|v| format!("{:?} => Ok(Self::{}),", v.to_lowercase(), pascal(v)))
+            .map(|v| {
+                format!(
+                    "{:?} => Ok(Self::{}),",
+                    variant_token(v, LANG),
+                    pascal(&v.name)
+                )
+            })
             .collect();
         let wire_arms: Vec<String> = variants
             .iter()
-            .map(|v| format!("Self::{} => {:?},", pascal(v), v.to_lowercase()))
+            .map(|v| format!("Self::{} => {:?},", pascal(&v.name), variant_token(v, LANG)))
             .collect();
         let expect = variants
             .iter()
-            .map(|v| v.to_lowercase())
+            .map(|v| variant_token(v, LANG))
             .collect::<Vec<_>>()
             .join(" | ");
         quote_in! { t =>
@@ -169,11 +181,27 @@ pub fn php_binding(
                 } else {
                     r
                 };
+                // The Rust getter ident stays `snake`; ext-php-rs renames it to
+                // camelCase in PHP by default. A `php` pin overrides that with
+                // the ext-php-rs `#[rename("…")]` attribute (derive 0.10.2 syntax:
+                // a bare attr taking a string literal). Un-pinned ⇒ no attr,
+                // byte-identical to the default camelCase.
                 let n = snake(&f.name);
-                quote! {
-                    pub fn $(&n)(&self) -> $r {
-                        self.$(&n).clone()
+                match pinned_name(&f.bindings, LANG) {
+                    Some(nm) => {
+                        let attr = format!("#[rename({nm:?})]");
+                        quote! {
+                            $attr
+                            pub fn $(&n)(&self) -> $r {
+                                self.$(&n).clone()
+                            }
+                        }
                     }
+                    None => quote! {
+                        pub fn $(&n)(&self) -> $r {
+                            self.$(&n).clone()
+                        }
+                    },
                 }
             })
             .collect();

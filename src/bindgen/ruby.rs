@@ -10,6 +10,12 @@ use crate::api::{ApiDoc, ApiOp, ApiType, Shape};
 
 use super::*;
 
+/// This backend's language slug — the key it reads out of every symbol's
+/// `bindings` map via the shared [`pinned_name`] / [`variant_token`] resolver.
+/// Ruby hardcodes no pin; its rename lever is the method-name string it hands
+/// `define_method` and the enum `wire()` token.
+const LANG: &str = "ruby";
+
 /// The models an op surface RETURNS (directly, in lists, or nullable) — these
 /// get Ruby classes with getters; input bags are flattened away instead.
 fn output_models(api: &ApiDoc) -> Vec<String> {
@@ -295,11 +301,7 @@ fn rb_op_pieces(api: &ApiDoc, op: &ApiOp) -> RbPieces {
 /// Generate the Magnus (Ruby) binding: plain-Rust DTOs + enums (with parse),
 /// wrapped output classes with getters, GVL-plain methods with trailing
 /// optionals, `.next`-nil streams, and a `register()` for `#[magnus::init]`.
-pub fn ruby_binding(
-    api: &ApiDoc,
-    enums: &[(String, Vec<String>)],
-    banner_note: Option<&str>,
-) -> String {
+pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
     let outputs = output_models(api);
     // The Ruby module/root class name: the stateful (ctor-bearing) interface's
     // name — the class the DTO classes nest under and stateless interfaces hang
@@ -349,14 +351,23 @@ pub fn ruby_binding(
         if is_string_enum(api, name) {
             continue;
         }
-        let vs: Vec<String> = variants.iter().map(|v| pascal(v)).collect();
+        // The wire token comes from the shared resolver (a `ruby` pin wins, then
+        // the neutral `Variant.value`, else `to_lowercase()`); un-pinned is
+        // exactly the old `to_lowercase()`, so the emission is byte-identical.
+        let vs: Vec<String> = variants.iter().map(|v| pascal(&v.name)).collect();
         let arms: Vec<String> = variants
             .iter()
-            .map(|v| format!("{:?} => Ok(Self::{}),", v.to_lowercase(), pascal(v)))
+            .map(|v| {
+                format!(
+                    "{:?} => Ok(Self::{}),",
+                    variant_token(v, LANG),
+                    pascal(&v.name)
+                )
+            })
             .collect();
         let expect = variants
             .iter()
-            .map(|v| v.to_lowercase())
+            .map(|v| variant_token(v, LANG))
             .collect::<Vec<_>>()
             .join(" | ");
         quote_in! { t =>
@@ -380,7 +391,7 @@ pub fn ruby_binding(
         if crossing.contains(name) {
             let wire_arms: Vec<String> = variants
                 .iter()
-                .map(|v| format!("Self::{} => {:?},", pascal(v), v.to_lowercase()))
+                .map(|v| format!("Self::{} => {:?},", pascal(&v.name), variant_token(v, LANG)))
                 .collect();
             quote_in! { t =>
                 $['\r']
@@ -533,9 +544,13 @@ pub fn ruby_binding(
                 m.name
             ));
             for f in &m.fields {
+                // The internal Rust getter is always `get_{snake}`; the
+                // Ruby-visible method name is a `ruby` pin when present, else the
+                // default `snake` (byte-identical un-pinned).
                 let n = snake(&f.name);
+                let rb = pinned_name(&f.bindings, LANG).unwrap_or_else(|| n.clone());
                 registrations.push(format!(
-                    "c.define_method({n:?}, method!({}::get_{n}, 0))?;",
+                    "c.define_method({rb:?}, method!({}::get_{n}, 0))?;",
                     m.name
                 ));
             }

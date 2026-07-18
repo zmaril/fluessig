@@ -33,6 +33,16 @@ fn main() {
     let ruby = flag("--ruby");
     let php = flag("--php");
     let mcp = flag("--mcp");
+    // Opt-in package/module fan-out: a patterned path like
+    // `out/{package}/{module}.rs`. When the api schema carries `(package,
+    // module)` group pins for the language, symbols partition into one file per
+    // distinct group, `{package}`/`{module}` substituted VERBATIM. No grouping
+    // pins ⇒ nothing written here; the single-file `--<lang>` path is untouched.
+    let node_out = flag("--node-out");
+    let python_out = flag("--python-out");
+    let ruby_out = flag("--ruby-out");
+    let php_out = flag("--php-out");
+    let mcp_out = flag("--mcp-out");
     let py_models = flag("--py-models");
     let ts_tables = flag("--ts-tables");
     let ts_drizzle = flag("--ts-drizzle");
@@ -76,24 +86,47 @@ fn main() {
     if let Some(p) = ts_drizzle {
         write(&p, fluessig::codegen::ts_drizzle(&catalog, note));
     }
-    if node.is_some() || python.is_some() || ruby.is_some() || php.is_some() || mcp.is_some() {
+    let want_bindings = node.is_some()
+        || python.is_some()
+        || ruby.is_some()
+        || php.is_some()
+        || mcp.is_some()
+        || node_out.is_some()
+        || python_out.is_some()
+        || ruby_out.is_some()
+        || php_out.is_some()
+        || mcp_out.is_some();
+    if want_bindings {
         let Some(ap) = api_path.as_deref() else {
-            eprintln!("--node/--python/--ruby/--php/--mcp require --api <api.json>");
+            eprintln!("--node/--python/--ruby/--php/--mcp (and their --*-out fan-out) require --api <api.json>");
             std::process::exit(2);
         };
         let api = fluessig::api::load_api_file(ap).unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1);
         });
-        // name-only enums from the catalog become napi string enums (snake_case
-        // wire tokens); wire-valued ones are plain strings
-        let enums: Vec<(String, Vec<String>)> = catalog
+        // The shared per-variant enum form every backend consumes: the catalog
+        // member name, the neutral `Variant.value` wire override (when a string),
+        // and the per-language export-name pins. Each backend resolves its own
+        // token / rename through `bindgen::variant_token` / `pinned_name`.
+        let enums: Vec<fluessig::bindgen::EnumDesc> = catalog
             .enums
             .iter()
             .map(|e| {
                 (
                     e.name.clone(),
-                    e.variants.iter().map(|v| v.name.clone()).collect(),
+                    e.variants
+                        .iter()
+                        .map(|v| fluessig::bindgen::EnumVariant {
+                            name: v.name.clone(),
+                            value: v
+                                .value
+                                .as_ref()
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string),
+                            bindings: v.bindings.clone(),
+                        })
+                        .collect(),
                 )
             })
             .collect();
@@ -112,6 +145,47 @@ fn main() {
         if let Some(m) = mcp {
             write(&m, fluessig::bindgen::mcp_module(&api, &enums, note));
         }
+
+        // ── opt-in package/module fan-out ──
+        // One file per distinct `(package, module)` group the schema pins for
+        // the language; `{package}`/`{module}` substituted verbatim. A language
+        // with no group pins produces nothing. See `bindgen::fan_out`'s KNOWN
+        // LIMITATION: group files are the DTO surface and cross-group references
+        // are not yet import-resolved, so this stays strictly opt-in.
+        let fan = |lang: &str,
+                   pattern: Option<String>,
+                   render: &dyn Fn(&fluessig::api::ApiDoc) -> String| {
+            if let Some(pat) = pattern {
+                let groups = fluessig::bindgen::fan_out(&api, lang, &pat);
+                if groups.is_empty() {
+                    eprintln!("note: --{lang}-out given but the schema carries no {lang} package/module pins; nothing fanned out");
+                }
+                for (path, sub) in groups {
+                    if let Some(dir) = std::path::Path::new(&path).parent() {
+                        std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+                            eprintln!("mkdir {}: {e}", dir.display());
+                            std::process::exit(1);
+                        });
+                    }
+                    write(&path, render(&sub));
+                }
+            }
+        };
+        fan("node", node_out, &|a| {
+            fluessig::bindgen::node_binding(a, &enums, note)
+        });
+        fan("python", python_out, &|a| {
+            fluessig::bindgen::python_binding(a, &enums, note)
+        });
+        fan("ruby", ruby_out, &|a| {
+            fluessig::bindgen::ruby_binding(a, &enums, note)
+        });
+        fan("php", php_out, &|a| {
+            fluessig::bindgen::php_binding(a, &enums, note)
+        });
+        fan("mcp", mcp_out, &|a| {
+            fluessig::bindgen::mcp_module(a, &enums, note)
+        });
     }
 
     if let Some(tpl_path) = readme {

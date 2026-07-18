@@ -26,9 +26,186 @@ pub use php::php_binding;
 pub use python::python_binding;
 pub use ruby::ruby_binding;
 
+use std::collections::BTreeMap;
+
 use genco::prelude::*;
 
 use crate::api::{ApiDoc, ApiOp, ApiType, Shape};
+
+/// Re-exported so backends (and the php backend when `php.rs` lands its own
+/// consumer) reach the pinning type through `crate::bindgen`.
+pub use crate::api::SymbolBinding;
+
+// ── the language-agnostic pinning resolver ───────────────────────────────────
+//
+// Every backend keeps ONLY (i) its default casing rule and (ii) its own rename
+// syntax; the DECISION of whether a symbol is pinned (and to what) lives here,
+// once, keyed by the backend's `const LANG`. No backend hardcodes a pin, and no
+// per-language logic leaks into this table — that is the whole point of the
+// generalization over the earlier node-only `jsName` slot.
+
+/// The exact emitted name a symbol is pinned to in `lang`, or `None` (⇒ the
+/// backend applies its own default casing). Looks up `bindings[lang].name`.
+pub fn pinned_name(bindings: &BTreeMap<String, SymbolBinding>, lang: &str) -> Option<String> {
+    bindings.get(lang).and_then(|b| b.name.clone())
+}
+
+/// The `(package, module)` group a symbol is pinned into for `lang`, or `None`
+/// (⇒ the symbol stays in the single default file). `package` is the grouping
+/// key; a missing `module` defaults to the empty string. Both strings are used
+/// VERBATIM (no casing transform) so exact package names / deep import paths
+/// reproduce byte-for-byte. Consumed only by the opt-in fan-out.
+pub fn pinned_group(
+    bindings: &BTreeMap<String, SymbolBinding>,
+    lang: &str,
+) -> Option<(String, String)> {
+    let b = bindings.get(lang)?;
+    let package = b.package.clone()?;
+    let module = b.module.clone().unwrap_or_default();
+    Some((package, module))
+}
+
+/// One enum variant as the backends see it: the Rust-side member `name`, the
+/// language-NEUTRAL wire `value` override (catalog `Variant.value`, when a
+/// string), and the per-language `bindings`. The shared, uniform form every
+/// backend consumes — no backend takes a bespoke enum shape any more.
+#[derive(Clone, Debug)]
+pub struct EnumVariant {
+    /// The catalog member name; the Rust variant ident is always `pascal(name)`.
+    pub name: String,
+    /// The neutral wire override (`Variant.value`), when present as a string.
+    pub value: Option<String>,
+    /// Per-language export-name pins ([`SymbolBinding`]).
+    pub bindings: BTreeMap<String, SymbolBinding>,
+}
+
+/// An enum as the backends see it: `(enum name, variants)`.
+pub type EnumDesc = (String, Vec<EnumVariant>);
+
+impl EnumVariant {
+    /// A plain, un-pinned variant carrying only its name — the shape the
+    /// name-only catalog enums (and most tests) build.
+    pub fn plain(name: impl Into<String>) -> Self {
+        EnumVariant {
+            name: name.into(),
+            value: None,
+            bindings: BTreeMap::new(),
+        }
+    }
+}
+
+/// The wire token a value-projecting backend (node `#[napi(value)]`, ruby/php
+/// `wire()`) emits for this variant in `lang`: a pinned `bindings[lang].name`
+/// wins, then the neutral `value` override, then the default `to_lowercase()`
+/// rule. When nothing is pinned/valued this is exactly `name.to_lowercase()`,
+/// so an all-default enum emits byte-identically to before pinning existed.
+pub fn variant_token(v: &EnumVariant, lang: &str) -> String {
+    pinned_name(&v.bindings, lang)
+        .or_else(|| v.value.clone())
+        .unwrap_or_else(|| v.name.to_lowercase())
+}
+
+/// A `(package, module)` group and the symbol names that fell into it — the
+/// unit the opt-in fan-out writes to one file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolGroup {
+    pub package: String,
+    pub module: String,
+    pub symbols: Vec<String>,
+}
+
+/// Partition an api doc's symbols (models, unions, ops) by their pinned
+/// `(package, module)` group for `lang`, in first-appearance order. Symbols with
+/// no group pin are omitted (they stay in the default single file). The group
+/// set comes purely from the schema's distinct pairs — there is NO closed
+/// registry of packages/modules. Feeds [`fan_out_path`].
+pub fn symbol_groups(api: &ApiDoc, lang: &str) -> Vec<SymbolGroup> {
+    let mut groups: Vec<SymbolGroup> = Vec::new();
+    let mut push = |bindings: &BTreeMap<String, SymbolBinding>, sym: &str| {
+        if let Some((package, module)) = pinned_group(bindings, lang) {
+            if let Some(g) = groups
+                .iter_mut()
+                .find(|g| g.package == package && g.module == module)
+            {
+                g.symbols.push(sym.to_string());
+            } else {
+                groups.push(SymbolGroup {
+                    package,
+                    module,
+                    symbols: vec![sym.to_string()],
+                });
+            }
+        }
+    };
+    for m in &api.models {
+        push(&m.bindings, &m.name);
+    }
+    for u in &api.unions {
+        push(&u.bindings, &u.name);
+    }
+    for i in &api.interfaces {
+        for op in &i.ops {
+            push(&op.bindings, &op.name);
+        }
+    }
+    groups
+}
+
+/// Substitute a group's `{package}` / `{module}` tokens into a patterned output
+/// path VERBATIM (no casing transform) — modelled on `readme::render_files`'s
+/// `{lang}` replace. Exact npm names and deep `../src/*` module paths reproduce
+/// byte-for-byte.
+pub fn fan_out_path(pattern: &str, group: &SymbolGroup) -> String {
+    pattern
+        .replace("{package}", &group.package)
+        .replace("{module}", &group.module)
+}
+
+/// Build one filtered [`ApiDoc`] per pinned `(package, module)` group for
+/// `lang`, each carrying ONLY that group's DTO surface (the models + unions
+/// whose `bindings[lang]` names that group), paired with the output path from
+/// [`fan_out_path`]. Interfaces/ops are dropped from a group file — a fanned
+/// file is the DTO surface for its package.
+///
+/// Opt-in by construction: an api with no group pins for `lang` yields an EMPTY
+/// vec, so the caller stays entirely on the single-file path (which is fully
+/// supported and byte-identical to today). The group set is exactly the
+/// schema's distinct `(package, module)` pairs — there is NO closed registry.
+///
+/// KNOWN LIMITATION (deliberate, documented): when a symbol in one group
+/// references a DTO in another group, this does NOT resolve that reference into
+/// a cross-package import / qualified path — that cross-file subsystem is an
+/// M7-scale follow-on. A fanned-out file may therefore not compile standalone,
+/// which is exactly why fan-out is gated behind the opt-in CLI flag and the
+/// single-file default is left untouched.
+pub fn fan_out(api: &ApiDoc, lang: &str, pattern: &str) -> Vec<(String, ApiDoc)> {
+    symbol_groups(api, lang)
+        .into_iter()
+        .map(|g| {
+            let in_group = |s: &str| g.symbols.iter().any(|n| n == s);
+            let sub = ApiDoc {
+                fluessig: api.fluessig.clone(),
+                source: api.source.clone(),
+                models: api
+                    .models
+                    .iter()
+                    .filter(|m| in_group(&m.name))
+                    .cloned()
+                    .collect(),
+                unions: api
+                    .unions
+                    .iter()
+                    .filter(|u| in_group(&u.name))
+                    .cloned()
+                    .collect(),
+                // Interfaces/ops are not fanned out (see KNOWN LIMITATION): a
+                // group file is the DTO surface, so the op layer stays empty.
+                interfaces: Vec::new(),
+            };
+            (fan_out_path(pattern, &g), sub)
+        })
+        .collect()
+}
 
 /// snake_case for Rust idents (`repoPath` → `repo_path`).
 fn snake(s: &str) -> String {

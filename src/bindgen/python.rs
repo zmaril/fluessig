@@ -10,6 +10,11 @@ use crate::api::{ApiDoc, ApiOp, ApiType, Shape};
 
 use super::*;
 
+/// This backend's language slug — the key it reads out of every symbol's
+/// `bindings` map via the shared [`pinned_name`] resolver. Python hardcodes no
+/// pin; its only rename syntax is `#[pyo3(name = "…")]`.
+const LANG: &str = "python";
+
 /// One parameter of a flattened Python signature: model-typed op params are
 /// expanded into their fields as keyword arguments (the pythonic idiom the
 /// hand-written binding used), then reassembled into the options struct before
@@ -239,11 +244,7 @@ fn emit_py_arrow_model(
 /// Generate the PyO3 (Python) binding: pyclass DTOs + enums, the core traits,
 /// `#[pyfunction]`s with the GIL released, kwargs-flattened methods, iterator
 /// stream classes, and a `register()` for the `#[pymodule]`.
-pub fn python_binding(
-    api: &ApiDoc,
-    enums: &[(String, Vec<String>)],
-    banner_note: Option<&str>,
-) -> String {
+pub fn python_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
     let mut t: rust::Tokens = quote! {
         use std::sync::Arc;
         use std::time::Duration;
@@ -284,13 +285,22 @@ pub fn python_binding(
             continue;
         }
         class_names.push(name.clone());
-        let vs: Vec<String> = variants.iter().map(|v| pascal(v)).collect();
+        // PyO3 has no wire-string concept for enum members: a member's name is
+        // its Rust ident (`pascal(name)`) unless a `python` pin overrides it via
+        // `#[pyo3(name = "…")]`. Un-pinned ⇒ bare ident, byte-identical.
+        let vs: Vec<String> = variants
+            .iter()
+            .map(|v| match pinned_name(&v.bindings, LANG) {
+                Some(nm) => format!("#[pyo3(name = {:?})] {},", nm, pascal(&v.name)),
+                None => format!("{},", pascal(&v.name)),
+            })
+            .collect();
         quote_in! { t =>
             $['\n']
             #[pyclass(eq, eq_int)]
             #[derive(Clone, Copy, PartialEq)]
             pub enum $name {
-                $(for v in &vs join ($['\r']) => $v,)
+                $(for v in &vs join ($['\r']) => $v)
             }
         };
     }
@@ -313,8 +323,18 @@ pub fn python_binding(
                 } else {
                     r
                 };
+                // The Rust field ident stays `snake` (a valid ident); a `python`
+                // pin puts the exact Python attribute name ONLY in a
+                // `#[pyo3(name = "…")]` attr (overriding pyo3's default, which is
+                // the Rust ident). Un-pinned ⇒ no attr, byte-identical.
                 let n = py_reserved(&snake(&f.name));
-                quote!(pub $n: $r,)
+                match pinned_name(&f.bindings, LANG) {
+                    Some(nm) => {
+                        let attr = format!("#[pyo3(name = {nm:?})]");
+                        quote!($attr pub $n: $r,)
+                    }
+                    None => quote!(pub $n: $r,),
+                }
             })
             .collect();
         // ctor param order: required fields first, then `=None` optionals (python rule)

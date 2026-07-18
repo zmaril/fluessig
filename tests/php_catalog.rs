@@ -46,6 +46,7 @@ fn m0_api() -> ApiDoc {
                 stream_error: None,
                 params: Vec::new(),
                 returns: ApiType::Scalar("string".into()),
+                bindings: Default::default(),
             }],
         }],
     }
@@ -53,7 +54,7 @@ fn m0_api() -> ApiDoc {
 
 #[test]
 fn php_m0_reproduces_the_hand_written_tokens() {
-    let enums: Vec<(String, Vec<String>)> = Vec::new();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     let php = fluessig::bindgen::php_binding(&m0_api(), &enums, None);
 
     // the ext-php-rs classic attributes the hand-written M0 binding uses
@@ -101,7 +102,7 @@ fn php_m0_reproduces_the_hand_written_tokens() {
 #[test]
 fn php_renders_the_union_fixture() {
     let api = fluessig::api::load_api(API).unwrap();
-    let enums: Vec<(String, Vec<String>)> = Vec::new();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     let php = fluessig::bindgen::php_binding(&api, &enums, None);
 
     // DTO models become #[php_class]es with getters
@@ -135,9 +136,12 @@ fn php_name_only_enums_render_as_plain_rust_with_wire_tokens() {
     // Rust enum with parse()/wire() over its snake_case wire tokens — PHP sees
     // those tokens as strings, the same tokens node/ruby hand out.
     let api = fluessig::api::load_api(API).unwrap();
-    let enums = vec![(
+    let enums: Vec<fluessig::bindgen::EnumDesc> = vec![(
         "CapabilityKind".to_string(),
-        vec!["dispatch".to_string(), "isolation_vm".to_string()],
+        vec![
+            fluessig::bindgen::EnumVariant::plain("dispatch"),
+            fluessig::bindgen::EnumVariant::plain("isolation_vm"),
+        ],
     )];
     let php = fluessig::bindgen::php_binding(&api, &enums, None);
     assert!(php.contains("pub enum CapabilityKind"), "enum type:\n{php}");

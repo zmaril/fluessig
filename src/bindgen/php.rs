@@ -1,0 +1,375 @@
+//! The ext-php-rs (PHP) template grid — one language's projection of the op shapes.
+//!
+//! straitjacket-allow-file:duplication — the per-language generators are
+//! DELIBERATELY parallel: the (language × shape) template grid is the design
+//! (see /translation.md); the truly shared pieces live in the parent module.
+
+use genco::prelude::*;
+
+use crate::api::{ApiDoc, ApiType, Shape};
+
+use super::*;
+
+/// The PHP-visible type name for an [`ApiType`] — what PHP's own type system
+/// sees (`string`/`int`/`float`/`bool`/`array`), used only in the generated
+/// method docblocks. ext-php-rs signatures themselves speak Rust types, so the
+/// Rust half of the shared [`ty`] still drives every actual signature; this is
+/// documentation, not codegen.
+fn php_doc_ty(t: &ApiType) -> String {
+    match t {
+        ApiType::Scalar(s) => match s.as_str() {
+            "string" | "Json" => "string",
+            "boolean" => "bool",
+            "int32" | "int64" => "int",
+            "float64" => "float",
+            "bytes" => "string",
+            "void" => "void",
+            _ => "string",
+        }
+        .to_string(),
+        ApiType::Model { model } => model.clone(),
+        ApiType::Enum { .. } => "string".to_string(),
+        ApiType::List { .. } => "array".to_string(),
+        ApiType::Nullable { nullable } => format!("?{}", php_doc_ty(nullable)),
+        ApiType::Union { .. } => "string".to_string(),
+    }
+}
+
+/// The `/// PHP: Iface::op(int $x): string` docblock hint — the PHP-facing
+/// signature, alongside the Rust one ext-php-rs actually compiles.
+fn php_sig_note(iface: &str, op: &crate::api::ApiOp) -> String {
+    let params = op
+        .params
+        .iter()
+        .map(|p| format!("{} ${}", php_doc_ty(&p.ty), snake(&p.name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "/// PHP: {iface}::{}({params}): {}",
+        snake(&op.name),
+        php_doc_ty(&op.returns)
+    )
+}
+
+/// Generate the ext-php-rs (PHP) binding: `#[php_class]` DTOs + enums, the core
+/// traits, per-interface `#[php_class]`/`#[php_impl]` surfaces (a stateful
+/// handle with a `__construct`, or a stateless class of static methods),
+/// `next()`-null stream cursors, and the `#[php_module]` registrar.
+pub fn php_binding(
+    api: &ApiDoc,
+    enums: &[(String, Vec<String>)],
+    banner_note: Option<&str>,
+) -> String {
+    let mut t: rust::Tokens = quote! {
+        $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
+        use std::sync::Arc;
+        use std::time::Duration;
+        use ext_php_rs::prelude::*;
+
+        $("/// A core-layer failure becomes a thrown PHP exception (PHP is synchronous,")
+        $("/// so a fallible op returns `PhpResult` and ext-php-rs raises on `Err`).")
+        fn err(e: impl std::fmt::Display) -> PhpException {
+            PhpException::default(e.to_string())
+        }
+
+        $("/// One poll result from a core stream (the sync primitive every stream shape dresses).")
+        pub enum Poll<T> {
+            Item(T),
+            Idle,
+            Closed,
+        }
+
+        $("/// The one sync primitive: a blocking, timeout-bounded poll.")
+        pub trait PollStream<T>: Send + Sync {
+            fn poll(&self, timeout: Duration) -> Poll<T>;
+        }
+    };
+    if api_uses_bytes(api) {
+        quote_in! { t =>
+            $['\n']
+            $("/// Bulk bytes cross into PHP as a binary string (ext-php-rs `Binary<u8>`,")
+            $("/// which packs to a PHP string rather than an array of ints).")
+            pub type Bytes = ext_php_rs::binary::Binary<u8>;
+        };
+    }
+    t.line();
+
+    // ── enums: plain Rust + parse/wire (PHP sees the snake_case wire token as a
+    // string; a value-carrying enum crosses the boundary as that string) ──
+    for (name, variants) in enums {
+        if is_string_enum(api, name) {
+            continue;
+        }
+        let vs: Vec<String> = variants.iter().map(|v| pascal(v)).collect();
+        let arms: Vec<String> = variants
+            .iter()
+            .map(|v| format!("{:?} => Ok(Self::{}),", v.to_lowercase(), pascal(v)))
+            .collect();
+        let wire_arms: Vec<String> = variants
+            .iter()
+            .map(|v| format!("Self::{} => {:?},", pascal(v), v.to_lowercase()))
+            .collect();
+        let expect = variants
+            .iter()
+            .map(|v| v.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        quote_in! { t =>
+            $['\n']
+            #[derive(Clone, Copy, PartialEq)]
+            pub enum $name {
+                $(for v in &vs join ($['\r']) => $v,)
+            }
+            impl $name {
+                pub fn parse(s: &str) -> anyhow::Result<Self> {
+                    match s.to_ascii_lowercase().as_str() {
+                        $(for a in &arms join ($['\r']) => $a)
+                        other => Err(anyhow::anyhow!($(quoted(format!("unknown {name}: {{other}} (expected {expect})")))))
+                    }
+                }
+                $("/// The wire token PHP sees for this variant.")
+                pub fn wire(&self) -> &$("'static") str {
+                    match self {
+                        $(for a in &wire_arms join ($['\r']) => $a)
+                    }
+                }
+            }
+        };
+    }
+    t.line();
+
+    // ── DTO models: a `#[php_class]` holding the fields, with getter methods ──
+    for m in &api.models {
+        if let Some(doc) = &m.doc {
+            for line in doc.lines() {
+                quote_in! { t => $['\r']$(format!("/// {line}")) };
+            }
+        }
+        let fields: Vec<rust::Tokens> = m
+            .fields
+            .iter()
+            .map(|f| {
+                let (r, _) = ty(api, &f.ty);
+                let r = if f.nullable {
+                    format!("Option<{r}>")
+                } else {
+                    r
+                };
+                let n = snake(&f.name);
+                quote!(pub(crate) $n: $r,)
+            })
+            .collect();
+        let getters: Vec<rust::Tokens> = m
+            .fields
+            .iter()
+            .map(|f| {
+                let (r, _) = ty(api, &f.ty);
+                let r = if f.nullable {
+                    format!("Option<{r}>")
+                } else {
+                    r
+                };
+                let n = snake(&f.name);
+                quote! {
+                    pub fn $(&n)(&self) -> $r {
+                        self.$(&n).clone()
+                    }
+                }
+            })
+            .collect();
+        quote_in! { t =>
+            $['\r']
+            #[php_class]
+            #[derive(Clone)]
+            pub struct $(&m.name) {
+                $(for f in &fields join ($['\r']) => $f)
+            }
+            #[php_impl]
+            impl $(&m.name) {
+                $(for g in &getters join ($['\r']) => $g)
+            }
+            $['\n']
+        };
+    }
+
+    emit_core_traits(&mut t, api);
+
+    // ── per-interface surface ──
+    for i in &api.interfaces {
+        let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
+        let trait_name = format!("{}Core", i.name);
+        let impl_path = format!("crate::core_impl::{}Impl", i.name);
+
+        // stream cursor classes — one `#[php_class]` per stream op, `next()`
+        // returning the next item or null (PHP calls it until it resolves null).
+        for op in i.ops.iter().filter(|o| o.shape == Shape::Stream) {
+            let class = pascal(&op.name);
+            let (item, _) = ty(api, &op.returns);
+            quote_in! { t =>
+                $['\r']
+                $(format!("/// Poll-based stream from `{}.{}` — call `next()` until it returns null.", i.name, op.name))
+                #[php_class]
+                pub struct $(&class) {
+                    stream: Box<dyn PollStream<$(&item)>>,
+                }
+                #[php_impl]
+                impl $(&class) {
+                    $("/// The next item, or null once the stream is exhausted.")
+                    pub fn next(&self) -> Option<$(&item)> {
+                        loop {
+                            match self.stream.poll(Duration::from_millis(500)) {
+                                Poll::Item(v) => return Some(v),
+                                Poll::Idle => continue,
+                                Poll::Closed => return None, $("// null ends iteration")
+                            }
+                        }
+                    }
+                }
+                $['\n']
+            };
+        }
+
+        if has_ctor {
+            // stateful handle: a `#[php_class]` holding the core, `__construct`
+            // building it, instance methods delegating to it.
+            let mut methods: rust::Tokens = quote!();
+            for op in &i.ops {
+                let name = snake(&op.name);
+                if op.shape != Shape::Manual {
+                    if let Some(doc) = &op.doc {
+                        for line in doc.lines() {
+                            quote_in! { methods => $['\r']$(format!("/// {line}")) };
+                        }
+                    }
+                    quote_in! { methods => $['\r']$(php_sig_note(&i.name, op)) };
+                }
+                let ps = param_sig(api, op)
+                    .iter()
+                    .map(|(n, r)| format!("{n}: {r}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let names = param_sig(api, op)
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sep = if ps.is_empty() { "" } else { ", " };
+                let (ret, _) = ty(api, &op.returns);
+                match op.shape {
+                    Shape::Ctor => quote_in! { methods =>
+                        $['\r']
+                        pub fn __construct($(&ps)) -> PhpResult<Self> {
+                            Ok(Self { core: Arc::new(<$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)?) })
+                        }
+                    },
+                    Shape::Unary => quote_in! { methods =>
+                        $['\r']
+                        pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&ret)> {
+                            self.core.$(&name)($(&names)).map_err(err)
+                        }
+                    },
+                    Shape::Stream => {
+                        let class = pascal(&op.name);
+                        quote_in! { methods =>
+                            $['\r']
+                            pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&class)> {
+                                Ok($(&class) { stream: self.core.$(&name)($(&names)).map_err(err)? })
+                            }
+                        }
+                    }
+                    Shape::Manual => quote_in! { methods =>
+                        $['\r']
+                        $(format!("// @manual: {} — hand-written in lib.rs.", op.name))
+                    },
+                }
+            }
+            if let Some(doc) = &i.doc {
+                for line in doc.lines() {
+                    quote_in! { t => $['\r']$(format!("/// {line}")) };
+                }
+            }
+            quote_in! { t =>
+                $['\r']
+                #[php_class]
+                pub struct $(&i.name) {
+                    $("// pub(crate): the @manual ops in lib.rs extend this class and need the core")
+                    pub(crate) core: Arc<$(&impl_path)>,
+                }
+
+                #[php_impl]
+                impl $(&i.name) {
+                    $methods
+                }
+                $['\n']
+            };
+        } else {
+            // stateless interface → a `#[php_class]` exposing static methods
+            // (matches the hand-written `Atilla::version()` shape).
+            let mut methods: rust::Tokens = quote!();
+            for op in &i.ops {
+                let name = snake(&op.name);
+                if op.shape == Shape::Manual {
+                    quote_in! { methods => $['\r']$(format!("// @manual: {}.{} — hand-written in lib.rs.", i.name, op.name)) };
+                    continue;
+                }
+                if let Some(doc) = &op.doc {
+                    for line in doc.lines() {
+                        quote_in! { methods => $['\r']$(format!("/// {line}")) };
+                    }
+                }
+                quote_in! { methods => $['\r']$(php_sig_note(&i.name, op)) };
+                let ps = param_sig(api, op)
+                    .iter()
+                    .map(|(n, r)| format!("{n}: {r}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let names = param_sig(api, op)
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let (ret, _) = ty(api, &op.returns);
+                quote_in! { methods =>
+                    $['\r']
+                    pub fn $(&name)($(&ps)) -> PhpResult<$(&ret)> {
+                        <$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)
+                    }
+                }
+            }
+            if let Some(doc) = &i.doc {
+                for line in doc.lines() {
+                    quote_in! { t => $['\r']$(format!("/// {line}")) };
+                }
+            }
+            quote_in! { t =>
+                $['\r']
+                #[php_class]
+                pub struct $(&i.name);
+
+                #[php_impl]
+                impl $(&i.name) {
+                    $methods
+                }
+                $['\n']
+            };
+        }
+    }
+
+    // ext-php-rs auto-registers every `#[php_class]`, so the module body just
+    // returns the builder — same as the hand-written binding.
+    quote_in! { t =>
+        $['\r']
+        $("/// Registers the extension's surface with PHP.")
+        #[php_module]
+        pub fn module(module: ModuleBuilder) -> ModuleBuilder {
+            module
+        }
+    };
+
+    let src = api.source.as_deref().unwrap_or("the fluessig catalog");
+    let body = t.to_file_string().expect("rust renders");
+    crate::rustfmt::format(format!(
+        "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}#![allow(clippy::all)]\n\n{body}",
+        note_line(banner_note)
+    ))
+}

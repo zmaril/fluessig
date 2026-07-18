@@ -16,11 +16,13 @@
 
 mod mcp;
 mod node;
+mod php;
 mod python;
 mod ruby;
 
 pub use mcp::{manifest as mcp_manifest, mcp_module};
 pub use node::node_binding;
+pub use php::php_binding;
 pub use python::python_binding;
 pub use ruby::ruby_binding;
 

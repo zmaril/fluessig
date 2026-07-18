@@ -109,7 +109,8 @@ fn layer_a_details_survive() {
 
     // The faithful catalog is FLAT — the real schema has no nested structs
     // (author identity is flattened into author_* columns). Value structs here
-    // are all API DTOs (GitStats, …); Layer-A nesting is exercised by the spike.
+    // are all API DTOs (GitStats, …); Layer-A nesting is exercised by the demo
+    // catalog (tests/fixtures/entl.tsp).
     let commit = c.entity("Commit").unwrap();
     let author_name = commit
         .fields

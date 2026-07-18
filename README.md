@@ -2,132 +2,140 @@
 
 # fluessig
 
-Describe a typed entity graph **once** (TypeSpec); project it **everywhere** — DDL,
-ORM models, format codecs, language bindings, and an Arrow-fed data plane.
+Describe a typed entity graph **once**; project it **everywhere** — DDL, ORM
+models, format codecs, language bindings, and an Arrow-fed data plane, all
+generated from a single catalog.
 
-fluessig is a **build-time schema tool**, not a runtime library. You author a `.tsp`
-with the fluessig decorators, the emitter lowers it to `catalog.json` (the data model)
-and `api.json` (the op surface), and the `fluessig-gen` binary generates per-dialect DDL,
-ORM/typed-table code, and language-binding surfaces from that catalog. See
-[notes/design.md](./notes/design.md).
+> [!NOTE]
+> fluessig is mid-pivot and moving fast. The strategic front end is a Rust
+> `#[derive(Entity)]` surface; the original TypeSpec front end still drives
+> every consumer today and is retired only once the derives reproduce every
+> consumer catalog byte for byte. Both are documented here — reach for the
+> derive front end for new work.
 
-## Install
+## The model
 
-fluessig has two halves — a Rust crate (the generator) and a Node emitter (the
-TypeSpec front end):
+A fluessig **catalog** is the single source of truth for a data model: its
+entities, their fields and keys, the relations between them, and the docs. From
+that one catalog fluessig generates DDL (per-dialect `CREATE TABLE` for DuckDB,
+Postgres, SQLite), ORM surfaces (SQLAlchemy models, TypeScript table types),
+language bindings (Rust / Node / Python / Ruby read planes), and even a
+per-language README.
+
+The pipeline has two stages: a **front end** lowers your schema to
+`catalog.json` (plus `api.json`), and **`fluessig-gen`** — the Rust engine at
+this repo's root — generates code from those artifacts. The store is a derived
+cache: regenerate and re-ingest on any schema change.
+
+## Two front ends
+
+### The derive front end (Rust-first — the direction)
+
+Author your schema as ordinary Rust structs and emit the same `catalog.json`
+the engine consumes. `#[derive(Entity)]` and `#[derive(Edge)]` describe scalars
+and edges; `Id<T>` fields are typed foreign keys; `#[key]` marks key fields (a
+composite key is just several); and the attribute grammar (`flatten`, edges,
+`shares`, `ref_cols`) rides on `#[fluessig(...)]` attributes.
+`fluessig_derive::catalog! { ... }` collects your entities into an exporter
+module. Then `cargo fluessig emit` runs the crate's exporter and writes the
+catalog:
 
 ```sh
-# the generator (fluessig-gen on your PATH)
-cargo install --git https://github.com/zmaril/fluessig fluessig
-# or from a checkout:
-cargo install --path .
+cargo fluessig emit                    # -> catalog.json (default bin: fluessig-emit)
+cargo fluessig emit --bin my-emit -o schema/catalog.json
+```
 
-# the emitter (TypeSpec -> catalog.json + api.json)
+This is Slices 1–3 of the [derive front-end plan][decisions]: the derives,
+`Id<T>` FKs plus composite keys, and the attribute grammar have landed on
+`main`. Polymorphism, the op surface, span-accurate docs, a drift guard, and
+the TypeSpec-retirement migration are still ahead — so until parity is proven,
+the TypeSpec front end stays.
+
+[decisions]: notes/derive-front-end-decisions.md
+
+### The TypeSpec front end (current — what consumers run today)
+
+Author the schema in TypeSpec and lower it with the Node emitter, then generate
+from the catalog with the Rust engine:
+
+```sh
 cd emitter && npm install
+node emit.mjs path/to/schema.tsp --out schema/   # -> catalog.json + api.json
+cargo run --bin fluessig-gen -- --help           # generate DDL / ORM / bindings
 ```
 
-Consumers typically pin fluessig by git ref and invoke both at codegen time. Needs a
-Rust toolchain (1.75+) and Node 20+.
-
-## Usage
-
-```sh
-# .tsp -> catalog.json + api.json (beside the input, or --out <dir>)
-(cd emitter && node emit.mjs ../entl.tsp)
-
-# catalog.json -> generated code (DDL module, ORM models, typed tables, bindings)
-cargo run --bin fluessig-gen -- catalog.json out/schema_gen.rs --docs out/schema_docs.json
-```
-
-Generated-file banners are consumer-agnostic: fluessig names the banner after the
-catalog's own `source` and bakes in no consumer paths; pass anything project-specific
-(a lint-suppression marker, a regenerate hint) via `--banner-note`.
+Both [entl] and [disponent] drive this path today (see **Consumers**).
 
 ## README multiplexing
 
-`fluessig-gen` also renders **one Markdown template per target language**, so a
-single quickstart shows Rust, Node/Bun, Python, or Ruby code depending on the
-output target. The template stays valid Markdown — every directive is an HTML
-comment on its own line, so it reads fine on GitHub unrendered.
+fluessig generates per-language READMEs like this one from a single template:
+write the doc once with `fl:` directives and render a variant per language.
 
 ```sh
-# fan out over every language: {lang} in the path expands to the slug
-cargo run --bin fluessig-gen -- catalog.json out/schema_gen.rs \
-  --readme quickstart.tpl.md --readme-out 'out/README.{lang}.md' --readme-pkg entl
-
-# or render a single language to a fixed path
-cargo run --bin fluessig-gen -- catalog.json out/schema_gen.rs \
-  --readme quickstart.tpl.md --readme-out README.md --readme-lang rust
+fluessig-gen --readme template.md --readme-out README.md --readme-lang rust
+fluessig-gen --readme template.md --readme-out 'README-{lang}.md' --readme-langs rust,node,python,ruby
 ```
 
-Flags:
+Directives are each an HTML comment on their own line, so the raw template
+still renders on GitHub:
 
-| flag | meaning |
-| --- | --- |
-| `--readme <template.md>` | activate README rendering |
-| `--readme-out <pattern>` | output path; a `{lang}` in it fans out over every target |
-| `--readme-lang <slug>` | the single target when `--readme-out` has no `{lang}` |
-| `--readme-langs <slug,…>` | subset to render when the pattern has `{lang}` (default: all four) |
-| `--readme-pkg <name>` | package name for `{pkg}` in install lines (default: the catalog name, else `yourpkg`) |
+- `{{ key }}` interpolates `lang`, `lang.slug`, `lang.fence`, `lang.install`,
+  `lang.ext`, `pkg`, `catalog.name`.
+- `<!-- fl:only rust node -->` … `<!-- fl:end -->` keeps a block for some
+  languages; `fl:except` drops it for them.
+- `<!-- fl:each -->` with `<!-- fl:lang rust -->` variants (plus `default`)
+  expands a block once per language.
 
-The four language slugs are `rust`, `node`, `python`, `ruby`.
-
-### Template directives
-
-- **Interpolation** — `{{ key }}` (whitespace inside the braces is flexible).
-  Keys: `lang` (display name, e.g. `Python`), `lang.slug`, `lang.fence` (the
-  code-fence tag), `lang.install` (the install one-liner with `{pkg}` already
-  substituted), `lang.ext` (source extension), `pkg`, and `catalog.name`. An
-  unknown key is an error — the renderer never silently drops.
-- **`<!-- fl:only SLUG [SLUG…] -->` … `<!-- fl:end -->`** — keep the enclosed
-  lines only for the listed targets. **`<!-- fl:except SLUG [SLUG…] -->`** keeps
-  them for every target *but* those listed. Slugs are space- or comma-separated.
-- **`<!-- fl:each -->` … `<!-- fl:end -->`** — the multiplexer. Inside,
-  `<!-- fl:lang SLUG -->` markers split the block into per-language sections;
-  anything before the first marker is a shared preamble emitted for every target.
-  Only the section matching the target is emitted. `<!-- fl:lang default -->` is a
-  fallback; with no match and no default, rendering fails (strict).
-
-Blocks nest (an `fl:only` around an `fl:each`, interpolation anywhere). An
-unterminated block, a stray `fl:end`/`fl:lang`, or a missing variant is an error,
-so a broken template fails the build rather than emitting something wrong.
+The four targets, in canonical order, are **rust** (`cargo add`), **node/bun**
+(`bun add`), **python**, and **ruby**. Unknown keys, unterminated blocks, and
+missing variants are hard errors.
 
 ## Layout
 
 ```
-src/                the engine (Rust): IR, catalog loader/validator, SQL back-ends,
-                    data codecs, and the binding generator.
-src/bin/            fluessig-gen — the code generator CLI.
-emitter/            @fluessig/emitter — the catalog printer (TypeSpec -> catalog.json + api.json).
-typespec/           @fluessig/typespec — the decorator library (@entity, @key, @compose, ...).
-spike/              the format-codec spike that proved the design.
-notes/              design.md, findings.md, plan.txt.
-tests/              tool tests. entl.tsp + catalog.json + api.json are a committed FIXTURE
-                    (a copy of entl's real catalog) the tests run against.
+src/                            the engine: catalog/api loaders, per-dialect DDL,
+                                the README multiplexer (readme.rs), fluessig-gen.
+emitter/                        the TypeSpec front end (emit.mjs) + its tests.
+typespec/                       the TypeSpec library shared with consumers.
+crates/fluessig-derive          the Rust derive front end (entities as structs).
+crates/fluessig-derive-macros   its proc-macros: #[derive(Entity)], catalog!, ...
+crates/cargo-fluessig           the `cargo fluessig emit` subcommand.
+crates/derive-demo              worked examples + gates for the derive front end.
+notes/                          design docs (design.md, derive-front-end*.md).
+scripts/                        dev.sh (setup), coverage.sh.
 ```
 
 ## Build & test
 
-Run `scripts/dev.sh` once to stand up the dev environment — it builds the Rust
-workspace and installs the emitter's npm deps. Then:
-
 ```sh
-cargo test                                    # the Rust engine + fixture tests
-(cd emitter && npm install && node test.mjs)  # the emitter
+scripts/dev.sh                       # build the Rust workspace + install emitter deps
+cargo test                           # engine + derive-crate + fixture tests
+(cd emitter && node test.mjs)        # the TypeSpec emitter's tests
+scripts/coverage.sh                  # cargo-llvm-cov summary (--html for a report)
 ```
 
 ## Consumers
 
-The first consumer is [entl](https://github.com/zmaril/entl), which authors its schema in
-`entl.tsp` and generates its DuckDB/Postgres/SQLite DDL, SQLAlchemy models, Drizzle tables,
-and its napi/PyO3/Magnus binding surfaces from this tool.
+[entl] and [disponent] both keep their schema as a fluessig catalog and
+generate from it at build time. They locate this repo via `FLUESSIG_DIR` — a
+sibling `../fluessig` checkout by default, or a pinned clone in CI — and run the
+TypeSpec emitter plus `fluessig-gen` from their own `scripts/gen.sh`.
 
-## Contributing
+[entl]: https://github.com/zmaril/entl
+[disponent]: https://github.com/zmaril/disponent
 
-Issues and PRs welcome. PR titles follow
-[Conventional Commits](https://www.conventionalcommits.org) (`type(scope): summary`) —
-CI checks it. Run `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` before pushing.
+## Conventions & gotchas
+
+- **Byte-stable emitter output.** `@typespec/compiler` is pinned exact in
+  `emitter/package.json` — a caret range let a patch bump reorder the emitter's
+  output and churn every consumer's committed catalog. Pin it exact; bump it
+  deliberately.
+- **Enums carry their wire value.** The Node emitter lowers a TypeSpec enum to
+  its members and keeps the wire value when it differs from the name; on the SQL
+  side an enum column is `text`.
+- **Conventional Commits.** Commit messages follow the Conventional Commits
+  spec.
 
 ## License
 
-[MIT](./LICENSE) © Zack Maril.
+MIT © Zack Maril

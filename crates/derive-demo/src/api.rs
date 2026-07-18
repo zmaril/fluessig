@@ -14,14 +14,59 @@
 //!   it to a JS async iterator / Python generator / Ruby Enumerator);
 //! * `#[fluessig(manual)]` — recorded in `api.json` but hand-written per binding.
 //!
+//! Slice 8a Gap 2 adds the **DTO / `models` layer**: `#[derive(Record)]` declares
+//! the flat data DTOs the ops pass across (`LoadStats`, `SinkOptions`,
+//! `TableRename`), and the entities/DTOs the ops reference — directly or
+//! transitively — are materialised into `api.json`'s `models`, flattened exactly
+//! as the TypeSpec op path does (a to-one relation → its FK field(s); to-many
+//! omitted; the referenced set closed transitively).
+//!
 //! Compare against the TypeSpec an author would write for the same surface
-//! (`api.tsp`): `interface Db { @ctor open(...): void; … @stream commits(): PullRequest; }`.
-//! The two `api.json`s are semantically equivalent at the op level (kinds,
-//! params, returns) — see `tests/api_typespec_equivalence.rs`.
+//! (`api.tsp`): `interface Db { @ctor open(...): void; … @stream commits(): PullRequest; }`
+//! plus the referenced entity/DTO `models`. The two `api.json`s are now
+//! semantically equivalent at BOTH the op level (kinds, params, returns) and the
+//! model level (flattened DTO fields) — see `tests/api_typespec_equivalence.rs`.
 
-use fluessig_derive::{catalog, export};
+use fluessig_derive::{catalog, export, Record};
 
 use crate::graph::{GhUser, PullRequest, Repo, Review};
+
+// ── DTOs / value structs the ops pass across (Slice 8a Gap 2) ────────────────
+//
+// `#[derive(Record)]` declares a DTO: flat data, no identity/table/key. An op
+// that takes or returns one — directly, or transitively through another DTO's
+// fields — pulls it into `api.json`'s `models`, flattened exactly as the
+// TypeSpec op path materialises the DTOs its ops reference.
+
+/// What one load produced — a plain scalar DTO returned by `Db::load`.
+#[derive(Record)]
+pub struct LoadStats {
+    /// New commits ingested.
+    pub commits: i64,
+    /// Refs seen.
+    pub refs: i64,
+}
+
+/// One table rename — a DTO referenced *transitively*, only through
+/// `SinkOptions.renames`, so it proves the referenced-model closure grows past
+/// the ops' direct references.
+#[derive(Record)]
+pub struct TableRename {
+    /// The source table name.
+    pub old_name: String,
+    /// The destination table name.
+    pub new_name: String,
+}
+
+/// Options for `Db::sink` — a DTO with a nullable scalar and a **list of another
+/// DTO** (`renames`), exercising the list + transitive-closure paths.
+#[derive(Record)]
+pub struct SinkOptions {
+    /// The destination path (the SQLite file / JSONL dir / Postgres URL).
+    pub path: Option<String>,
+    /// Per-table renames applied on the way out.
+    pub renames: Vec<TableRename>,
+}
 
 /// A tiny stateful handle whose `impl` is the op interface. The engine behind it
 /// is irrelevant to the schema — only the method shapes are captured.
@@ -72,6 +117,21 @@ impl Db {
     pub fn watch(&self, interval_secs: i32) {
         let _ = interval_secs;
     }
+
+    /// Load and report a stats DTO (a `#[derive(Record)]` return, Slice 8a Gap 2).
+    pub fn load(&self) -> LoadStats {
+        LoadStats {
+            commits: 0,
+            refs: 0,
+        }
+    }
+
+    /// Sink to a target described by a DTO param — `SinkOptions` (and, through it,
+    /// `TableRename`) materialise into `api.json`'s `models`.
+    pub fn sink(&self, options: SinkOptions) -> i64 {
+        let _ = options;
+        0
+    }
 }
 
 /// A stateless, repo-scoped helper group — a unit struct whose `#[export] impl`
@@ -103,5 +163,6 @@ catalog! {
     name: "api_demo",
     version: "0.1.0",
     entities: [Repo, PullRequest, GhUser, Review],
+    records: [LoadStats, TableRename, SinkOptions],
     api: [Db, GitHelpers],
 }

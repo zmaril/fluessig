@@ -102,12 +102,18 @@ fn emitted_api_loads_and_validates() {
 
 #[test]
 fn op_entity_references_resolve_against_the_catalog() {
-    // Gate (c): every `{ model }` an op names must be an entity in the sibling
-    // catalog — the impl can't reference a type the catalog doesn't define.
+    // Gate (c): every `{ model }` an op names must be defined in the sibling
+    // catalog — either an entity or (Slice 8a Gap 2) a value struct / DTO. The
+    // impl can't reference a type the catalog doesn't define.
     let api = load_api(&derive_demo::api::fluessig_catalog::api_to_json()).unwrap();
     let catalog =
         load_catalog(&derive_demo::api::fluessig_catalog::to_json()).expect("catalog loads");
-    let entities: BTreeSet<&str> = catalog.entities.iter().map(|e| e.name.as_str()).collect();
+    let defined: BTreeSet<&str> = catalog
+        .entities
+        .iter()
+        .map(|e| e.name.as_str())
+        .chain(catalog.value_structs.iter().map(|s| s.name.as_str()))
+        .collect();
 
     let mut referenced = BTreeSet::new();
     for i in &api.interfaces {
@@ -122,14 +128,75 @@ fn op_entity_references_resolve_against_the_catalog() {
             }
         }
     }
-    // the demo references Repo + PullRequest; both must resolve
-    assert!(referenced.contains("Repo"));
-    assert!(referenced.contains("PullRequest"));
+    // the demo references entities (Repo, PullRequest) and DTOs (LoadStats,
+    // SinkOptions); every referenced model must resolve in the catalog.
+    for want in ["Repo", "PullRequest", "LoadStats", "SinkOptions"] {
+        assert!(referenced.contains(want), "op should reference {want}");
+    }
     for m in &referenced {
         assert!(
-            entities.contains(m.as_str()),
-            "op references `{m}`, which is not an entity in the catalog"
+            defined.contains(m.as_str()),
+            "op references `{m}`, which is not an entity or value struct in the catalog"
         );
+    }
+}
+
+#[test]
+fn models_are_materialized_with_flattening_and_closure() {
+    // Slice 8a Gap 2 gate: the ops reference entities (Repo, PullRequest) and DTOs
+    // (LoadStats, SinkOptions); api.json's `models` array materialises those —
+    // flattened (a to-one relation → its FK field(s)), plus TableRename pulled in
+    // transitively through SinkOptions.renames. This is the always-on check (the
+    // TypeSpec byte-equivalence is the env-gated api_typespec_equivalence test).
+    let api = load_api(&derive_demo::api::fluessig_catalog::api_to_json()).unwrap();
+    let model = |n: &str| {
+        api.models
+            .iter()
+            .find(|m| m.name == n)
+            .unwrap_or_else(|| panic!("model {n} missing from api.json"))
+    };
+    let field_names = |n: &str| {
+        model(n)
+            .fields
+            .iter()
+            .map(|f| f.name.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // the referenced closure: direct op refs + the transitive DTO ref.
+    let names: BTreeSet<&str> = api.models.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(
+        names,
+        BTreeSet::from([
+            "LoadStats",
+            "SinkOptions",
+            "TableRename",
+            "Repo",
+            "PullRequest"
+        ]),
+        "GhUser/Review (only relation targets, never op-referenced) must NOT join"
+    );
+
+    // an entity flattens: PullRequest's `repo_id`/`author_id` relations become FK
+    // fields (camelCased), and the FK-in-PK `repoId` lands — no nested entity.
+    assert_eq!(
+        field_names("PullRequest"),
+        vec!["repoId", "number", "title", "authorId"]
+    );
+    // a plain-scalar entity: the nullable scalar stays nullable, name camelCased.
+    let repo = model("Repo");
+    let remote = repo.fields.iter().find(|f| f.name == "remoteUrl").unwrap();
+    assert!(remote.nullable, "Repo.remoteUrl is a nullable scalar");
+
+    // the DTO layer: a scalar-only Record, and one with a list-of-Record field.
+    assert_eq!(field_names("LoadStats"), vec!["commits", "refs"]);
+    let sink = model("SinkOptions");
+    let renames = sink.fields.iter().find(|f| f.name == "renames").unwrap();
+    match &renames.ty {
+        ApiType::List { list } => {
+            assert!(matches!(&**list, ApiType::Model { model } if model == "TableRename"))
+        }
+        other => panic!("SinkOptions.renames should be a list of TableRename, got {other:?}"),
     }
 }
 

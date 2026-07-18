@@ -85,13 +85,16 @@ pub use fluessig;
 // The derive macros and their traits share names (`Entity`, `Edge`) — they live
 // in different namespaces (macro vs type), exactly like `serde::Serialize` — so
 // a single `use fluessig_derive::{Entity, Edge};` brings in both halves.
-pub use fluessig_derive_macros::{catalog, export, AbstractRoot, Edge, Entity};
+pub use fluessig_derive_macros::{catalog, export, AbstractRoot, Edge, Entity, Record};
 
 use fluessig::api::{ApiDoc, ApiInterface, ApiOp, ApiParam, ApiType, Shape};
 use fluessig::ir::{
     camel, Cardinality, Catalog, Entity as IrEntity, Field, RelKind, Relation, Scalar, Struct,
     TypeRef, Versions,
 };
+
+mod records;
+pub use records::{RecordDescriptor, RecordFieldDescriptor, RecordTypeDesc};
 
 /// A type that describes a stored entity as pure `&'static` data. Implemented by
 /// `#[derive(Entity)]`.
@@ -115,6 +118,19 @@ pub trait Edge {
 pub trait AbstractRoot {
     /// The generated key enum (`<Root>Id`).
     type Id;
+}
+
+/// A **DTO / value struct** — a plain data record the op surface passes across
+/// (`#[derive(Record)]`, Slice 8a Gap 2, `derive-front-end.md` §2.7 / the sketch's
+/// `#[derive(Record)]`). Unlike an [`Entity`] it has no identity, no table, and no
+/// key; it is a shape ops accept and return (`SinkOptions`, `SinkStats`, …). It
+/// lowers to a `fluessig::ir::Struct` in the catalog's `valueStructs`, and — when
+/// an op references it (directly or transitively) — it is materialised into
+/// `api.json`'s `models` array, exactly as the TypeSpec op path materialises the
+/// DTOs its ops reference.
+pub trait Record {
+    /// The descriptor the derive expands to.
+    const DESCRIPTOR: &'static RecordDescriptor;
 }
 
 /// A typed foreign-key value: `Id<T>` stands in for `T`'s primary key at a
@@ -439,14 +455,16 @@ fn key_fields(desc: &'static EntityDescriptor) -> Vec<&'static FieldDescriptor> 
 }
 
 /// Spell a composite target's key columns as referencing sites see them: each key
-/// part via the target's `ref_cols` override, else the key field's own name.
+/// part via a matching `ref_cols` override, else the key field's own name.
 /// Shared by the `Id<T>` FK resolver ([`RefResolver::fk_columns`]) and the
 /// polymorphic-reference resolver ([`RefResolver::poly_reference`]) — both spell a
-/// multi-column target key the same way.
-fn spell_composite_key(desc: &EntityDescriptor, keys: &[&FieldDescriptor]) -> Vec<String> {
+/// multi-column target key the same way. Takes the `ref_cols` list rather than a
+/// descriptor so the FK resolver can pass the target's *inherited* spellings
+/// (gathered along `extends` for a family leaf — Slice 8a Gap 1).
+fn spell_composite_key(ref_cols: &[RefColDescriptor], keys: &[&FieldDescriptor]) -> Vec<String> {
     keys.iter()
         .map(|kf| {
-            desc.ref_cols
+            ref_cols
                 .iter()
                 .find(|rc| rc.field == kf.name)
                 .map(|rc| rc.column.to_string())
@@ -506,11 +524,42 @@ impl RefResolver {
                     vec![col]
                 } else {
                     // composite family: each key part via the family's ref_cols
-                    spell_composite_key(desc, &keys)
+                    spell_composite_key(desc.ref_cols, &keys)
                 }
             }
         };
         (to, tag, fk)
+    }
+
+    /// A target's full key fields, following `extends` to gather the **inherited**
+    /// family key (root-first), mirroring the loader's `flattened_key` (Slice 8a
+    /// Gap 1). A concrete leaf that `extends` a family root re-lists none of the
+    /// family key on itself — it lives on the root — so an `Id<Leaf>` reference
+    /// must walk `extends` to see the whole (possibly composite) key; without this
+    /// walk a composite-keyed leaf looks single-keyed and its FK is under-spelled.
+    fn flattened_key_fields(
+        &self,
+        desc: &'static EntityDescriptor,
+    ) -> Vec<&'static FieldDescriptor> {
+        let mut keys = match desc.extends.and_then(|p| self.by_name.get(p)) {
+            Some(&parent) => self.flattened_key_fields(parent),
+            None => Vec::new(),
+        };
+        keys.extend(key_fields(desc));
+        keys
+    }
+
+    /// The reference-column spellings visible for a target, gathered along
+    /// `extends` (the leaf's own first, then the inherited root's — so a nearer
+    /// level's `ref_cols` overrides a farther one). A family leaf inherits the
+    /// root's `ref_cols`, so `Id<Leaf>` spells the composite FK the same way a
+    /// polymorphic reference to the family does (Slice 8a Gap 1).
+    fn flattened_ref_cols(&self, desc: &'static EntityDescriptor) -> Vec<RefColDescriptor> {
+        let mut cols: Vec<RefColDescriptor> = desc.ref_cols.to_vec();
+        if let Some(&parent) = desc.extends.and_then(|p| self.by_name.get(p)) {
+            cols.extend(self.flattened_ref_cols(parent));
+        }
+        cols
     }
 
     /// The foreign-key columns a field materialises to reference `target`.
@@ -521,7 +570,9 @@ impl RefResolver {
     /// field, so its columns come from the target's key order, each spelled by
     /// the target's `ref_cols` override (else the key field's own name) — the
     /// reference spelling declared once on the target. Flatten-embedded keys
-    /// participate: the target's key is read from its *expanded* fields.
+    /// participate: the target's key is read from its *expanded* fields; a family
+    /// leaf's inherited key is read by following `extends` to the root (Slice 8a
+    /// Gap 1), so `Id<Leaf>` into a composite-keyed family spells the whole key.
     ///
     /// A dangling target (typo'd `Id<T>`) resolves to `[field_name]`; the emitted
     /// `relation.to` still points at the missing entity, so the loader catches it.
@@ -529,11 +580,11 @@ impl RefResolver {
         let Some(&desc) = self.by_name.get(target) else {
             return vec![field_name.to_string()];
         };
-        let keys = key_fields(desc);
+        let keys = self.flattened_key_fields(desc);
         if keys.len() <= 1 {
             return vec![field_name.to_string()];
         }
-        spell_composite_key(desc, &keys)
+        spell_composite_key(&self.flattened_ref_cols(desc), &keys)
     }
 
     /// The FK columns of a reference, with any `shares(col, …)` override applied
@@ -739,6 +790,21 @@ pub fn build_catalog_with_edges(
     entities: &[&'static EntityDescriptor],
     edges: &[&'static EdgeDescriptor],
 ) -> Catalog {
+    build_catalog_full(name, version, entities, edges, &[])
+}
+
+/// Collect entities + edges + **records** into the in-memory catalog (Slice 8a
+/// Gap 2). Records lower to `valueStructs` — the DTO layer the op surface
+/// materialises into `api.json`'s `models`. The no-records form
+/// [`build_catalog_with_edges`] delegates here with an empty record slice, so the
+/// Slice 1–5 callers are unchanged.
+pub fn build_catalog_full(
+    name: &str,
+    version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+    records: &[&'static RecordDescriptor],
+) -> Catalog {
     let resolver = RefResolver::new(entities);
     let mut ir_entities: Vec<IrEntity> = entities
         .iter()
@@ -766,7 +832,7 @@ pub fn build_catalog_with_edges(
         enums: Vec::new(),
         entities: ir_entities,
         relation_properties,
-        value_structs: Vec::new(),
+        value_structs: records.iter().map(|r| records::lower_record(r)).collect(),
     }
 }
 
@@ -788,7 +854,18 @@ pub fn to_catalog_json_with_edges(
     entities: &[&'static EntityDescriptor],
     edges: &[&'static EdgeDescriptor],
 ) -> String {
-    let catalog = build_catalog_with_edges(name, version, entities, edges);
+    to_catalog_json_full(name, version, entities, edges, &[])
+}
+
+/// Render `catalog.json` for a catalog with edges + records (Slice 8a Gap 2).
+pub fn to_catalog_json_full(
+    name: &str,
+    version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+    records: &[&'static RecordDescriptor],
+) -> String {
+    let catalog = build_catalog_full(name, version, entities, edges, records);
     let mut json = serde_json::to_string_pretty(&catalog).expect("catalog serializes");
     json.push('\n');
     json
@@ -954,10 +1031,32 @@ fn lower_op(op: &OpDescriptor) -> ApiOp {
 /// Collect op-interface descriptors into the in-memory [`fluessig::api::ApiDoc`]
 /// — the same op-layer IR the loader validates and bindgen projects. `name`
 /// becomes the api `source`; `version` stamps the emitter field (as the catalog
-/// path does). `models` / `unions` stay empty: Slice 5 is the OP surface — the
-/// DTO/model layer (`#[derive(Record)]`, and materialising referenced entities
-/// as flattened api models the way the TypeSpec path does) is a separate concern.
-pub fn build_api(name: &str, version: &str, interfaces: &[&'static InterfaceDescriptor]) -> ApiDoc {
+/// path does).
+///
+/// Slice 8a Gap 2 materialises the **`models`** array: every entity/DTO an op
+/// references — directly, or transitively through a referenced DTO's fields — is
+/// flattened into a `models` entry exactly as the TypeSpec op path does (a to-one
+/// relation becomes its FK field(s), a polymorphic one prepends the discriminator,
+/// to-many relations are dropped; see [`build_models`]). The `entities`, `edges`,
+/// and `records` are the same catalog roots [`build_catalog_full`] takes, so the
+/// op layer and the model layer are lowered from one consistent catalog.
+pub fn build_api(
+    name: &str,
+    version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+    records: &[&'static RecordDescriptor],
+    interfaces: &[&'static InterfaceDescriptor],
+) -> ApiDoc {
+    let catalog = build_catalog_full(name, version, entities, edges, records);
+    let api_interfaces: Vec<ApiInterface> = interfaces
+        .iter()
+        .map(|i| ApiInterface {
+            name: i.name.to_string(),
+            doc: i.doc.map(str::to_string),
+            ops: i.ops.iter().map(lower_op).collect(),
+        })
+        .collect();
     ApiDoc {
         fluessig: Versions {
             format: fluessig::FORMAT_VERSION,
@@ -965,16 +1064,9 @@ pub fn build_api(name: &str, version: &str, interfaces: &[&'static InterfaceDesc
             compiler: None,
         },
         source: Some(name.to_string()),
-        models: Vec::new(),
+        models: records::build_models(&catalog, &api_interfaces),
         unions: Vec::new(),
-        interfaces: interfaces
-            .iter()
-            .map(|i| ApiInterface {
-                name: i.name.to_string(),
-                doc: i.doc.map(str::to_string),
-                ops: i.ops.iter().map(lower_op).collect(),
-            })
-            .collect(),
+        interfaces: api_interfaces,
     }
 }
 
@@ -984,9 +1076,12 @@ pub fn build_api(name: &str, version: &str, interfaces: &[&'static InterfaceDesc
 pub fn to_api_json(
     name: &str,
     version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+    records: &[&'static RecordDescriptor],
     interfaces: &[&'static InterfaceDescriptor],
 ) -> String {
-    let api = build_api(name, version, interfaces);
+    let api = build_api(name, version, entities, edges, records, interfaces);
     let mut json = serde_json::to_string_pretty(&api).expect("api serializes");
     json.push('\n');
     json

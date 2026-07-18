@@ -180,7 +180,22 @@ legitimately differ). Byte-identity was dropped as the gate by the owner.
   is a known Rust rough edge — verify the diagnostics actually land on the right line.)
 - **Slice 7 — drift guard.** The regenerate-validate-diff `#[test]`, wired into CI the way
   the `node` drift job is today.
-- **Slice 8 — migration + retirement.** Port `entl.tsp` (all 28 tables — the acid test)
+- **Slice 8a — migration prerequisites.** Two capabilities deferred by earlier slices that
+  the entl port exercises, closed before the port itself:
+  - *Extends-aware composite-key FK resolution* (deferred in Slice 4). `RefResolver` now
+    follows `extends` to a family leaf's **inherited** composite key, so a direct
+    `Id<Leaf>` FK into a composite-keyed family (`Watch.bug: Id<Bug>`, where `Bug extends
+    Ticket` keyed `(project_id, seq)`) spells its two FK columns correctly — the shape
+    Slice 4's poly demo avoided (only *polymorphic* references, never a direct leaf FK).
+    Gate: `crates/derive-demo/src/leaf_fk.rs` + `leaf_fk.tsp` project identically.
+  - *The `api.json` DTO/`models` layer* (deferred in Slice 5). Slice 5 scoped `api.json` to
+    ops (empty `models`). `#[derive(Record)]` now declares DTOs (→ catalog `valueStructs`),
+    and `build_api` materialises the `models` array — the entities/DTOs the ops reference,
+    flattened (to-one relation → FK field(s), polymorphic → discriminator-prepended,
+    to-many dropped) and closed transitively — a direct port of the TypeSpec emitter's model
+    closure, so a derive-authored api surface produces the SAME `models` the TypeSpec path
+    does. Gate: the api demo's ops + models match `api.tsp` field-for-field.
+- **Slice 8b — migration + retirement.** Port `entl.tsp` (all 28 tables — the acid test)
   then `disponent.tsp` to derives; confirm both catalogs are semantically equivalent (each
   loads clean and drives every consumer to the same output); then delete the TypeSpec
   emitter and remove Node from the toolchain.

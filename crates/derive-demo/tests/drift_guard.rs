@@ -70,7 +70,7 @@ struct Fixture {
 /// one parametrized loop — a per-fixture copy of the body would trip
 /// straitjacket's duplication gate (and rot independently).
 fn fixtures() -> Vec<Fixture> {
-    use derive_demo::{advanced, api, fluessig_catalog as user, graph, poly};
+    use derive_demo::{advanced, api, fluessig_catalog as user, graph, leaf_fk, poly};
     vec![
         Fixture {
             label: "catalog.json (Slice 1 — scalar entity)",
@@ -114,6 +114,17 @@ fn fixtures() -> Vec<Fixture> {
                 version: poly::fluessig_catalog::VERSION,
                 entities: poly::fluessig_catalog::ENTITIES,
                 edges: poly::fluessig_catalog::EDGES,
+            },
+        },
+        Fixture {
+            label: "leaf_fk.json (Slice 8a Gap 1 — direct Id<Leaf> composite FK)",
+            path: "leaf_fk.json",
+            regen: leaf_fk::fluessig_catalog::to_json,
+            validate: Validate::Catalog {
+                name: leaf_fk::fluessig_catalog::NAME,
+                version: leaf_fk::fluessig_catalog::VERSION,
+                entities: leaf_fk::fluessig_catalog::ENTITIES,
+                edges: leaf_fk::fluessig_catalog::EDGES,
             },
         },
         Fixture {
@@ -192,6 +203,7 @@ fn committed_fixtures_are_fresh_and_valid() {
          cargo run -p derive-demo --bin fluessig-emit-graph    > crates/derive-demo/graph.json\n    \
          cargo run -p derive-demo --bin fluessig-emit-advanced > crates/derive-demo/advanced.json\n    \
          cargo run -p derive-demo --bin fluessig-emit-poly     > crates/derive-demo/poly.json\n    \
+         cargo run -p derive-demo --bin fluessig-emit-leaf-fk  > crates/derive-demo/leaf_fk.json\n    \
          cargo run -p derive-demo --bin fluessig-emit-api      > crates/derive-demo/api.json",
     );
 }

@@ -1,3 +1,5 @@
+<!-- housekeeper:description Describe a typed entity graph once (TypeSpec); project it everywhere — DDL, ORM models, format codecs, and language bindings. -->
+<!-- housekeeper:topics codegen, orm, rust, schema, sql, typespec -->
 <p align="center"><img src="assets/logo.png" alt="fluessig" width="200"></p>
 
 # fluessig

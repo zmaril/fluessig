@@ -1,8 +1,8 @@
 //! The napi (Node) template grid — one language's projection of the op shapes.
 //!
-//! The per-language generators are DELIBERATELY parallel: the (language × shape)
-//! template grid is the design (see /translation.md); the truly shared pieces
-//! live in the parent module.
+//! straitjacket-allow-file:duplication — the per-language generators are
+//! DELIBERATELY parallel: the (language × shape) template grid is the design
+//! (see /translation.md); the truly shared pieces live in the parent module.
 
 use genco::prelude::*;
 

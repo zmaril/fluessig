@@ -574,7 +574,7 @@ fn stream_op_projects_async_iterable_and_retains_poll_cursor() {
     );
 
     // the streaming contract (Poll/PollStream) is now imported from the shared
-    // fluessig-runtime crate rather than re-declared inline in each prelude.
+    // fluessig-runtime crate rather than redeclared inline in each prelude.
     assert!(
         node.contains("use fluessig_runtime::{Poll, PollStream};"),
         "shared streaming contract imported from fluessig-runtime:\n{node}"
@@ -606,7 +606,7 @@ fn sync_cursors_throw_on_poll_failed() {
     // `Poll` contract means a terminal `Poll::Failed` now RAISES the language-native
     // error (throw-mode) instead of being unreachable. Each cursor's poll-match
     // gains a `Failed` arm and the method becomes fallible. All three also import
-    // the shared contract from fluessig-runtime rather than re-declaring it inline.
+    // the shared contract from fluessig-runtime rather than redeclaring it inline.
     let api = fluessig::api::load_api(API).unwrap();
     let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     let py = fluessig::bindgen::python_binding(&api, &enums, None);

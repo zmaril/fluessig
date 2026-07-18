@@ -135,7 +135,7 @@ fn php_renders_the_union_fixture() {
         php.contains("Box<dyn PollStream<Event>>"),
         "stream primitive:\n{php}"
     );
-    // the runtime contract is imported, not re-declared inline
+    // the runtime contract is imported, not redeclared inline
     assert!(
         php.contains("use fluessig_runtime::{Poll, PollStream};"),
         "shared streaming contract imported from fluessig-runtime:\n{php}"

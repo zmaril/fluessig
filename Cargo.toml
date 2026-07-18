@@ -2,6 +2,7 @@
 members = [
     "crates/fluessig-derive-macros",
     "crates/fluessig-derive",
+    "crates/fluessig-runtime",
     "crates/cargo-fluessig",
     "crates/derive-demo",
 ]

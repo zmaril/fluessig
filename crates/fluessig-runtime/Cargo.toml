@@ -1,0 +1,7 @@
+[package]
+name = "fluessig-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The shared streaming runtime contract for fluessig: Poll<T> and PollStream<T>, defined once for both the generated language bindings and the hand-written core."
+repository = "https://github.com/zmaril/fluessig"

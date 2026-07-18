@@ -517,12 +517,16 @@ pub fn ruby_binding_with_options(
         .interfaces
         .iter()
         .any(|i| i.ops.iter().any(|o| o.shape == Shape::Stream));
+    // The shared streaming-contract import flows through the use-emitter
+    // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
+    // generated `use` line has one emission path; renders byte-identically.
+    let runtime_import = RUNTIME_STREAM_IMPORT.render();
     let mut t: rust::Tokens = quote! {
         use std::sync::Arc;
         use std::time::Duration;
         use magnus::{function, method, prelude::*, Error, Ruby};
         $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
-        use fluessig_runtime::{Poll, PollStream};
+        $(&runtime_import)
 
         fn rberr(e: impl std::fmt::Display) -> Error {
             let ruby = magnus::Ruby::get().expect($(quoted(&gvl_panic)));

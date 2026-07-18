@@ -63,13 +63,17 @@ fn php_sig_note(iface: &str, op: &crate::api::ApiOp) -> String {
 /// handle with a `__construct`, or a stateless class of static methods),
 /// `next()`-null stream cursors, and the `#[php_module]` registrar.
 pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+    // The shared streaming-contract import flows through the use-emitter
+    // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
+    // generated `use` line has one emission path; renders byte-identically.
+    let runtime_import = RUNTIME_STREAM_IMPORT.render();
     let mut t: rust::Tokens = quote! {
         $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
         use std::sync::Arc;
         use std::time::Duration;
         use ext_php_rs::prelude::*;
         $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
-        use fluessig_runtime::{Poll, PollStream};
+        $(&runtime_import)
 
         $("/// A core-layer failure becomes a thrown PHP exception (PHP is synchronous,")
         $("/// so a fallible op returns `PhpResult` and ext-php-rs raises on `Err`).")

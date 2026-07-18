@@ -453,6 +453,10 @@ pub fn python_binding_with_options(
     banner_note: Option<&str>,
     opts: &PythonOptions,
 ) -> String {
+    // The shared streaming-contract import flows through the use-emitter
+    // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
+    // generated `use` line has one emission path; renders byte-identically.
+    let runtime_import = RUNTIME_STREAM_IMPORT.render();
     let mut t: rust::Tokens = quote! {
         use std::sync::Arc;
         use std::time::Duration;
@@ -460,7 +464,7 @@ pub fn python_binding_with_options(
         use pyo3::exceptions::PyStopAsyncIteration;
         use pyo3::prelude::*;
         $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
-        use fluessig_runtime::{Poll, PollStream};
+        $(&runtime_import)
 
         fn err(e: impl std::fmt::Display) -> PyErr {
             PyRuntimeError::new_err(e.to_string())

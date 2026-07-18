@@ -260,22 +260,50 @@ pub fn external_refs(sub: &ApiDoc, home: &GroupKey, table: &GroupTable) -> BTree
     refs
 }
 
+/// A baseline EXTERNAL-crate import a generated file needs regardless of fan-out
+/// — e.g. the shared streaming contract `use fluessig_runtime::{Poll,
+/// PollStream};` every backend's prelude opens with. Carried alongside the
+/// intra-crate [`ExternalRef`] cross-group imports so EVERY generated `use` line
+/// flows through this one import-emission module (rather than a raw string baked
+/// into each backend prelude). Rendered as one grouped `use <crate>::{items};`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalImport {
+    /// The external crate path root (e.g. `fluessig_runtime`).
+    pub crate_path: &'static str,
+    /// The imported items, in the exact order they should appear in the braces.
+    pub items: &'static [&'static str],
+}
+
+impl ExternalImport {
+    /// The single `use <crate>::{a, b};` line (no trailing newline). A one-item
+    /// import still braces (`use c::{X};`) — callers here always pass ≥2 items.
+    pub fn render(&self) -> String {
+        format!("use {}::{{{}}};", self.crate_path, self.items.join(", "))
+    }
+}
+
+/// THE shared streaming-contract import: `use fluessig_runtime::{Poll,
+/// PollStream};`. Every backend prelude (node/python/ruby/php) renders THIS
+/// through [`ExternalImport::render`] instead of hardcoding the string, so the
+/// runtime import and the cross-group `use crate::…` imports share one emission
+/// path. Byte-identical to the previous raw prelude literal by construction.
+pub const RUNTIME_STREAM_IMPORT: ExternalImport = ExternalImport {
+    crate_path: "fluessig_runtime",
+    items: &["Poll", "PollStream"],
+};
+
 /// The dedup'd `use crate::…::Symbol;` block a group file opens with, or the
 /// empty string when the file has no cross-group refs (⇒ nothing spliced, output
 /// stays byte-identical to the un-imported render). node/python/ruby/php all
 /// emit Rust, so the import line is uniform; mcp differs only by restricting
 /// its refs to `Model`s (its enums lower to `String`) — see [`fan_out_crate`].
 ///
-/// FOLLOW-UP CONVERGENCE POINT (deferred, agreed with the runtime thread): #46
-/// emits the shared streaming contract as a raw prelude string
-/// `use fluessig_runtime::{Poll, PollStream};` in every backend. That is a FIXED
-/// EXTERNAL-crate dependency, structurally distinct from this resolver's
-/// intra-crate cross-GROUP `use crate::…` lines (different crate root, and it is
-/// needed in single-file mode too, where this emitter never runs). Routing it
-/// through here would mean generalizing [`ExternalRef`] to carry external-crate
-/// imports AND reworking all backend preludes — the exact files #46 rewrote —
-/// risking single-file byte-parity for a cosmetic gain. Left as-is deliberately;
-/// the single-file parity guard lives in the `cross_package_imports` test suite.
+/// This module is the SINGLE source of every generated `use` line: the baseline
+/// external-crate imports ([`ExternalImport`], emitted inline in each backend's
+/// prelude) and the intra-crate cross-group refs (this function, spliced into
+/// fanned group files by [`fan_out_crate`]). Two emission SITES — the prelude
+/// keeps the runtime import at its exact byte position for single-file parity,
+/// and cross-group imports only exist in fan-out — but one rendering path.
 pub fn render_use_block(refs: &BTreeSet<ExternalRef>) -> String {
     let mut s = String::new();
     for r in refs {

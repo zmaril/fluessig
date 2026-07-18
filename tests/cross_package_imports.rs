@@ -286,22 +286,16 @@ fn no_group_pins_means_no_fan_out_single_file_untouched() {
 }
 
 #[test]
-fn single_file_output_is_never_routed_through_the_subsystem() {
-    // Single-file `node_binding` is invoked directly, NEVER through the
-    // cross-package subsystem. This guards that path's byte-parity against a
-    // future "route the runtime `use fluessig_runtime::{…}` through the
-    // use-emitter" migration: single-file output stays deterministic, carries
-    // the runtime prelude line VERBATIM, and gains no `use crate::…` cross-group
-    // import (the subsystem's sole product). If a migration ever changed the
-    // single-file bytes, one of these fails.
+fn single_file_gains_no_cross_group_imports() {
+    // The runtime import now flows through the shared use-emitter module (see the
+    // `runtime_import_fold` suite for the byte-identity golden gate), but the
+    // cross-group SUBSYSTEM (fan_out_crate / render_use_block) still never runs in
+    // single-file mode: single-file output is deterministic and gains no
+    // `use crate::…` cross-group import — the subsystem's sole product.
     let api = load_api(CROSS_GROUP_API).unwrap();
     let a = node_binding(&api, &flavor_enum(), None);
     let b = node_binding(&api, &flavor_enum(), None);
     assert_eq!(a, b, "single-file render is deterministic");
-    assert!(
-        a.contains("use fluessig_runtime::{Poll, PollStream};"),
-        "single-file keeps the #46 runtime prelude line verbatim:\n{a}"
-    );
     assert!(
         !a.contains("use crate::"),
         "single-file output carries no cross-group imports (subsystem never runs here)"

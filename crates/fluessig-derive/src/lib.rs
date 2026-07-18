@@ -61,8 +61,16 @@
 //! an [`InterfaceDescriptor`] — op name, params, return, and op kind
 //! ([`OpKind`]: `ctor` / plain unary / `stream` / `manual`) — and `catalog!`'s
 //! `api:` root list lowers those into the `api.json` op layer via [`build_api`],
-//! the same file the loader validates and bindgen projects. Still out of scope:
-//! spans — Slice 6.
+//! the same file the loader validates and bindgen projects.
+//!
+//! Slice 6 adds **source spans** (`derive-front-end.md` §2.1/§2.8): every
+//! descriptor carries a [`SourceSpan`] — the declaration's `file!()` + `line!()`,
+//! captured by the macros — and [`validate_with_spans`] runs the full Rust loader
+//! validation, then annotates each diagnostic with the `.rs` file:line of the
+//! entity/field it names, the way a `.tsp`-authored error points at the `.tsp`
+//! line. Spans live only in the descriptor side channel; they never reach the
+//! lowered [`Catalog`], so `catalog.json` / `api.json` are byte-for-byte
+//! unchanged.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -152,6 +160,38 @@ impl<T: ?Sized> Default for Id<T> {
     }
 }
 
+/// The `.rs` source location of a derive-authored declaration (Slice 6,
+/// `derive-front-end.md` §2.1/§2.8). The derive macros capture each entity /
+/// field / op's `file!()` + `line!()` into its descriptor so the loader's
+/// diagnostics — which stay in the Rust core and name the offending entity or
+/// field — can be annotated with the Rust `file:line`, the way a `.tsp`-authored
+/// error points at the `.tsp` line today.
+///
+/// Spans live **only** in the descriptor layer (a build-time side channel). They
+/// are never lowered into [`fluessig::ir::Catalog`] / [`fluessig::api::ApiDoc`],
+/// so `catalog.json` / `api.json` stay byte-for-byte identical to the TypeSpec
+/// path — the design frames spans as powering loader diagnostics, not as catalog
+/// payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpan {
+    /// The source file (`file!()`), as rustc records it (workspace-relative).
+    pub file: &'static str,
+    /// The 1-based line (`line!()`); `0` marks a synthetic / hand-written
+    /// descriptor with no real location.
+    pub line: u32,
+}
+
+impl SourceSpan {
+    /// A hand-written or synthetic descriptor with no captured location — used by
+    /// tests that build descriptors by hand rather than through the derive. A
+    /// `line` of `0` suppresses the `file:line` prefix on an annotated diagnostic
+    /// (an honest "no location" rather than a fabricated one).
+    pub const UNKNOWN: SourceSpan = SourceSpan {
+        file: "<unknown>",
+        line: 0,
+    };
+}
+
 /// A whole entity, captured by the derive: its model name, optional physical
 /// table override (`#[fluessig(name = "…")]`), doc comment, columns, and the
 /// reference-column spelling other entities use when they point at it by
@@ -194,6 +234,10 @@ pub struct EntityDescriptor {
     /// part via [`EntityDescriptor::ref_cols`] instead; a per-site `cols(key = …)`
     /// overrides a single-key family's spelling.
     pub ref_col: Option<&'static str>,
+    /// The `.rs` source location of this entity's declaration (Slice 6) — the
+    /// struct's `file!()` + `line!()`. Feeds loader diagnostics only; never
+    /// lowered into the catalog, so `catalog.json` is byte-for-byte unchanged.
+    pub span: SourceSpan,
 }
 
 /// One `ref_cols(field = "column")` entry: a key field of the declaring entity
@@ -228,6 +272,10 @@ pub struct FieldDescriptor {
     /// fact, not a silent dedup (Slice 3, `derive-front-end.md` §2.5). Empty for
     /// the common case where the reference's own spelling is authoritative.
     pub shares: &'static [&'static str],
+    /// The `.rs` source location of this field's declaration (Slice 6) — the
+    /// field name's `file!()` + `line!()`. Feeds loader diagnostics only; never
+    /// lowered into the catalog.
+    pub span: SourceSpan,
 }
 
 /// What a field carries: a scalar value, a reference to another entity, or an
@@ -334,6 +382,8 @@ pub struct EdgeDescriptor {
     pub expose: Option<&'static str>,
     /// The edge's own columns, in declaration order.
     pub fields: &'static [EdgeFieldDescriptor],
+    /// The `.rs` source location of this edge struct's declaration (Slice 6).
+    pub span: SourceSpan,
 }
 
 /// One edge field, tagged with the role the lowering gives it: a source-side FK,
@@ -776,6 +826,8 @@ pub struct InterfaceDescriptor {
     pub doc: Option<&'static str>,
     /// The captured ops, in declaration order.
     pub ops: &'static [OpDescriptor],
+    /// The `.rs` source location of the exported `impl` block (Slice 6).
+    pub span: SourceSpan,
 }
 
 /// One captured method: its Rust (snake_case) name, doc, op kind, params, and
@@ -796,6 +848,8 @@ pub struct OpDescriptor {
     /// `stream` carries its iterator's `Item` type (the per-batch type); a
     /// `Result<T>` wrapper is transparent (unwrapped to `T`).
     pub returns: ApiTypeDesc,
+    /// The `.rs` source location of this method's declaration (Slice 6).
+    pub span: SourceSpan,
 }
 
 /// One op param: its Rust (snake_case) name (camelCased at lowering), its
@@ -810,6 +864,8 @@ pub struct ParamDescriptor {
     pub ty: ApiTypeDesc,
     /// `Option<T>` param ⇒ `true`.
     pub optional: bool,
+    /// The `.rs` source location of this param's declaration (Slice 6).
+    pub span: SourceSpan,
 }
 
 /// The four op kinds (`derive-front-end.md` §2.7). Mirrors [`fluessig::api::Shape`];
@@ -934,4 +990,135 @@ pub fn to_api_json(
     let mut json = serde_json::to_string_pretty(&api).expect("api serializes");
     json.push('\n');
     json
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Slice 6 — source spans in loader diagnostics
+//
+// `derive-front-end.md` §2.1/§2.8: the descriptors carry each declaration's
+// `.rs` file:line, and the loader — which stays in the Rust core and names the
+// offending entity/field — has its diagnostics annotated with that location, so
+// a schema authored in Rust that fails validation points at the `.rs` line the
+// way a `.tsp`-authored error names the `.tsp` location. Spans ride the
+// descriptor side channel ONLY: they never touch the lowered catalog, so
+// `catalog.json` / `api.json` stay byte-for-byte unchanged.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// One loader diagnostic annotated with the `.rs` source location of the entity
+/// or field it names (Slice 6). `Display` renders `file:line: message` when a
+/// span was resolved, else the bare message — a diagnostic whose locus isn't a
+/// captured entity/field (a cross-model name clash, an `edge struct …` message)
+/// keeps the loader's own wording, unlocated rather than mislocated.
+#[derive(Debug, Clone)]
+pub struct SpannedDiagnostic {
+    /// The resolved `.rs` location of the offending declaration, if the
+    /// diagnostic named a known entity/field carrying a real span.
+    pub span: Option<SourceSpan>,
+    /// The loader's original message (unchanged).
+    pub message: String,
+}
+
+impl fmt::Display for SpannedDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.span {
+            Some(s) if s.line != 0 => write!(f, "{}:{}: {}", s.file, s.line, self.message),
+            _ => f.write_str(&self.message),
+        }
+    }
+}
+
+/// Render a whole diagnostic list one-per-line — the derive front end's twin of
+/// [`fluessig::Diagnostics`]'s `Display`, but each line located at its `.rs`
+/// source.
+pub fn render_diagnostics(diags: &[SpannedDiagnostic]) -> String {
+    let mut out = String::new();
+    for d in diags {
+        out.push_str(&d.to_string());
+        out.push('\n');
+    }
+    out
+}
+
+/// A name→span index over the descriptors being validated, so a loader
+/// diagnostic — which leads with the offending `Entity` or `Entity.field` name —
+/// maps back to the `.rs` file:line that declared it.
+struct SpanIndex {
+    entities: HashMap<String, SourceSpan>,
+    fields: HashMap<(String, String), SourceSpan>,
+}
+
+impl SpanIndex {
+    fn build(entities: &[&'static EntityDescriptor], edges: &[&'static EdgeDescriptor]) -> Self {
+        let mut ix = SpanIndex {
+            entities: HashMap::new(),
+            fields: HashMap::new(),
+        };
+        for e in entities {
+            ix.entities.insert(e.name.to_string(), e.span);
+            // flatten-expanded so an embedded column resolves to where it was
+            // actually declared, not the embedding site.
+            for f in expanded_fields(e) {
+                ix.fields
+                    .insert((e.name.to_string(), f.name.to_string()), f.span);
+            }
+        }
+        for edge in edges {
+            // an edge surfaces as a to-many field on its `from` entity; a loader
+            // diagnostic on it reads `{from}.{expose}`.
+            let expose = edge
+                .expose
+                .map(str::to_string)
+                .unwrap_or_else(|| fluessig::ir::snake(edge.name));
+            ix.fields.insert((edge.from.to_string(), expose), edge.span);
+            for ef in edge.fields {
+                ix.fields.insert(
+                    (edge.name.to_string(), ef.field.name.to_string()),
+                    ef.field.span,
+                );
+            }
+        }
+        ix
+    }
+
+    /// Annotate one loader message: resolve the leading `Entity` / `Entity.field`
+    /// locus (the text before the first `:`) to a captured span. A locus that
+    /// isn't a bare entity/field name resolves to no span and keeps the bare
+    /// message.
+    fn annotate(&self, message: String) -> SpannedDiagnostic {
+        let locus = message.split_once(':').map_or("", |(l, _)| l.trim());
+        let span = match locus.split_once('.') {
+            Some((owner, field)) => self
+                .fields
+                .get(&(owner.to_string(), field.to_string()))
+                .or_else(|| self.entities.get(owner))
+                .copied(),
+            None => self.entities.get(locus).copied(),
+        };
+        SpannedDiagnostic { span, message }
+    }
+}
+
+/// Build the derived catalog, run the **full Rust loader validation** (the same
+/// `fluessig::catalog::validate` every front end passes through), and annotate any
+/// diagnostics with the `.rs` file:line of the offending declaration (Slice 6).
+///
+/// This is the derive front end's diagnostic bridge: the loader keeps naming the
+/// offending `Entity` / `Entity.field` exactly as it does for the TypeSpec path,
+/// and the span index maps that name back to the Rust source it was authored in.
+/// A clean schema returns the validated [`Catalog`]; a broken one returns every
+/// diagnostic, located. Spans never enter the catalog, so a clean run's IR is
+/// byte-identical to [`build_catalog_with_edges`].
+pub fn validate_with_spans(
+    name: &str,
+    version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+) -> Result<Catalog, Vec<SpannedDiagnostic>> {
+    let catalog = build_catalog_with_edges(name, version, entities, edges);
+    let diags = fluessig::catalog::validate(&catalog);
+    if diags.is_empty() {
+        return Ok(catalog);
+    }
+    let index = SpanIndex::build(entities, edges);
+    Err(diags.0.into_iter().map(|m| index.annotate(m)).collect())
 }

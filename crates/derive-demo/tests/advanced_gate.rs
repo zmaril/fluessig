@@ -150,6 +150,7 @@ fn without_shares_the_column_is_not_folded() {
                     key: false,
                     doc: None,
                     shares: &[],
+                    span: fluessig_derive::SourceSpan::UNKNOWN,
                 },
                 role: EdgeRole::Source,
             },
@@ -161,10 +162,12 @@ fn without_shares_the_column_is_not_folded() {
                     key: false,
                     doc: None,
                     shares: &[], // ← the only difference from the demo's shares(repo_id)
+                    span: fluessig_derive::SourceSpan::UNKNOWN,
                 },
                 role: EdgeRole::Target,
             },
         ],
+        span: fluessig_derive::SourceSpan::UNKNOWN,
     };
 
     let entities = [

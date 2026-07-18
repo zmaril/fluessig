@@ -45,7 +45,7 @@ extern dec defaultValue(target: ModelProperty, value: valueof unknown);
  * resolves it); `filter` is literal equality on the relation's edge properties. */
 extern dec derived(target: ModelProperty, agg: valueof string, of: valueof string, filter?: valueof unknown);
 
-// ── the binding surface: op shapes (plan.txt Step 5b; see spike/gen.mjs) ──
+// ── the binding surface: op shapes (plan.txt Step 5b) ──
 
 /** The constructor: opens the handle. */
 extern dec ctor(target: Operation);

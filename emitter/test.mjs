@@ -81,11 +81,11 @@ check(
   "optional params survive lowering",
 );
 
-// ── the spike demo still emits validly ──
-console.log("spike/entl.tsp:");
-const spike = await emit(resolve(dir, "../spike/entl.tsp"), mkdtempSync(resolve(tmpdir(), "fluessig-")));
-check(validCatalog(spike.catalog), "spike catalog matches the schema");
-check(validApi(spike.api), "spike api matches the schema");
+// ── the standalone demo catalog still emits validly ──
+console.log("tests/fixtures/entl.tsp:");
+const demo = await emit(resolve(dir, "../tests/fixtures/entl.tsp"), mkdtempSync(resolve(tmpdir(), "fluessig-")));
+check(validCatalog(demo.catalog), "demo catalog matches the schema");
+check(validApi(demo.api), "demo api matches the schema");
 
 // ── the tagged-union fixture (format 1) ──
 console.log("tests/fixtures/union.tsp:");

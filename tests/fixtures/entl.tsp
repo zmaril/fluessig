@@ -3,9 +3,10 @@ using TypeSpec.Reflection;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The fluessig decorator library (ships as @fluessig/typespec; inlined here so
-// the whole spike is ONE .tsp file). Two decorator families over one document:
+// this demo catalog is ONE self-contained .tsp file). Two decorator families
+// over one document:
 //   Layer B (relations):  @entity  @key  @edge(Props)  @compose
-//   Binding surface:      @ctor  @stream  @manual   (op shapes — see gen.mjs)
+//   Binding surface:      @ctor  @stream  @manual   (op shapes)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace Fluessig {
   extern dec entity(target: Model);

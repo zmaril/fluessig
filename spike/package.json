@@ -1,8 +1,0 @@
-{
-  "name": "fluessig-spike",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "@typespec/compiler": "^1.13.0"
-  }
-}

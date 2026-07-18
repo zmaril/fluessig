@@ -1,6 +1,6 @@
 // No-op impls: TypeSpec records decorator applications + args on the checked
-// program regardless of what the implementation does. Shared by spike/entl.tsp
-// (the demo) and ../entl.tsp (the full catalog) — superset of both vocabularies.
+// program regardless of what the implementation does. Backs the standalone
+// demo catalog (entl.tsp, this dir) — a superset of the decorator vocabulary.
 function noop() {}
 
 export const $decorators = {

@@ -11,7 +11,7 @@
     "test": "node test.mjs"
   },
   "dependencies": {
-    "@typespec/compiler": "^1.13.0"
+    "@typespec/compiler": "1.14.0"
   },
   "devDependencies": {
     "ajv": "^8"

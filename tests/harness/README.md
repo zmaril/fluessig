@@ -143,3 +143,81 @@ closes the core stream on `Drop`. Under the opt-in `@streamError` (event-mode)
 contract a mid-stream failure is instead yielded as a terminal `<Op>ErrorEvent`
 value and the stream latches closed — it never raises. This mock reproduces
 those observable semantics (throw-mode) without the native build.
+
+---
+
+# Ruby stream each/Enumerator — hand-run harness
+
+`each_enumerator_contract.rb` is the **Ruby analogue** of the `.mjs` / `.py`
+harnesses: it validates the **observable Ruby contract** the Magnus stream
+codegen targets. The class fluessig emits for every `stream` op must behave, from
+Ruby, like a well-formed `each`-able — `stream.each { |ev| ... }` yields each
+event to the block, and `stream.each` with **no block** returns an `Enumerator`
+(so `.lazy` / `.map` / `.next` compose), alongside the retained `.next` poll
+cursor.
+
+## Why a mock?
+
+Same reason as the Node and Python harnesses: fluessig `ruby_binding()` emits
+**Rust source** (with Magnus macros) as a `String`; it never compiles that
+source, and it cannot build a native Ruby extension in its own CI. So this
+harness constructs a **mock** `each`-able with the exact observable contract the
+generated class must satisfy, backed by a fake poll source with the same
+semantics as the core `PollStream::poll` / `close()` primitive.
+
+## Run
+
+```sh
+ruby tests/harness/each_enumerator_contract.rb
+```
+
+Plain `ruby`, no build step, no gems (only the stdlib). It prints a `PASS:` line
+per case and exits non-zero on any failure. Cases:
+
+1. **order** — a block consumes all events in order, skips idle polls, stops at
+   `Poll::Closed`; `each` returns the receiver.
+2. **enumerator** — a no-block `each` returns an `Enumerator`, and `.next` /
+   `.lazy.map` compose off it.
+3. **break** — an early `break` triggers the core `close()` exactly once (the
+   `Drop`-backstop analogue — Ruby has no deterministic destructor, so the mock
+   models it with an `ensure`).
+4. **throw** — a throw-mode failure source raises out of `each` (the default,
+   unannotated error model).
+5. **event** — an `@streamError` (event-mode) failure is yielded as a terminal
+   `{ type:, reason:, error: }` event and the block then ends — it never raises.
+
+## Validating a REAL generated extension
+
+To exercise the actual emitted Rust, a **consumer** (not fluessig) builds their
+Magnus crate from the generated `ruby.rs` and points an equivalent
+`each` / break / error script at the built class. The generated class exposes
+both surfaces — the idiomatic `each` and the retained `.next` poll cursor:
+
+```rb
+# consumer_ext is the consumer's built Magnus extension
+watch = Watch.new("/some/path")
+stream = watch.events            # -> the generated `Events` class
+
+# primary surface: each with a block
+stream.each do |ev|
+  puts ev
+  break if some_condition(ev)    # -> Drop closes the core PollStream
+end
+
+# no block: an Enumerator, so .lazy/.map/.next compose
+watch.events.each.lazy.map { |ev| transform(ev) }.first(10)
+
+# retained surface: the low-level poll cursor
+while (ev = stream.next)         # nil ends iteration
+  puts ev
+end
+```
+
+The real generated class calls the blocking `PollStream::poll` **under the GVL**
+(the same as the retained `.next` cursor — a documented GVL-release follow-up,
+see [`notes/async-iterable-streams-ruby.md`](../../notes/async-iterable-streams-ruby.md)),
+yields one item at a time, ends at `Poll::Closed`, and closes the core stream on
+`Drop`. Under the opt-in `@streamError` (event-mode) contract a mid-stream
+failure is instead yielded as a terminal `<Op>ErrorEvent` value and the block
+then ends — it never raises. This mock reproduces those observable semantics
+without the native build.

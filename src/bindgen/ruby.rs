@@ -770,6 +770,14 @@ pub fn ruby_binding_with_options(
         let trait_name = format!("{}Core", i.name);
         let impl_path = format!("crate::core_impl::{}Impl", i.name);
 
+        // stream classes: an idiomatic Ruby `each` (yields each event to a block,
+        // returns an Enumerator when called with NO block) alongside the retained
+        // `.next` poll cursor. The error model is chosen per-op by `stream_error`,
+        // mirroring node/python: `None` (unannotated) = throw-mode — a mid-stream
+        // `Poll::Failed` RAISES out of `each`; `Some(shape)` = error-AS-EVENT — the
+        // failure is yielded as a terminal `<Class>ErrorEvent` then the block ENDS,
+        // NEVER raising. `Poll::Failed(String)` is the core→binding channel in BOTH
+        // modes; only the `each`-loop terminal arm differs.
         for op in i.ops.iter().filter(|o| o.shape == Shape::Stream) {
             let class = pascal(&op.name);
             let (item, _) = ruby_ty(api, opts, &op.returns);
@@ -779,9 +787,94 @@ pub fn ruby_binding_with_options(
             registrations.push(format!(
                 "s.define_method(\"next\", method!({class}::next, 0))?;"
             ));
+            registrations.push(format!(
+                "s.define_method(\"each\", method!({class}::each, 0))?;"
+            ));
+
+            // The `each` loop's terminal-failure arm is the ONLY thing that differs
+            // by error model (mirrors node/python's `match &op.stream_error`).
+            let each_failed: rust::Tokens = match &op.stream_error {
+                // ── DEFAULT throw-mode (unannotated): raise on Poll::Failed ──
+                None => quote! {
+                    Poll::Failed(e) => return Err(rberr(e)), $("// throw-mode: raises in Ruby")
+                },
+                // ── OPT-IN event-mode (@streamError): error-as-event ──
+                Some(se) => {
+                    let err_evt = format!("{class}ErrorEvent");
+                    quote! {
+                        Poll::Failed(e) => {
+                            $("// error-AS-EVENT: hand the failure out as the terminal event,")
+                            $("// then END the block — NEVER raise (mirrors node/python's")
+                            $("// `@streamError` contract). A started stream is done once its")
+                            $("// terminal event has been yielded, so `break` ends iteration.")
+                            let _: magnus::Value = ruby.yield_value($(&err_evt) {
+                                type_: $(quoted(se.tag_value.clone())).into(),
+                                reason: "error".into(),
+                                error: e,
+                            })?;
+                            break;
+                        }
+                    }
+                }
+            };
+
+            // event-mode: emit + register the terminal error-event wrap class. Its
+            // three String fields carry `{ tag_name: tag_value, reason: "error",
+            // error: e }`; the Ruby-visible getter names come from the schema
+            // (`se.tag_name` / `se.reason_name` / `se.error_name`) via `define_method`.
+            if let Some(se) = &op.stream_error {
+                let err_evt = format!("{class}ErrorEvent");
+                registrations.push(format!(
+                    "let ev = class.define_class({err_evt:?}, ruby.class_object())?;"
+                ));
+                registrations.push(format!(
+                    "ev.define_method({:?}, method!({err_evt}::get_type_, 0))?;",
+                    se.tag_name
+                ));
+                registrations.push(format!(
+                    "ev.define_method({:?}, method!({err_evt}::get_reason, 0))?;",
+                    se.reason_name
+                ));
+                registrations.push(format!(
+                    "ev.define_method({:?}, method!({err_evt}::get_error, 0))?;",
+                    se.error_name
+                ));
+                quote_in! { t =>
+                    $['\r']
+                    $(format!("/// The terminal error event yielded (NEVER raised) when `{}.{}`'s core stream", i.name, op.name))
+                    $("/// fails after it has started — the opt-in `@streamError` (error-as-event)")
+                    $("/// model. A read-only carrier for a `Poll::Failed`; normal typed error")
+                    $("/// variants ride out through `Poll::Item` and need no such class.")
+                    #[magnus::wrap(class = $(quoted(format!("{module}::{err_evt}"))), free_immediately, size)]
+                    #[derive(Clone)]
+                    pub struct $(&err_evt) {
+                        pub type_: String,
+                        pub reason: String,
+                        pub error: String,
+                    }
+                    impl $(&err_evt) {
+                        fn get_type_(&self) -> String {
+                            self.type_.clone()
+                        }
+                        fn get_reason(&self) -> String {
+                            self.reason.clone()
+                        }
+                        fn get_error(&self) -> String {
+                            self.error.clone()
+                        }
+                    }
+                    $['\n']
+                };
+            }
+
             quote_in! { t =>
                 $['\r']
-                $(format!("/// Poll-based stream from `{}.{}` — `.next` returns the next item or nil.", i.name, op.name))
+                $(format!("/// Poll-based stream from `{}.{}`.", i.name, op.name))
+                $("///")
+                $("/// Primary surface: `each` — yields each event to a block, and returns an")
+                $("/// `Enumerator` when called with NO block (so `.lazy`/`.map`/`.next` compose).")
+                $("/// Retained surface: the `.next` poll cursor (fallible since P1) for consumers")
+                $("/// that want an explicit pull rather than a block.")
                 #[magnus::wrap(class = $(quoted(format!("{module}::{class}"))), free_immediately, size)]
                 pub struct $(&class) {
                     stream: Box<dyn PollStream<$(&item)>>,
@@ -799,6 +892,39 @@ pub fn ruby_binding_with_options(
                                 Poll::Failed(e) => return Err(rberr(e)), $("// raises on failure")
                             }
                         }
+                    }
+                    $("// Idiomatic streaming surface. With a block: yield each event, skipping")
+                    $("// idle polls and ending at `Poll::Closed`. With NO block: return an")
+                    $("// `Enumerator` over `each`, so `.lazy`/`.map`/`.next` compose (Ruby >= 3.1")
+                    $("// for an Enumerator built from a yielding method). `Obj<Self>` is the")
+                    $("// receiver so `enumeratorize` has the Ruby self value and the field is")
+                    $("// still reachable via Deref. The blocking `poll` runs UNDER the GVL —")
+                    $("// see notes/async-iterable-streams-ruby.md for the GVL-release follow-up.")
+                    fn each(ruby: &Ruby, rb_self: magnus::typed_data::Obj<Self>) -> Result<magnus::Value, Error> {
+                        $("// No block => hand back an Enumerator so `.lazy`/`.map`/`.next` work.")
+                        if !ruby.block_given() {
+                            return Ok(rb_self.enumeratorize("each", ()).as_value());
+                        }
+                        loop {
+                            match rb_self.stream.poll(Duration::from_millis(500)) {
+                                Poll::Item(v) => {
+                                    let _: magnus::Value = ruby.yield_value(v)?;
+                                }
+                                Poll::Idle => continue,
+                                Poll::Closed => break,
+                                $each_failed
+                            }
+                        }
+                        $("// `each` returns the receiver, like `Array#each`.")
+                        Ok(rb_self.as_value())
+                    }
+                }
+                $("// Backstop: an early `break` out of the block leaves the stream")
+                $("// un-exhausted, so `Drop` guarantees the core stream is closed and its")
+                $("// resources released (the `close()` default is an idempotent no-op).")
+                impl Drop for $(&class) {
+                    fn drop(&mut self) {
+                        self.stream.close();
                     }
                 }
                 $['\n']

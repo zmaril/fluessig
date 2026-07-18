@@ -68,23 +68,13 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
         use std::sync::Arc;
         use std::time::Duration;
         use ext_php_rs::prelude::*;
+        $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
+        use fluessig_runtime::{Poll, PollStream};
 
         $("/// A core-layer failure becomes a thrown PHP exception (PHP is synchronous,")
         $("/// so a fallible op returns `PhpResult` and ext-php-rs raises on `Err`).")
         fn err(e: impl std::fmt::Display) -> PhpException {
             PhpException::default(e.to_string())
-        }
-
-        $("/// One poll result from a core stream (the sync primitive every stream shape dresses).")
-        pub enum Poll<T> {
-            Item(T),
-            Idle,
-            Closed,
-        }
-
-        $("/// The one sync primitive: a blocking, timeout-bounded poll.")
-        pub trait PollStream<T>: Send + Sync {
-            fn poll(&self, timeout: Duration) -> Poll<T>;
         }
     };
     if api_uses_bytes(api) {

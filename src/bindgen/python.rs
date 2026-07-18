@@ -458,21 +458,11 @@ pub fn python_binding_with_options(
         use std::time::Duration;
         use pyo3::exceptions::PyRuntimeError;
         use pyo3::prelude::*;
+        $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
+        use fluessig_runtime::{Poll, PollStream};
 
         fn err(e: impl std::fmt::Display) -> PyErr {
             PyRuntimeError::new_err(e.to_string())
-        }
-
-        $("/// One poll result from a core stream (the sync primitive every stream shape dresses).")
-        pub enum Poll<T> {
-            Item(T),
-            Idle,
-            Closed,
-        }
-
-        $("/// The one sync primitive: a blocking, timeout-bounded poll.")
-        pub trait PollStream<T>: Send + Sync {
-            fn poll(&self, timeout: Duration) -> Poll<T>;
         }
     };
     if api_uses_bytes(api) {

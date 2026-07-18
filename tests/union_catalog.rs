@@ -573,11 +573,13 @@ fn stream_op_projects_async_iterable_and_retains_poll_cursor() {
         "spawn_blocking drives the blocking poll:\n{node}"
     );
 
-    // cancellation / close(): default no-op on the trait, called on complete + drop
+    // the streaming contract (Poll/PollStream) is now imported from the shared
+    // fluessig-runtime crate rather than re-declared inline in each prelude.
     assert!(
-        node.contains("fn close(&self) {}"),
-        "default no-op close on the trait:\n{node}"
+        node.contains("use fluessig_runtime::{Poll, PollStream};"),
+        "shared streaming contract imported from fluessig-runtime:\n{node}"
     );
+    // cancellation / close(): called on complete + drop
     assert!(
         node.contains("stream.close();"),
         "cancellation closes the core stream:\n{node}"

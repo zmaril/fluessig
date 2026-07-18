@@ -515,22 +515,12 @@ pub fn ruby_binding_with_options(
         use std::sync::Arc;
         use std::time::Duration;
         use magnus::{function, method, prelude::*, Error, Ruby};
+        $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
+        use fluessig_runtime::{Poll, PollStream};
 
         fn rberr(e: impl std::fmt::Display) -> Error {
             let ruby = magnus::Ruby::get().expect($(quoted(&gvl_panic)));
             Error::new(ruby.exception_runtime_error(), e.to_string())
-        }
-
-        $("/// One poll result from a core stream (the sync primitive every stream shape dresses).")
-        pub enum Poll<T> {
-            Item(T),
-            Idle,
-            Closed,
-        }
-
-        $("/// The one sync primitive: a blocking, timeout-bounded poll.")
-        pub trait PollStream<T>: Send + Sync {
-            fn poll(&self, timeout: Duration) -> Poll<T>;
         }
     };
     if api_uses_bytes(api) {

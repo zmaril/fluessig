@@ -265,6 +265,17 @@ pub fn external_refs(sub: &ApiDoc, home: &GroupKey, table: &GroupTable) -> BTree
 /// stays byte-identical to the un-imported render). node/python/ruby/php all
 /// emit Rust, so the import line is uniform; mcp differs only by restricting
 /// its refs to `Model`s (its enums lower to `String`) — see [`fan_out_crate`].
+///
+/// FOLLOW-UP CONVERGENCE POINT (deferred, agreed with the runtime thread): #46
+/// emits the shared streaming contract as a raw prelude string
+/// `use fluessig_runtime::{Poll, PollStream};` in every backend. That is a FIXED
+/// EXTERNAL-crate dependency, structurally distinct from this resolver's
+/// intra-crate cross-GROUP `use crate::…` lines (different crate root, and it is
+/// needed in single-file mode too, where this emitter never runs). Routing it
+/// through here would mean generalizing [`ExternalRef`] to carry external-crate
+/// imports AND reworking all backend preludes — the exact files #46 rewrote —
+/// risking single-file byte-parity for a cosmetic gain. Left as-is deliberately;
+/// the single-file parity guard lives in the `cross_package_imports` test suite.
 pub fn render_use_block(refs: &BTreeSet<ExternalRef>) -> String {
     let mut s = String::new();
     for r in refs {

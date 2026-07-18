@@ -285,6 +285,67 @@ fn no_group_pins_means_no_fan_out_single_file_untouched() {
     assert!(out.is_none(), "no group pins ⇒ nothing fanned out");
 }
 
+#[test]
+fn single_file_output_is_never_routed_through_the_subsystem() {
+    // Single-file `node_binding` is invoked directly, NEVER through the
+    // cross-package subsystem. This guards that path's byte-parity against a
+    // future "route the runtime `use fluessig_runtime::{…}` through the
+    // use-emitter" migration: single-file output stays deterministic, carries
+    // the runtime prelude line VERBATIM, and gains no `use crate::…` cross-group
+    // import (the subsystem's sole product). If a migration ever changed the
+    // single-file bytes, one of these fails.
+    let api = load_api(CROSS_GROUP_API).unwrap();
+    let a = node_binding(&api, &flavor_enum(), None);
+    let b = node_binding(&api, &flavor_enum(), None);
+    assert_eq!(a, b, "single-file render is deterministic");
+    assert!(
+        a.contains("use fluessig_runtime::{Poll, PollStream};"),
+        "single-file keeps the #46 runtime prelude line verbatim:\n{a}"
+    );
+    assert!(
+        !a.contains("use crate::"),
+        "single-file output carries no cross-group imports (subsystem never runs here)"
+    );
+}
+
+#[test]
+fn external_refs_cover_stream_op_return_types() {
+    // #46's dual-error stream surfaces (python `__anext__`, ruby each/Enumerator)
+    // synthesize a LOCAL `<Op>ErrorEvent` — three `String` fields, not an api
+    // model/union, not in the GroupTable, always emitted beside its stream op
+    // (ops never fan out) — so it carries no cross-group ref. The real cross-group
+    // surface is the stream ITEM type (`op.returns`), which the exhaustive walk
+    // covers even though fan_out drops ops today: a stream op returning a model
+    // pinned to another group surfaces that model as a cross-group ref.
+    let api = load_api(
+        r#"{"fluessig":{"format":1},
+          "models":[
+            {"name":"Chunk","fields":[{"name":"n","type":"int32","nullable":false}],"bindings":{"node":{"package":"@x/beta","module":"../src/beta"}}}
+          ],
+          "interfaces":[
+            {"name":"Svc","ops":[
+              {"name":"watch","shape":"stream","stream_error":{},"params":[],"returns":{"model":"Chunk"}}
+            ]}
+          ]}"#,
+    )
+    .unwrap();
+    let table = group_table(&api, &[], "node");
+    // A sub-doc carrying the interface (the op layer); its home is `common`.
+    let sub = ApiDoc {
+        fluessig: api.fluessig.clone(),
+        source: None,
+        models: vec![],
+        unions: vec![],
+        interfaces: api.interfaces.clone(),
+    };
+    let refs = external_refs(&sub, &GroupKey::Common, &table);
+    assert!(
+        refs.iter()
+            .any(|r| r.symbol == "Chunk" && r.module_path.join("::") == "x::beta::src::beta"),
+        "the stream item type (op return) surfaces as a cross-group ref: {refs:?}"
+    );
+}
+
 // ── THE compile proof (hermetic, offline) + negative control ─────────────────
 
 #[test]

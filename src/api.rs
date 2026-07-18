@@ -4,15 +4,15 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub use crate::ir::SymbolBinding;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiDoc {
     pub fluessig: crate::ir::Versions,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     pub models: Vec<ApiModel>,
     /// Named tagged unions the op surface references (format 1). On the FFI a
@@ -24,11 +24,11 @@ pub struct ApiDoc {
     pub interfaces: Vec<ApiInterface>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiUnion {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     /// Per-union discriminant field name for structured projection (format 1+).
     /// Absent in existing fixtures — `None` falls back to the backend-global tag
@@ -42,7 +42,7 @@ pub struct ApiUnion {
     pub bindings: BTreeMap<String, SymbolBinding>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiUnionVariant {
     pub tag: String,
@@ -50,11 +50,11 @@ pub struct ApiUnionVariant {
     pub ty: ApiType,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiModel {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     pub fields: Vec<ApiField>,
     /// Per-language export-name / package / module pins for this model symbol
@@ -63,7 +63,7 @@ pub struct ApiModel {
     pub bindings: BTreeMap<String, SymbolBinding>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiField {
     pub name: String,
@@ -79,27 +79,27 @@ pub struct ApiField {
     pub bindings: BTreeMap<String, SymbolBinding>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiInterface {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     pub ops: Vec<ApiOp>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiOp {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     pub shape: Shape,
     /// `@readonly` — flows into the MCP `readOnlyHint` annotation.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub readonly: bool,
     /// `@destructive` — flows into the MCP `destructiveHint` annotation.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub destructive: bool,
     /// `@streamError(...)` — opts a stream op INTO the error-as-EVENT model and
     /// (optionally) shapes that event, for the node backend. This field drives the
@@ -111,7 +111,7 @@ pub struct ApiOp {
     /// `@streamError` lowers to `Some(StreamErrorShape::default())` = pi's shape
     /// verbatim; args override individual js-names / the tag value. Loader-checked
     /// to be legal only on [`Shape::Stream`] (see [`load_api`]).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_error: Option<StreamErrorShape>,
     pub params: Vec<ApiParam>,
     pub returns: ApiType,
@@ -127,7 +127,7 @@ pub struct ApiOp {
 /// empty `{}` annotation lower identically; a schema author overrides only what
 /// they need. Field NAMES are js-names on the emitted `#[napi(object)]` struct;
 /// `tag_value` is the value stamped into the tag field.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 // container `default`: any field the author omits falls back to `Default` (pi's
 // shape below), so a partial `{ "tag_value": … }` fills the rest verbatim.
 #[serde(deny_unknown_fields, default)]
@@ -153,7 +153,7 @@ impl Default for StreamErrorShape {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Shape {
     Ctor,
@@ -162,19 +162,19 @@ pub enum Shape {
     Manual,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiParam {
     pub name: String,
     #[serde(rename = "type")]
     pub ty: ApiType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional: Option<bool>,
 }
 
 /// A type in the op surface: a scalar name (or `"void"`), a model/enum
 /// reference, or a list thereof.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ApiType {
     Scalar(String),

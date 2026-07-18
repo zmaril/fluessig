@@ -13,25 +13,8 @@
 
 use genco::prelude::*;
 
-use crate::ir::Catalog;
+use crate::ir::{camel, Catalog};
 use crate::sql::{tables, Dialect, TableDef};
-
-/// snake_case → lowerCamelCase (`gh_pull_requests` → `ghPullRequests`).
-fn camel(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut up = false;
-    for c in s.chars() {
-        if c == '_' {
-            up = true;
-        } else if up {
-            out.push(c.to_ascii_uppercase());
-            up = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
 
 /// snake_case → PascalCase (`gh_pull_requests` → `GhPullRequests`).
 fn pascal(s: &str) -> String {

@@ -3,6 +3,10 @@
 //! carrier, and the core-trait split all project to ext-php-rs), and atilla's M0
 //! surface (one stateless `version` op) must reproduce the load-bearing tokens
 //! of the hand-written `bindings/php/src/lib.rs`.
+//!
+//! straitjacket-allow-file:duplication — this suite is DELIBERATELY parallel to
+//! `tests/union_catalog.rs`'s per-language assertions (same fixture load, same
+//! name-only-enum parity setup); the cross-language token parity is the point.
 
 use fluessig::api::{ApiDoc, ApiInterface, ApiOp, ApiType, Shape};
 

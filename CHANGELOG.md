@@ -6,6 +6,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Node backend: a per-stream-op error model. The DEFAULT (unannotated) is
+  idiomatic native TS — a mid-stream core failure REJECTS the pull, so the
+  `for await` loop throws (safe by default, no silent-swallow). Opting a stream
+  op into `@streamError` flips it to error-AS-EVENT (mirror-a-library mode, e.g.
+  pi): the failure is yielded as a terminal error EVENT (a value via
+  `napi::Either`) and the stream then completes, never rejecting. Setup/creation
+  (ctor, unary, stream construction) always throw a napi error in both modes. A
+  `Poll::Failed(String)` arm carries the core mid-stream `Result` failure through
+  the shared `Poll<T>` in either mode; a core that emits its terminal error as a
+  normal union variant still flows through `Poll::Item` unchanged.
+- `@streamError(...)` TypeSpec decorator (+ `stream_error` on `ApiOp` and the api
+  schema): presence opts a stream op into error-as-event mode; a bare
+  `@streamError` uses pi's `{ type: "error", reason, error }` verbatim, and the
+  optional args override the emitted event JS shape — tag field js-name/value and
+  reason/message field js-names. Loader-checked to be stream-only. A core wanting
+  pi's exact error-as-event contract (e.g. atilla's pi harness ops) must annotate
+  its stream ops `@streamError`.
+
 ## [0.1.0] - 2026-07-07
 
 ### Added

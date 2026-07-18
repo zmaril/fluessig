@@ -19,5 +19,6 @@ export const $decorators = {
     manual: noop,
     readonly: noop,
     destructive: noop,
+    streamError: noop,
   },
 };

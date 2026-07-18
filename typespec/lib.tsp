@@ -62,6 +62,19 @@ extern dec readonly(target: Operation);
 /** Destroys or irreversibly alters state. Flows into MCP `destructiveHint`. */
 extern dec destructive(target: Operation);
 
+/** Customize a STREAM op's terminal error EVENT (node backend): the discriminator
+ * tag field js-name (default `type`) and its value (default `error`), and the
+ * reason / message field js-names (default `reason` / `error`) — pi's post-start
+ * error shape. Stream-only; the Rust loader rejects it on any other shape. Args
+ * are positional scalars (skip from the right): `@streamError("kind", "failure")`. */
+extern dec streamError(
+  target: Operation,
+  tagName?: valueof string,
+  tagValue?: valueof string,
+  reasonName?: valueof string,
+  errorName?: valueof string,
+);
+
 // ── stock scalars: shared vocabulary every catalog gets via `using Fluessig` ──
 // Stock scalars behave like TypeSpec builtins: they don't appear in the
 // catalog's scalars list; the generators know them by name (sql.rs lowers Json

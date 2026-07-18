@@ -43,6 +43,7 @@ fn m0_api() -> ApiDoc {
                 shape: Shape::Unary,
                 readonly: true,
                 destructive: false,
+                stream_error: None,
                 params: Vec::new(),
                 returns: ApiType::Scalar("string".into()),
             }],

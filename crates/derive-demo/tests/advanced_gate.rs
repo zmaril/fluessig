@@ -150,6 +150,8 @@ fn without_shares_the_column_is_not_folded() {
                     key: false,
                     doc: None,
                     shares: &[],
+                    default: None,
+                    derived: None,
                     span: fluessig_derive::SourceSpan::UNKNOWN,
                 },
                 role: EdgeRole::Source,
@@ -162,6 +164,8 @@ fn without_shares_the_column_is_not_folded() {
                     key: false,
                     doc: None,
                     shares: &[], // ← the only difference from the demo's shares(repo_id)
+                    default: None,
+                    derived: None,
                     span: fluessig_derive::SourceSpan::UNKNOWN,
                 },
                 role: EdgeRole::Target,

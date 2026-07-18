@@ -101,16 +101,84 @@ fn union_crosses_the_op_layer() {
         );
     }
 
-    // bindgen: union values cross as the JSON envelope (String carrier), and
-    // the generated surface still renders for every language
+    // bindgen: the DEFAULT is now structured tagged-object projection across
+    // node/python/ruby — a nested union DTO field (`Event.payload`) lowers to the
+    // per-variant tagged carrier, NOT the JSON envelope `String`. The generated
+    // surface still renders for every language.
     let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
     let node = fluessig::bindgen::node_binding(&api, &enums, None);
     assert!(
-        node.contains("pub payload: String"),
-        "envelope carrier:\n{node}"
+        node.contains("pub struct EventPayloadMessage") && node.contains("Either3<"),
+        "node structured default:\n{node}"
     );
-    fluessig::bindgen::python_binding(&api, &enums, None);
-    fluessig::bindgen::ruby_binding(&api, &enums, None);
+    assert!(
+        !node.contains("pub payload: String"),
+        "node envelope carrier must be gone by default:\n{node}"
+    );
+    let python = fluessig::bindgen::python_binding(&api, &enums, None);
+    assert!(
+        python.contains("pub enum EventPayloadUnion") && python.contains("IntoPyObject"),
+        "python structured default:\n{python}"
+    );
+    let ruby = fluessig::bindgen::ruby_binding(&api, &enums, None);
+    assert!(
+        ruby.contains("pub enum EventPayloadUnion")
+            && ruby.contains("impl magnus::IntoValue for EventPayloadUnion"),
+        "ruby structured default:\n{ruby}"
+    );
+}
+
+#[test]
+fn union_crosses_the_op_layer_envelope_opt_out() {
+    // the historical JSON envelope (`String` carrier) stays reachable as an
+    // explicit opt-out on every backend — no tagged structs, the union rides as
+    // the `payload: String` twin.
+    use fluessig::bindgen::{
+        node_binding_with_options, python_binding_with_options, ruby_binding_with_options,
+        NodeOptions, PythonOptions, RubyOptions, UnionProjection,
+    };
+    let api = fluessig::api::load_api(API).unwrap();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
+
+    let node = node_binding_with_options(
+        &api,
+        &enums,
+        None,
+        &NodeOptions {
+            union_projection: UnionProjection::Envelope,
+            ..Default::default()
+        },
+    );
+    assert!(
+        node.contains("pub payload: String") && !node.contains("Either3<"),
+        "node envelope opt-out:\n{node}"
+    );
+
+    let python = python_binding_with_options(
+        &api,
+        &enums,
+        None,
+        &PythonOptions {
+            union_projection: UnionProjection::Envelope,
+        },
+    );
+    assert!(
+        python.contains("pub payload: String") && !python.contains("EventPayloadUnion"),
+        "python envelope opt-out:\n{python}"
+    );
+
+    let ruby = ruby_binding_with_options(
+        &api,
+        &enums,
+        None,
+        &RubyOptions {
+            union_projection: UnionProjection::Envelope,
+        },
+    );
+    assert!(
+        ruby.contains("pub payload: String") && !ruby.contains("EventPayloadUnion"),
+        "ruby envelope opt-out:\n{ruby}"
+    );
 }
 
 // ── the dual error model (node backend): pre-start throws, post-start yields ──

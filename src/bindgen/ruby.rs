@@ -6,7 +6,7 @@
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiOp, ApiType, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, Shape};
 
 use super::*;
 
@@ -15,6 +15,66 @@ use super::*;
 /// Ruby hardcodes no pin; its rename lever is the method-name string it hands
 /// `define_method` and the enum `wire()` token.
 const LANG: &str = "ruby";
+
+/// Backend options for the Magnus (Ruby) generator. The 3-arg [`ruby_binding`]
+/// threads `RubyOptions::default()`, whose [`UnionProjection::default`] is
+/// structured tagged-object projection; pass [`UnionProjection::Envelope`] to opt
+/// back into the historical JSON-string carrier.
+#[derive(Default, Clone)]
+pub struct RubyOptions {
+    /// How union return values and nested union DTO fields are lowered.
+    pub union_projection: UnionProjection,
+}
+
+/// A union eligible for structured projection: at least two variants, all of
+/// which are model refs. Magnus imposes no upper arity cap (the tagged variants
+/// ride a plain Rust enum that lowers to the matched wrapped class), so any such
+/// union projects; a mixed or degenerate union falls back to the JSON envelope.
+fn rb_structured_union<'a>(api: &'a ApiDoc, name: &str) -> Option<&'a ApiUnion> {
+    api.unions.iter().find(|u| u.name == name).filter(|u| {
+        u.variants.len() >= 2
+            && u.variants
+                .iter()
+                .all(|v| matches!(&v.ty, ApiType::Model { .. }))
+    })
+}
+
+/// The ruby `(rust, _)` spelling of a type, applying structured union projection
+/// when [`RubyOptions::union_projection`] asks for it: a union lowers to its
+/// generated `{Union}Union` enum (an `IntoValue` wrapper over the per-variant
+/// wrapped classes). Delegates to the shared [`ty`] for everything else, so
+/// envelope mode is byte-identical to the historical output.
+fn ruby_ty(api: &ApiDoc, opts: &RubyOptions, t: &ApiType) -> (String, String) {
+    match (t, &opts.union_projection) {
+        (ApiType::Union { union }, UnionProjection::Structured { .. }) => {
+            match rb_structured_union(api, union) {
+                Some(u) => {
+                    let n = union_enum_name(&u.name);
+                    (n.clone(), n)
+                }
+                None => ty(api, t),
+            }
+        }
+        (ApiType::List { list }, _) => {
+            let (r, s) = ruby_ty(api, opts, list);
+            (format!("Vec<{r}>"), format!("{s}[]"))
+        }
+        (ApiType::Nullable { nullable }, _) => {
+            let (r, s) = ruby_ty(api, opts, nullable);
+            (format!("Option<{r}>"), format!("{s} | null"))
+        }
+        _ => ty(api, t),
+    }
+}
+
+/// Ruby's `<Interface>Core` traits: the shared [`emit_core_traits_with`] spine
+/// driven with ruby's structured return mapping ([`ruby_ty`]) so a
+/// union-returning op's core-trait signature matches the wrapped method return
+/// (`{Union}Union`). In envelope mode `ruby_ty` delegates to `ty`, so the output
+/// is byte-identical to the historical default.
+fn emit_core_traits_ruby(t: &mut rust::Tokens, api: &ApiDoc, opts: &RubyOptions) {
+    emit_core_traits_with(t, api, |op| ruby_ty(api, opts, &op.returns).0);
+}
 
 /// The models an op surface RETURNS (directly, in lists, or nullable) — these
 /// get Ruby classes with getters; input bags are flattened away instead.
@@ -298,10 +358,147 @@ fn rb_op_pieces(api: &ApiDoc, op: &ApiOp) -> RbPieces {
     }
 }
 
+/// Emit, for every structurally-projected union, one `#[magnus::wrap]` class per
+/// variant (the discriminant as a `type` getter set to the literal plus getters
+/// for the variant model's fields, and a `From<VariantModel>` conversion), then
+/// the `{Union}Union` enum wrapping them with an `IntoValue` that lowers to the
+/// matched wrapped class. Pushes the class + method registrations onto `regs`.
+/// Nothing is emitted in envelope mode.
+fn emit_rb_union_variants(
+    t: &mut rust::Tokens,
+    api: &ApiDoc,
+    opts: &RubyOptions,
+    module: &str,
+    regs: &mut Vec<String>,
+) {
+    let UnionProjection::Structured { tag_field } = &opts.union_projection else {
+        return;
+    };
+    for u in &api.unions {
+        let Some(u) = rb_structured_union(api, &u.name) else {
+            quote_in! { *t =>
+                $['\r']
+                $(format!("// note: union {} is not structurally projectable (needs >=2 model-ref variants) — kept as the JSON envelope carrier.", u.name))
+            };
+            continue;
+        };
+        let field = union_tag_field(u, tag_field);
+        let ident = tag_ident(&field);
+        let tag_getter = format!("get_{}", snake(&field));
+        let mut arms: Vec<String> = Vec::new();
+        for v in &u.variants {
+            let sname = tagged_variant_name(&u.name, &v.tag);
+            arms.push(format!(
+                "Self::{}(v) => v.into_value_with(ruby),",
+                pascal(&v.tag)
+            ));
+            let ApiType::Model { model } = &v.ty else {
+                continue;
+            };
+            let Some(m) = api.models.iter().find(|m| &m.name == model) else {
+                continue;
+            };
+            // struct fields: the tag first, then the variant model's real fields
+            let mut struct_fields: Vec<rust::Tokens> = Vec::new();
+            struct_fields.push(quote!($(format!("pub {ident}: String,"))));
+            let mut getters: Vec<rust::Tokens> = Vec::new();
+            getters.push(quote! {
+                fn $(&tag_getter)(&self) -> String {
+                    self.$(&ident).clone()
+                }
+            });
+            let mut from_fields: Vec<String> = Vec::new();
+            from_fields.push(format!("{ident}: {:?}.into(),", v.tag));
+            // register the tag getter (Ruby method name = the discriminant field)
+            regs.push(format!(
+                "let c = class.define_class({:?}, ruby.class_object())?;",
+                sname
+            ));
+            regs.push(format!(
+                "c.define_method({:?}, method!({sname}::{tag_getter}, 0))?;",
+                field
+            ));
+            for f in &m.fields {
+                let (r, _) = ruby_ty(api, opts, &f.ty);
+                let r = if f.nullable {
+                    format!("Option<{r}>")
+                } else {
+                    r
+                };
+                let fname = snake(&f.name);
+                struct_fields.push(quote!($(format!("pub {fname}: {r},"))));
+                getters.push(quote! {
+                    fn get_$(&fname)(&self) -> $(&r) {
+                        self.$(&fname).clone()
+                    }
+                });
+                from_fields.push(format!("{fname}: v.{fname},"));
+                regs.push(format!(
+                    "c.define_method({fname:?}, method!({sname}::get_{fname}, 0))?;"
+                ));
+            }
+            quote_in! { *t =>
+                $['\r']
+                $(format!("/// `{}` union variant `{}` — the tag `{}` rides as the `{}` getter's literal.", u.name, v.tag, v.tag, field))
+                #[magnus::wrap(class = $(quoted(format!("{module}::{sname}"))), free_immediately, size)]
+                #[derive(Clone)]
+                pub struct $(&sname) {
+                    $(for f in &struct_fields join ($['\r']) => $f)
+                }
+                impl $(&sname) {
+                    $(for g in &getters join ($['\r']) => $g)
+                }
+                impl From<$model> for $(&sname) {
+                    fn from(v: $model) -> Self {
+                        Self {
+                            $(for f in &from_fields join ($['\r']) => $f)
+                        }
+                    }
+                }
+                $['\n']
+            };
+        }
+        let enum_name = union_enum_name(&u.name);
+        quote_in! { *t =>
+            $['\r']
+            $(format!("/// The `{}` tagged union — its `IntoValue` lowers to the matched variant's", u.name))
+            $("/// wrapped Ruby class (a tagged object carrying the discriminant getter).")
+            #[derive(Clone)]
+            pub enum $(&enum_name) {
+                $(for v in &u.variants join ($['\r']) => $(format!("{}({}),", pascal(&v.tag), tagged_variant_name(&u.name, &v.tag))))
+            }
+            impl magnus::IntoValue for $(&enum_name) {
+                fn into_value_with(self, ruby: &magnus::Ruby) -> magnus::Value {
+                    match self {
+                        $(for a in &arms join ($['\r']) => $a)
+                    }
+                }
+            }
+            $['\n']
+        };
+    }
+}
+
+/// Generate the Magnus (Ruby) binding with default options: structured
+/// tagged-object union projection (per-variant `#[magnus::wrap]` classes wrapped
+/// in a `{Union}Union` enum, tag field `"type"`). A thin wrapper over
+/// [`ruby_binding_with_options`]; pass [`UnionProjection::Envelope`] to opt into
+/// the JSON-string carrier.
+pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+    ruby_binding_with_options(api, enums, banner_note, &RubyOptions::default())
+}
+
 /// Generate the Magnus (Ruby) binding: plain-Rust DTOs + enums (with parse),
 /// wrapped output classes with getters, GVL-plain methods with trailing
 /// optionals, `.next`-nil streams, and a `register()` for `#[magnus::init]`.
-pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+/// `opts` selects union projection (structured wrapped classes vs. the JSON
+/// envelope).
+pub fn ruby_binding_with_options(
+    api: &ApiDoc,
+    enums: &[EnumDesc],
+    banner_note: Option<&str>,
+    opts: &RubyOptions,
+) -> String {
     let outputs = output_models(api);
     // The Ruby module/root class name: the stateful (ctor-bearing) interface's
     // name — the class the DTO classes nest under and stateless interfaces hang
@@ -491,11 +688,28 @@ pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
             })
             .collect();
         if is_output {
+            // output models are the ones that carry union-typed fields as tagged
+            // objects — project their storage + getters via `ruby_ty` (input bags
+            // never reach here; they stay the envelope `fields` below).
+            let out_fields: Vec<rust::Tokens> = m
+                .fields
+                .iter()
+                .map(|f| {
+                    let (r, _) = ruby_ty(api, opts, &f.ty);
+                    let r = if f.nullable {
+                        format!("Option<{r}>")
+                    } else {
+                        r
+                    };
+                    let n = snake(&f.name);
+                    quote!(pub $n: $r,)
+                })
+                .collect();
             let getters: Vec<rust::Tokens> = m
                 .fields
                 .iter()
                 .map(|f| {
-                    let (r, _) = ty(api, &f.ty);
+                    let (r, _) = ruby_ty(api, opts, &f.ty);
                     let r = if f.nullable {
                         format!("Option<{r}>")
                     } else {
@@ -514,7 +728,7 @@ pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                 #[magnus::wrap(class = $(quoted(format!("{module}::{}", m.name))), free_immediately, size)]
                 #[derive(Clone)]
                 pub struct $(&m.name) {
-                    $(for f in &fields join ($['\r']) => $f)
+                    $(for f in &out_fields join ($['\r']) => $f)
                 }
                 impl $(&m.name) {
                     $(for g in &getters join ($['\r']) => $g)
@@ -533,10 +747,14 @@ pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         }
     }
 
-    emit_core_traits(&mut t, api);
-
     // ── the surface ──
     let mut registrations: Vec<String> = Vec::new();
+
+    // per-variant wrapped classes (+ the {Union}Union enum) for structured unions
+    emit_rb_union_variants(&mut t, api, opts, &module, &mut registrations);
+
+    emit_core_traits_ruby(&mut t, api, opts);
+
     for m in &api.models {
         if outputs.contains(&m.name) {
             registrations.push(format!(
@@ -564,7 +782,7 @@ pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
 
         for op in i.ops.iter().filter(|o| o.shape == Shape::Stream) {
             let class = pascal(&op.name);
-            let (item, _) = ty(api, &op.returns);
+            let (item, _) = ruby_ty(api, opts, &op.returns);
             registrations.push(format!(
                 "let s = class.define_class({class:?}, ruby.class_object())?;"
             ));
@@ -608,7 +826,7 @@ pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                 let (fn_params, arity) = (p.fn_params, p.arity);
                 let prelude = format!("{}{}", p.scan.unwrap_or_default(), p.prelude);
                 let args = p.args;
-                let (ret, _) = ty(api, &op.returns);
+                let (ret, _) = ruby_ty(api, opts, &op.returns);
                 match op.shape {
                     Shape::Ctor => {
                         registrations.push(format!(
@@ -700,7 +918,7 @@ pub fn ruby_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                 let (fn_params, arity) = (p.fn_params, p.arity);
                 let prelude = format!("{}{}", p.scan.unwrap_or_default(), p.prelude);
                 let args = p.args;
-                let (ret, _) = ty(api, &op.returns);
+                let (ret, _) = ruby_ty(api, opts, &op.returns);
                 registrations.push(format!(
                     "class.define_singleton_method({name:?}, function!({name}, {arity}))?;"
                 ));

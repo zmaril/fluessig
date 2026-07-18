@@ -1,5 +1,7 @@
 //! `fluessig-gen <catalog.json> <out.rs> [--docs <p>] [--py-models <p>] [--ts-tables <p>] [--ts-drizzle <p>]
-//! [--api <api.json> [--node <p>] [--python <p>] [--ruby <p>] [--php <p>] [--mcp <p>]]`
+//! [--api <api.json> [--node <p>] [--node-dts <p>]
+//! [--{node,python,ruby}-union-mode structured|envelope] [--{node,python,ruby}-union-tag <field>]
+//! [--python <p>] [--ruby <p>] [--php <p>] [--mcp <p>]]`
 //! — generate the committed artifacts: the Rust schema module, the docs
 //! projection, the ORM read planes (see [`fluessig::sql`] / [`fluessig::codegen`]),
 //! the binding surfaces, and the MCP module (see [`fluessig::bindgen`]).
@@ -18,6 +20,28 @@
 //! straitjacket-allow-file:duplication — the catalog→enums extraction here mirrors
 //! the one in fluessig's regen test (tests/entl_catalog.rs); both feed the bindgen.
 
+/// Resolve a `--*-union-mode` flag (+ its `--*-union-tag`) into a
+/// [`fluessig::bindgen::UnionProjection`]. The default (no flag) is now
+/// `structured` tagged objects across every backend; `envelope` is the explicit
+/// opt-out. Exits non-zero on an unknown mode.
+fn union_projection(
+    mode: Option<&str>,
+    tag: Option<&str>,
+    flag_name: &str,
+) -> fluessig::bindgen::UnionProjection {
+    use fluessig::bindgen::UnionProjection;
+    match mode {
+        None | Some("structured") => UnionProjection::Structured {
+            tag_field: tag.unwrap_or("type").to_string(),
+        },
+        Some("envelope") => UnionProjection::Envelope,
+        Some(other) => {
+            eprintln!("{flag_name} must be `structured` or `envelope` (got `{other}`)");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut flag = |name: &str| -> Option<String> {
@@ -29,6 +53,18 @@ fn main() {
     let docs = flag("--docs");
     let api_path = flag("--api");
     let node = flag("--node");
+    let node_dts = flag("--node-dts");
+    // How each backend lowers tagged unions: `structured` (DEFAULT — tagged
+    // objects: napi `Either{N}` / PyO3 `#[pyclass]` variants / Magnus wrapped
+    // classes) or `envelope` (the historical JSON-string carrier, an opt-out).
+    // `--*-union-tag` names the discriminant field for structured mode (default
+    // `type`, matching pi).
+    let node_union_mode = flag("--node-union-mode");
+    let node_union_tag = flag("--node-union-tag");
+    let python_union_mode = flag("--python-union-mode");
+    let python_union_tag = flag("--python-union-tag");
+    let ruby_union_mode = flag("--ruby-union-mode");
+    let ruby_union_tag = flag("--ruby-union-tag");
     let python = flag("--python");
     let ruby = flag("--ruby");
     let php = flag("--php");
@@ -131,13 +167,64 @@ fn main() {
             })
             .collect();
         if let Some(p) = node {
-            write(&p, fluessig::bindgen::node_binding(&api, &enums, note));
+            // `--node-dts <path>` fronts the package's public typings with a
+            // hand-written `.d.ts` (napi can't express `A | B`): the generated
+            // addon suppresses union `ts_return_type` hints, and the supplied
+            // file is reference-copied next to the emitted artifact so the
+            // package's `types` resolves to it.
+            let opts = fluessig::bindgen::NodeOptions {
+                union_projection: union_projection(
+                    node_union_mode.as_deref(),
+                    node_union_tag.as_deref(),
+                    "--node-union-mode",
+                ),
+                external_dts: node_dts.clone(),
+            };
+            write(
+                &p,
+                fluessig::bindgen::node_binding_with_options(&api, &enums, note, &opts),
+            );
+            if let Some(dts) = &node_dts {
+                let dest = std::path::Path::new(&p)
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(
+                        std::path::Path::new(dts)
+                            .file_name()
+                            .unwrap_or_else(|| std::ffi::OsStr::new("index.d.ts")),
+                    );
+                std::fs::copy(dts, &dest).unwrap_or_else(|e| {
+                    eprintln!("copy {dts} -> {}: {e}", dest.display());
+                    std::process::exit(1);
+                });
+                println!("copied external .d.ts {dts} -> {}", dest.display());
+            }
         }
         if let Some(py) = python {
-            write(&py, fluessig::bindgen::python_binding(&api, &enums, note));
+            let opts = fluessig::bindgen::PythonOptions {
+                union_projection: union_projection(
+                    python_union_mode.as_deref(),
+                    python_union_tag.as_deref(),
+                    "--python-union-mode",
+                ),
+            };
+            write(
+                &py,
+                fluessig::bindgen::python_binding_with_options(&api, &enums, note, &opts),
+            );
         }
         if let Some(rb) = ruby {
-            write(&rb, fluessig::bindgen::ruby_binding(&api, &enums, note));
+            let opts = fluessig::bindgen::RubyOptions {
+                union_projection: union_projection(
+                    ruby_union_mode.as_deref(),
+                    ruby_union_tag.as_deref(),
+                    "--ruby-union-mode",
+                ),
+            };
+            write(
+                &rb,
+                fluessig::bindgen::ruby_binding_with_options(&api, &enums, note, &opts),
+            );
         }
         if let Some(p) = php {
             write(&p, fluessig::bindgen::php_binding(&api, &enums, note));

@@ -21,7 +21,7 @@ use fluessig::api::{load_api, ApiDoc};
 use fluessig::bindgen::{
     common_path_for, external_refs, fan_out_crate, group_module_path, group_table, node_binding,
     render_use_block, resolve_module_paths, symbol_groups, EnumDesc, EnumVariant, FanOutSpec,
-    GroupKey,
+    GroupKey, SymbolGroup,
 };
 
 // ── sanitization: pin → Rust module path ─────────────────────────────────────
@@ -133,8 +133,23 @@ fn a_pin_of_only_artifacts_is_an_empty_path_error() {
 
 #[test]
 fn the_five_pi_pins_do_not_collide() {
-    let api = load_api(FANOUT_API).unwrap();
-    let groups = symbol_groups(&api, "node");
+    // The five canonical `@earendil-works/pi-*` packages + their deep `../src/*`
+    // modules resolve to five distinct Rust module paths (no collision).
+    let pins = [
+        ("@earendil-works/pi-agent-core", "../src/agent"),
+        ("@earendil-works/pi-ai", "../src/ai"),
+        ("@earendil-works/pi-coding-agent", "../src/coding-agent"),
+        ("@earendil-works/pi-orchestrator", "../src/orchestrator"),
+        ("@earendil-works/pi-tui", "../src/tui"),
+    ];
+    let groups: Vec<SymbolGroup> = pins
+        .iter()
+        .map(|(p, m)| SymbolGroup {
+            package: p.to_string(),
+            module: m.to_string(),
+            symbols: vec!["X".to_string()],
+        })
+        .collect();
     let resolved = resolve_module_paths(&groups).expect("no collision among the five pi pins");
     assert_eq!(resolved.len(), 5);
 }
@@ -143,7 +158,7 @@ fn the_five_pi_pins_do_not_collide() {
 
 #[test]
 fn external_refs_are_the_cross_group_models_and_nonstring_enums() {
-    let api = load_api(TWO_GROUP_API).unwrap();
+    let api = load_api(CROSS_GROUP_API).unwrap();
     let enums = flavor_enum();
     let table = group_table(&api, &enums, "node");
     // The `alpha` group holds `Message`, which references `Account` (beta) and
@@ -217,7 +232,7 @@ fn per_backend_import_line_is_use_crate_path_symbol() {
 
 #[test]
 fn a_shared_enum_is_defined_once_and_imported_by_each_group() {
-    let api = load_api(TWO_GROUP_API).unwrap();
+    let api = load_api(CROSS_GROUP_API).unwrap();
     let crate_out = render_crate(&api, &flavor_enum());
 
     // `Flavor` is defined exactly ONCE, in `common`.
@@ -274,7 +289,7 @@ fn no_group_pins_means_no_fan_out_single_file_untouched() {
 
 #[test]
 fn fanned_tree_compiles_and_negative_control_fails() {
-    let api = load_api(UNION_COMPILE_API).unwrap();
+    let api = load_api(CROSS_GROUP_API).unwrap();
     let crate_out = render_crate(&api, &flavor_enum());
     let root = std::path::Path::new(&crate_out.root.0).to_path_buf();
     let outdir = root.parent().expect("root has a parent dir").to_path_buf();
@@ -308,42 +323,19 @@ fn fanned_tree_compiles_and_negative_control_fails() {
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
-/// Five DTOs, each pinned into one of pi's five canonical `@earendil-works/`
-/// packages (verbatim), with a deep `../src/*` module path.
-const FANOUT_API: &str = r#"{
-  "fluessig": {"format": 1},
-  "models": [
-    {"name": "AgentCore",    "fields": [{"name": "a", "type": "int32", "nullable": false}], "bindings": {"node": {"package": "@earendil-works/pi-agent-core",   "module": "../src/agent"}}},
-    {"name": "Ai",           "fields": [{"name": "a", "type": "int32", "nullable": false}], "bindings": {"node": {"package": "@earendil-works/pi-ai",           "module": "../src/ai"}}},
-    {"name": "CodingAgent",  "fields": [{"name": "a", "type": "int32", "nullable": false}], "bindings": {"node": {"package": "@earendil-works/pi-coding-agent", "module": "../src/coding-agent"}}},
-    {"name": "Orchestrator", "fields": [{"name": "a", "type": "int32", "nullable": false}], "bindings": {"node": {"package": "@earendil-works/pi-orchestrator",  "module": "../src/orchestrator"}}},
-    {"name": "Tui",          "fields": [{"name": "a", "type": "int32", "nullable": false}], "bindings": {"node": {"package": "@earendil-works/pi-tui",          "module": "../src/tui"}}}
-  ],
-  "unions": [],
-  "interfaces": []
-}"#;
-
-/// Two groups (alpha, beta) sharing an enum. `Message` (alpha) references
-/// `Account` (beta) + `Flavor` (common); `AgentX` (beta) references `Flavor`.
-const TWO_GROUP_API: &str = r#"{
-  "fluessig": {"format": 1},
-  "models": [
-    {"name": "Account", "fields": [{"name": "id", "type": "int32", "nullable": false}], "bindings": {"node": {"package": "@acme/beta", "module": "../src/beta"}}},
-    {"name": "AgentX",  "fields": [{"name": "kind", "type": {"enum": "Flavor"}, "nullable": false}], "bindings": {"node": {"package": "@acme/beta", "module": "../src/beta"}}},
-    {"name": "Message", "fields": [
-      {"name": "kind", "type": {"enum": "Flavor"}, "nullable": false},
-      {"name": "owner", "type": {"model": "Account"}, "nullable": true}
-    ], "bindings": {"node": {"package": "@acme/alpha", "module": "../src/alpha"}}}
-  ],
-  "unions": [],
-  "interfaces": []
-}"#;
-
-/// The compile-proof api: TWO_GROUP_API plus a structured union `Evt` in `alpha`
-/// over co-located variant models — one variant (`Message`) reaches `Account`
-/// (beta) through its inlined field, so the union's tagged struct in `alpha` must
-/// import `crate::acme::beta::src::beta::Account`.
-const UNION_COMPILE_API: &str = r#"{
+/// The one shared cross-group fixture: two groups (`alpha`, `beta`) + a `common`
+/// enum + a structured union.
+///  * `Account`, `AgentX` → group `beta`; `Message`, `Note` + union `Evt` → `alpha`.
+///  * `Flavor` (an enum) is un-pinned ⇒ homed in `common`, referenced from BOTH
+///    groups (`AgentX.kind`, `Message.kind`) — the enum-dedup vector.
+///  * `Message` (alpha) references `Account` (beta) — the cross-group DTO import.
+///  * union `Evt` (alpha) over co-located variant models `Message`/`Note`; its
+///    `Message` variant reaches `Account` (beta) through the inlined field, so
+///    `alpha`'s tagged struct must import `crate::acme::beta::src::beta::Account`.
+///
+/// Used by the ref-set, enum-dedup, AND compile-proof tests (one fixture, no
+/// near-duplicate siblings).
+const CROSS_GROUP_API: &str = r#"{
   "fluessig": {"format": 1},
   "models": [
     {"name": "Account", "fields": [{"name": "id", "type": "int32", "nullable": false}], "bindings": {"node": {"package": "@acme/beta", "module": "../src/beta"}}},

@@ -14,8 +14,8 @@ use quote::quote;
 use syn::{Ident, PathArguments, Type};
 
 use crate::{
-    doc_string, field_span_tokens, option_inner, option_str, scalar_kind, span_tokens, vec_inner,
-    FluField,
+    doc_string, field_span_tokens, ident_name, option_inner, option_str, scalar_kind, span_tokens,
+    vec_inner, FluField,
 };
 
 /// The container-level options on a `#[derive(Record)]` DTO struct — no attributes
@@ -60,7 +60,7 @@ pub(crate) fn expand_record(opts: RecordOpts) -> syn::Result<proc_macro2::TokenS
 
 /// Emit the `RecordFieldDescriptor { … }` tokens for one record field.
 fn record_field_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenStream> {
-    let fname = field.ident.as_ref().expect("named field").to_string();
+    let fname = ident_name(field.ident.as_ref().expect("named field"));
     let doc_tokens = option_str(doc_string(&field.attrs).as_deref());
     let (ty_tokens, nullable) = record_type(&field.ty)?;
     let span = field_span_tokens(field);
@@ -92,7 +92,11 @@ fn record_type(ty: &Type) -> syn::Result<(proc_macro2::TokenStream, bool)> {
 }
 
 /// The non-`Option` record type token: `Vec<T>` ⇒ a list; a primitive ⇒ a scalar;
-/// any other bare type name ⇒ a reference to another record (`Model`).
+/// any other bare type name ⇒ a `Named` type (a declared enum / semantic scalar /
+/// value-struct reference), resolved at lowering against the catalog's declared
+/// enums / scalars (Slice 8b — `FileDiff.status: FileStatus` → `{ enum }`,
+/// `ChangeBatch.ipc: ArrowBatch` → the scalar, `SinkOptions.rename: Vec<TableRename>`
+/// → the record reference).
 fn record_type_inner(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
     if let Some(elem) = vec_inner(ty) {
         let inner = record_type_inner(elem)?;
@@ -102,7 +106,7 @@ fn record_type_inner(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
         return Ok(quote! { ::fluessig_derive::RecordTypeDesc::Scalar(#kind) });
     }
     let name = bare_type_name(ty)?;
-    Ok(quote! { ::fluessig_derive::RecordTypeDesc::Model(#name) })
+    Ok(quote! { ::fluessig_derive::RecordTypeDesc::Named(#name) })
 }
 
 /// A single-segment, non-generic type path's name — a record's reference to

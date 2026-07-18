@@ -64,8 +64,7 @@ use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
-    Attribute, FnArg, GenericArgument, Ident, ImplItem, ItemImpl, LitStr, Pat, PathArguments,
-    ReturnType, Token, Type,
+    GenericArgument, Ident, ItemImpl, LitStr, PathArguments, Token, Type,
 };
 
 // ─────────────────────────── darling attribute grammar ───────────────────────────
@@ -156,6 +155,13 @@ struct FluField {
     /// typed `<Root>Id`.
     #[darling(default)]
     cols: Option<ColsMeta>,
+    /// `#[fluessig(default = 0 | false | …)]` — the column's DDL DEFAULT (Slice 8b).
+    #[darling(default)]
+    default: Option<DefaultLitMeta>,
+    /// `#[fluessig(derived(exists|count, of = "rel", filter(k = v)))]` — a derived
+    /// field (Slice 8b).
+    #[darling(default)]
+    derived: Option<DerivedMeta>,
 }
 
 /// `cols(tag = "…", key = "…")` — the per-site spelling override of a polymorphic
@@ -242,7 +248,7 @@ impl FromMeta for Shares {
 /// without discarding the rest. Returns the collected items, or every
 /// accumulated error. The shared spine behind the hand-written `FromMeta` impls
 /// (`RefCols`, `Shares`); each supplies only its per-item match.
-fn parse_meta_list<T>(
+pub(crate) fn parse_meta_list<T>(
     items: &[NestedMeta],
     parse: impl Fn(&NestedMeta) -> darling::Result<T>,
 ) -> darling::Result<Vec<T>> {
@@ -259,7 +265,7 @@ fn parse_meta_list<T>(
 }
 
 /// Extract a string-literal value from an attribute expression.
-fn lit_str(expr: &syn::Expr) -> darling::Result<String> {
+pub(crate) fn lit_str(expr: &syn::Expr) -> darling::Result<String> {
     if let syn::Expr::Lit(syn::ExprLit {
         lit: syn::Lit::Str(s),
         ..
@@ -554,6 +560,11 @@ fn expand_edge(opts: EdgeOpts) -> syn::Result<proc_macro2::TokenStream> {
     let mut target_taken = false;
     let mut edge_fields = Vec::new();
     for field in &fields {
+        // A polymorphic edge side (Slice 8b): a field typed `<Root>Id` whose family
+        // is the edge's `from` is the source, whose family is the `to` is the target
+        // (`gh_labeled.subject: GhSubjectId`, `tree_entries.child: GitObjectId`).
+        let poly_root = poly_ref_type(&field.ty)
+            .map(|(id_enum, _)| id_enum.strip_suffix("Id").unwrap_or(&id_enum).to_string());
         let role = match ref_target(&field.ty)? {
             Some(t) if t == from && !source_taken => {
                 source_taken = true;
@@ -563,7 +574,17 @@ fn expand_edge(opts: EdgeOpts) -> syn::Result<proc_macro2::TokenStream> {
                 target_taken = true;
                 quote! { ::fluessig_derive::EdgeRole::Target }
             }
-            _ => quote! { ::fluessig_derive::EdgeRole::Property },
+            _ => match poly_root.as_deref() {
+                Some(root) if root == from_str && !source_taken => {
+                    source_taken = true;
+                    quote! { ::fluessig_derive::EdgeRole::Source }
+                }
+                Some(root) if root == to_str && !target_taken => {
+                    target_taken = true;
+                    quote! { ::fluessig_derive::EdgeRole::Target }
+                }
+                _ => quote! { ::fluessig_derive::EdgeRole::Property },
+            },
         };
         let fd = field_descriptor_tokens(field)?;
         edge_fields.push(quote! {
@@ -589,11 +610,49 @@ fn expand_edge(opts: EdgeOpts) -> syn::Result<proc_macro2::TokenStream> {
     })
 }
 
+// ─────────────────── #[derive(Enum)] / #[derive(Scalar)] ───────────────────
+
+/// The `#[derive(Enum)]` / `#[derive(Scalar)]` option shapes + token lowering
+/// live in [`enum_scalar`] (Slice 8b); only the proc-macro entry points sit at
+/// the crate root.
+mod enum_scalar;
+
+/// Derive an `impl fluessig_derive::EnumType` carrying a `&'static EnumDescriptor`
+/// (Slice 8b) — entl's `RefKind` / `FileStatus` / `PrState` / … enums.
+#[proc_macro_derive(Enum, attributes(fluessig))]
+pub fn derive_enum(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    let opts = match enum_scalar::EnumOpts::from_derive_input(&input) {
+        Ok(o) => o,
+        Err(e) => return e.write_errors().into(),
+    };
+    match enum_scalar::expand_enum(opts) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Derive an `impl fluessig_derive::ScalarType` carrying a `&'static
+/// ScalarDescriptor` (Slice 8b) — entl's `Oid` (base `bytes`) and `ArrowBatch`.
+#[proc_macro_derive(Scalar, attributes(fluessig))]
+pub fn derive_scalar(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    let opts = match enum_scalar::ScalarOpts::from_derive_input(&input) {
+        Ok(o) => o,
+        Err(e) => return e.write_errors().into(),
+    };
+    enum_scalar::expand_scalar(opts).into()
+}
+
 // ─────────────────────────── #[derive(Record)] ───────────────────────────
 
 /// The `#[derive(Record)]` expansion lives in [`record`]; only the proc-macro
-/// entry point can sit at the crate root.
+/// entry point can sit at the crate root. `#[fluessig(default/derived)]`'s
+/// grammar lives in [`field_meta`].
+mod field_meta;
 mod record;
+
+use field_meta::{DefaultLitMeta, DerivedMeta};
 
 /// Derive a `&'static RecordDescriptor` for a DTO / value struct (Slice 8a Gap 2).
 ///
@@ -627,7 +686,7 @@ pub fn derive_record(input: TokenStream) -> TokenStream {
 /// `flatten`, `#[key]` / `#[fluessig(key)]`, `shares(…)`, doc comments, and the
 /// scalar / `Id<T>` type mapping.
 fn field_descriptor_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenStream> {
-    let fname = field.ident.as_ref().expect("named field").to_string();
+    let fname = ident_name(field.ident.as_ref().expect("named field"));
     let is_key = field.key || has_bare_key(&field.attrs);
     let doc_tokens = option_str(doc_string(&field.attrs).as_deref());
     let shares = &field.shares.0;
@@ -656,6 +715,9 @@ fn field_descriptor_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenSt
         map_field_type(&field.ty)?
     };
 
+    let default_tokens = opt_tokens(field.default.as_ref().map(|d| d.tokens()));
+    let derived_tokens = opt_tokens(field.derived.as_ref().map(|d| d.tokens()));
+
     let span = field_span_tokens(field);
     Ok(quote! {
         ::fluessig_derive::FieldDescriptor {
@@ -665,6 +727,8 @@ fn field_descriptor_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenSt
             key: #is_key,
             doc: #doc_tokens,
             shares: #shares_tokens,
+            default: #default_tokens,
+            derived: #derived_tokens,
             span: #span,
         }
     })
@@ -677,7 +741,7 @@ fn field_descriptor_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenSt
 /// This is the `file!()`/`line!()` route the design suggests over
 /// `proc_macro2::Span::start()`, which is unreliable on stable; the built-ins
 /// resolve per-field with exact line fidelity.
-fn span_tokens(span: proc_macro2::Span) -> proc_macro2::TokenStream {
+pub(crate) fn span_tokens(span: proc_macro2::Span) -> proc_macro2::TokenStream {
     let file = quote_spanned!(span=> ::core::file!());
     let line = quote_spanned!(span=> ::core::line!());
     quote! { ::fluessig_derive::SourceSpan { file: #file, line: #line } }
@@ -688,8 +752,17 @@ fn field_span_tokens(field: &FluField) -> proc_macro2::TokenStream {
     span_tokens(field.ident.as_ref().expect("named field").span())
 }
 
+/// `Some(<inner>)` / `None` tokens from an optional pre-lowered descriptor payload
+/// — the `Option<…>` slot for a field's `default` / `derived` tokens (Slice 8b).
+fn opt_tokens(inner: Option<proc_macro2::TokenStream>) -> proc_macro2::TokenStream {
+    match inner {
+        Some(t) => quote! { ::core::option::Option::Some(#t) },
+        None => quote! { ::core::option::Option::None },
+    }
+}
+
 /// `Some("s")` / `None` tokens from an optional string.
-fn option_str(s: Option<&str>) -> proc_macro2::TokenStream {
+pub(crate) fn option_str(s: Option<&str>) -> proc_macro2::TokenStream {
     match s {
         Some(v) => quote! { ::core::option::Option::Some(#v) },
         None => quote! { ::core::option::Option::None },
@@ -760,14 +833,57 @@ fn map_field_type(ty: &Type) -> syn::Result<(proc_macro2::TokenStream, bool)> {
 }
 
 /// Resolve a non-`Option` field type to its `FieldKind` token: `Id<T>` ⇒ a
-/// foreign-key reference to `T`, else a scalar primitive.
+/// foreign-key reference to `T`; `DateTime<_>` ⇒ the `utcDateTime` scalar and
+/// `Vec<u8>` ⇒ the `bytes` scalar (Slice 8b stock-scalar tokens); a primitive ⇒ a
+/// scalar; any other bare single-segment name (`Oid`, `Json`, `RefKind`) ⇒ a
+/// `Named` type resolved at lowering against the declared enums / scalars.
 fn field_kind(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
     if let Some(target) = id_target(ty)? {
         let name = target.to_string();
         return Ok(quote! { ::fluessig_derive::FieldKind::Reference(#name) });
     }
-    let kind = scalar_kind(ty)?;
-    Ok(quote! { ::fluessig_derive::FieldKind::Scalar(#kind) })
+    // `chrono::DateTime<Utc>` (or any `DateTime<_>`) is the utcDateTime scalar.
+    if is_generic_named(ty, "DateTime") {
+        return Ok(quote! { ::fluessig_derive::FieldKind::Named("utcDateTime") });
+    }
+    // `Vec<u8>` is the bytes scalar (`Blob.content`).
+    if let Some(elem) = single_type_arg(ty, "Vec") {
+        if is_named(elem, "u8") {
+            return Ok(quote! { ::fluessig_derive::FieldKind::Named("bytes") });
+        }
+    }
+    if let Ok(kind) = scalar_kind(ty) {
+        return Ok(quote! { ::fluessig_derive::FieldKind::Scalar(#kind) });
+    }
+    // any other bare, non-generic single-segment name is a declared enum / semantic
+    // scalar / value-struct reference — resolved at lowering.
+    let name = bare_type_name(ty)?;
+    Ok(quote! { ::fluessig_derive::FieldKind::Named(#name) })
+}
+
+/// A single-segment generic path whose head ident is `name` (e.g.
+/// `is_generic_named(ty, "DateTime")` matches `DateTime<Utc>`).
+fn is_generic_named(ty: &Type, name: &str) -> bool {
+    let Type::Path(tp) = ty else { return false };
+    tp.qself.is_none()
+        && tp.path.segments.last().is_some_and(|s| {
+            s.ident == name && matches!(s.arguments, PathArguments::AngleBracketed(_))
+        })
+}
+
+/// A bare, non-generic single-segment type path's name (`Oid`, `Json`, `RefKind`).
+/// Errors (via [`unsupported`]) on anything that isn't a plain name.
+fn bare_type_name(ty: &Type) -> syn::Result<String> {
+    if let Type::Path(tp) = ty {
+        if tp.qself.is_none() {
+            if let Some(seg) = tp.path.segments.last() {
+                if matches!(seg.arguments, PathArguments::None) {
+                    return Ok(seg.ident.to_string());
+                }
+            }
+        }
+    }
+    Err(unsupported(ty))
 }
 
 /// A field typed `Id<T>` → `Some(T)`, resolved by `syn` path parsing. The macro
@@ -874,8 +990,16 @@ fn single_type_arg<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
 }
 
 /// `Option<T>` → `Some(T)`.
-fn option_inner(ty: &Type) -> Option<&Type> {
+pub(crate) fn option_inner(ty: &Type) -> Option<&Type> {
     single_type_arg(ty, "Option")
+}
+
+/// A field/param ident's catalog name, with any raw-identifier `r#` prefix
+/// stripped (`r#type` → `type`) so a Rust keyword column matches the `.tsp`
+/// spelling (`` `type` `` in TypeSpec).
+pub(crate) fn ident_name(ident: &Ident) -> String {
+    let s = ident.to_string();
+    s.strip_prefix("r#").map(str::to_string).unwrap_or(s)
 }
 
 fn has_bare_key(attrs: &[syn::Attribute]) -> bool {
@@ -885,7 +1009,7 @@ fn has_bare_key(attrs: &[syn::Attribute]) -> bool {
 /// Collect `///` doc comments (lowered by rustc to `#[doc = "…"]`) into one
 /// string, trimming the single leading space rustdoc inserts and joining lines
 /// with `\n` — mirroring the TypeSpec emitter's `getDoc`.
-fn doc_string(attrs: &[syn::Attribute]) -> Option<String> {
+pub(crate) fn doc_string(attrs: &[syn::Attribute]) -> Option<String> {
     let mut lines = Vec::new();
     for attr in attrs {
         if !attr.path().is_ident("doc") {
@@ -930,6 +1054,12 @@ struct CatalogInput {
     /// structs that lower to the catalog's `valueStructs` and are materialised
     /// into `api.json`'s `models` when an op references them (Slice 8a Gap 2).
     records: Vec<Ident>,
+    /// The `enums: [RefKind, …]` roots — `#[derive(Enum)]` types lowered into the
+    /// catalog's `enums` (Slice 8b).
+    enums: Vec<Ident>,
+    /// The `scalars: [Oid, …]` roots — `#[derive(Scalar)]` types lowered into the
+    /// catalog's `scalars` (Slice 8b).
+    scalars: Vec<Ident>,
     /// The `api: [Entl, …]` op roots — types whose `#[fluessig::export] impl`
     /// blocks are lowered into `api.json` alongside the entity catalog (Slice 5).
     api: Vec<Ident>,
@@ -942,6 +1072,8 @@ impl Parse for CatalogInput {
         let mut entities = None;
         let mut edges = Vec::new();
         let mut records = Vec::new();
+        let mut enums = Vec::new();
+        let mut scalars = Vec::new();
         let mut api = Vec::new();
 
         while !input.is_empty() {
@@ -953,13 +1085,16 @@ impl Parse for CatalogInput {
                 "entities" => entities = Some(parse_ident_list(input)?),
                 "edges" => edges = parse_ident_list(input)?,
                 "records" => records = parse_ident_list(input)?,
+                "enums" => enums = parse_ident_list(input)?,
+                "scalars" => scalars = parse_ident_list(input)?,
                 "api" => api = parse_ident_list(input)?,
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
                             "unknown catalog! field `{other}` — supported: \
-                             name, version, entities, edges, records, api"
+                             name, version, entities, edges, records, enums, \
+                             scalars, api"
                         ),
                     ))
                 }
@@ -979,6 +1114,8 @@ impl Parse for CatalogInput {
                 .ok_or_else(|| syn::Error::new(input.span(), "catalog! is missing `entities`"))?,
             edges,
             records,
+            enums,
+            scalars,
             api,
         })
     }
@@ -1028,24 +1165,27 @@ pub fn catalog(input: TokenStream) -> TokenStream {
         entities,
         edges,
         records,
+        enums,
+        scalars,
         api,
     } = parse_macro_input!(input as CatalogInput);
 
     // The generated `fluessig_catalog` module nests one level below the
-    // invocation scope, so entity/edge/record/api paths are reached through
-    // `super::`.
-    let entity_descriptors = entities.iter().map(|e| {
-        quote! { <super::#e as ::fluessig_derive::Entity>::DESCRIPTOR }
-    });
-    let edge_descriptors = edges.iter().map(|e| {
-        quote! { <super::#e as ::fluessig_derive::Edge>::DESCRIPTOR }
-    });
-    let record_descriptors = records.iter().map(|r| {
-        quote! { <super::#r as ::fluessig_derive::Record>::DESCRIPTOR }
-    });
-    let api_descriptors = api.iter().map(|a| {
-        quote! { <super::#a as ::fluessig_derive::ApiExport>::DESCRIPTOR }
-    });
+    // invocation scope, so each root's descriptor is reached as
+    // `<super::Root as fluessig_derive::<Trait>>::DESCRIPTOR` — one shape for every
+    // root kind, so the six lists lower through a single helper.
+    let descriptors = |roots: &[Ident], tr: proc_macro2::TokenStream| {
+        roots
+            .iter()
+            .map(|r| quote! { <super::#r as ::fluessig_derive::#tr>::DESCRIPTOR })
+            .collect::<Vec<_>>()
+    };
+    let entity_descriptors = descriptors(&entities, quote!(Entity));
+    let edge_descriptors = descriptors(&edges, quote!(Edge));
+    let record_descriptors = descriptors(&records, quote!(Record));
+    let enum_descriptors = descriptors(&enums, quote!(EnumType));
+    let scalar_descriptors = descriptors(&scalars, quote!(ScalarType));
+    let api_descriptors = descriptors(&api, quote!(ApiExport));
 
     quote! {
         /// Generated by `fluessig_derive::catalog!` — the exporter half of the
@@ -1064,6 +1204,16 @@ pub fn catalog(input: TokenStream) -> TokenStream {
             pub const RECORDS: &[&'static ::fluessig_derive::RecordDescriptor] =
                 &[ #( #record_descriptors ),* ];
 
+            /// The enum descriptors listed in `catalog!`'s `enums:`, in declaration
+            /// order (Slice 8b). Empty when none are given.
+            pub const ENUMS: &[&'static ::fluessig_derive::EnumDescriptor] =
+                &[ #( #enum_descriptors ),* ];
+
+            /// The scalar descriptors listed in `catalog!`'s `scalars:`, in
+            /// declaration order (Slice 8b). Empty when none are given.
+            pub const SCALARS: &[&'static ::fluessig_derive::ScalarDescriptor] =
+                &[ #( #scalar_descriptors ),* ];
+
             /// The op-interface descriptors listed in `catalog!`'s `api:`, in
             /// declaration order (Slice 5). Empty when no `api:` roots are given.
             pub const API: &[&'static ::fluessig_derive::InterfaceDescriptor] =
@@ -1074,28 +1224,34 @@ pub fn catalog(input: TokenStream) -> TokenStream {
             /// The catalog version as declared in `catalog!`.
             pub const VERSION: &str = #version;
 
+            /// The declared enums + scalars, grouped for the typed builders (Slice 8b).
+            fn decls() -> ::fluessig_derive::TypeDecls<'static> {
+                ::fluessig_derive::TypeDecls { enums: ENUMS, scalars: SCALARS }
+            }
+
             /// Build the in-memory `fluessig::Catalog` IR from the descriptors
-            /// (entities + edges + records → `valueStructs`).
+            /// (entities + edges + records → `valueStructs`; enums + scalars → the
+            /// `enums` / `scalars` arrays, Slice 8b).
             pub fn catalog() -> ::fluessig_derive::fluessig::Catalog {
-                ::fluessig_derive::build_catalog_full(NAME, VERSION, ENTITIES, EDGES, RECORDS)
+                ::fluessig_derive::build_catalog_typed(NAME, VERSION, ENTITIES, EDGES, RECORDS, decls())
             }
 
             /// Render the `catalog.json` text the existing Rust loader consumes.
             pub fn to_json() -> ::std::string::String {
-                ::fluessig_derive::to_catalog_json_full(NAME, VERSION, ENTITIES, EDGES, RECORDS)
+                ::fluessig_derive::to_catalog_json_typed(NAME, VERSION, ENTITIES, EDGES, RECORDS, decls())
             }
 
             /// Build the in-memory `api.json` op-layer IR from the `api:` roots,
             /// with the `models` materialised from the entities/records the ops
             /// reference (Slice 8a Gap 2).
             pub fn api() -> ::fluessig_derive::fluessig::api::ApiDoc {
-                ::fluessig_derive::build_api(NAME, VERSION, ENTITIES, EDGES, RECORDS, API)
+                ::fluessig_derive::build_api_typed(NAME, VERSION, ENTITIES, EDGES, RECORDS, API, decls())
             }
 
             /// Render the `api.json` text the loader + bindgen consume (Slice 5 +
             /// the Slice 8a Gap 2 `models` layer).
             pub fn api_to_json() -> ::std::string::String {
-                ::fluessig_derive::to_api_json(NAME, VERSION, ENTITIES, EDGES, RECORDS, API)
+                ::fluessig_derive::to_api_json_typed(NAME, VERSION, ENTITIES, EDGES, RECORDS, API, decls())
             }
         }
     }
@@ -1103,6 +1259,10 @@ pub fn catalog(input: TokenStream) -> TokenStream {
 }
 
 // ─────────────────────────── #[fluessig::export] ───────────────────────────
+
+/// The op-surface capture lives in [`export`]; only the attribute entry point
+/// sits at the crate root.
+mod export;
 
 /// Capture a `#[fluessig::export] impl` block as an op interface (Slice 5,
 /// `derive-front-end.md` §2.7 — "the impl that actually runs IS the interface").
@@ -1132,243 +1292,14 @@ pub fn catalog(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn export(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemImpl);
-    match expand_export(item) {
+    match export::expand_export(item) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
-    let self_ty = &item.self_ty;
-    let iface_ident = self_ty_ident(self_ty)?;
-    let iface_name = iface_ident.to_string();
-    let iface_span = span_tokens(iface_ident.span());
-    let iface_doc = option_str(doc_string(&item.attrs).as_deref());
-
-    // Build the op descriptors from the ORIGINAL methods (op-kind tags + docs
-    // intact), then re-emit the impl with the `#[fluessig(…)]` tags stripped so
-    // the methods still compile.
-    let mut ops = Vec::new();
-    let mut cleaned = item.clone();
-    for it in &mut cleaned.items {
-        let ImplItem::Fn(f) = it else { continue };
-        ops.push(op_descriptor_tokens(f)?);
-        f.attrs.retain(|a| !a.path().is_ident("fluessig"));
-    }
-
-    Ok(quote! {
-        #cleaned
-
-        impl ::fluessig_derive::ApiExport for #self_ty {
-            const DESCRIPTOR: &'static ::fluessig_derive::InterfaceDescriptor =
-                &::fluessig_derive::InterfaceDescriptor {
-                    name: #iface_name,
-                    doc: #iface_doc,
-                    ops: &[ #( #ops ),* ],
-                    span: #iface_span,
-                };
-        }
-    })
-}
-
-/// The `OpDescriptor { … }` tokens for one method: its snake_case name, doc, op
-/// kind, params (receiver excluded), and return type.
-fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenStream> {
-    let name = f.sig.ident.to_string();
-    let doc = option_str(doc_string(&f.attrs).as_deref());
-    let (kind_tokens, kind) = method_kind(&f.attrs)?;
-    let params = param_descriptors(&f.sig)?;
-    let returns = return_descriptor(kind, &f.sig)?;
-    let span = span_tokens(f.sig.ident.span());
-    Ok(quote! {
-        ::fluessig_derive::OpDescriptor {
-            name: #name,
-            doc: #doc,
-            kind: #kind_tokens,
-            params: &[ #( #params ),* ],
-            returns: #returns,
-            span: #span,
-        }
-    })
-}
-
-/// The op kind of a method: the first `#[fluessig(ctor|stream|manual)]` tag, else
-/// plain unary. Returns the `OpKind` tokens and the parsed kind (the return
-/// lowering needs the kind — a `ctor` is `void`, a `stream` unwraps its `Item`).
-fn method_kind(attrs: &[Attribute]) -> syn::Result<(proc_macro2::TokenStream, OpKindChoice)> {
-    for a in attrs {
-        if a.path().is_ident("fluessig") {
-            let id: Ident = a.parse_args()?;
-            let choice = match id.to_string().as_str() {
-                "ctor" => OpKindChoice::Ctor,
-                "stream" => OpKindChoice::Stream,
-                "manual" => OpKindChoice::Manual,
-                other => {
-                    return Err(syn::Error::new_spanned(
-                        &id,
-                        format!(
-                            "unknown op kind `{other}` — an exported method is tagged \
-                             #[fluessig(ctor)], #[fluessig(stream)], #[fluessig(manual)], \
-                             or left untagged (a plain unary op)"
-                        ),
-                    ))
-                }
-            };
-            return Ok((choice.tokens(), choice));
-        }
-    }
-    Ok((OpKindChoice::Unary.tokens(), OpKindChoice::Unary))
-}
-
-/// The parsed op kind — a macro-local mirror of `fluessig_derive::OpKind`, so the
-/// return lowering can branch on it while the emitted tokens name the real enum.
-#[derive(Clone, Copy)]
-enum OpKindChoice {
-    Ctor,
-    Unary,
-    Stream,
-    Manual,
-}
-
-impl OpKindChoice {
-    fn tokens(self) -> proc_macro2::TokenStream {
-        let v = match self {
-            OpKindChoice::Ctor => quote!(Ctor),
-            OpKindChoice::Unary => quote!(Unary),
-            OpKindChoice::Stream => quote!(Stream),
-            OpKindChoice::Manual => quote!(Manual),
-        };
-        quote! { ::fluessig_derive::OpKind::#v }
-    }
-}
-
-/// The `ParamDescriptor { … }` tokens for each typed param (the receiver is
-/// skipped). An `Option<T>` param lowers to `optional: true` carrying the
-/// UNWRAPPED `T` (params use `optional`; returns use `nullable`).
-fn param_descriptors(sig: &syn::Signature) -> syn::Result<Vec<proc_macro2::TokenStream>> {
-    let mut out = Vec::new();
-    for arg in &sig.inputs {
-        let FnArg::Typed(pt) = arg else { continue };
-        let Pat::Ident(pi) = &*pt.pat else {
-            return Err(syn::Error::new_spanned(
-                &pt.pat,
-                "an exported op param must be a plain name, e.g. `repo_path: &str`",
-            ));
-        };
-        let name = pi.ident.to_string();
-        let (ty, optional) = match option_inner(&pt.ty) {
-            Some(inner) => (base_api_type(inner)?, true),
-            None => (base_api_type(&pt.ty)?, false),
-        };
-        let span = span_tokens(pi.ident.span());
-        out.push(quote! {
-            ::fluessig_derive::ParamDescriptor { name: #name, ty: #ty, optional: #optional, span: #span }
-        });
-    }
-    Ok(out)
-}
-
-/// The `returns:` `ApiTypeDesc` tokens for a method, by op kind: a `ctor` is
-/// always `void`; a `stream` carries its `impl Iterator<Item = T>` item (with any
-/// `Result<T>` unwrapped); a unary/manual return is the type itself
-/// (`Result<T>` transparent, `()` ⇒ `void`, `Option<T>` ⇒ `nullable T`).
-fn return_descriptor(
-    kind: OpKindChoice,
-    sig: &syn::Signature,
-) -> syn::Result<proc_macro2::TokenStream> {
-    let void = quote! { ::fluessig_derive::ApiTypeDesc::Scalar("void") };
-    match kind {
-        OpKindChoice::Ctor => Ok(void),
-        OpKindChoice::Stream => {
-            let ty = return_ty(sig)?;
-            let item = iterator_item(unwrap_result(ty))?;
-            base_api_type(unwrap_result(item))
-        }
-        OpKindChoice::Unary | OpKindChoice::Manual => match &sig.output {
-            ReturnType::Default => Ok(void),
-            ReturnType::Type(_, ty) => {
-                let ty = unwrap_result(ty);
-                if is_unit(ty) {
-                    Ok(void)
-                } else if let Some(inner) = option_inner(ty) {
-                    let inner = base_api_type(inner)?;
-                    Ok(quote! { ::fluessig_derive::ApiTypeDesc::Nullable(&#inner) })
-                } else {
-                    base_api_type(ty)
-                }
-            }
-        },
-    }
-}
-
-/// The declared return type of a method that must have one (`stream` ops) — an
-/// error at the arrow otherwise.
-fn return_ty(sig: &syn::Signature) -> syn::Result<&Type> {
-    match &sig.output {
-        ReturnType::Type(_, ty) => Ok(ty),
-        ReturnType::Default => Err(syn::Error::new_spanned(
-            &sig.ident,
-            "a #[fluessig(stream)] op must return `impl Iterator<Item = T>`",
-        )),
-    }
-}
-
-/// Map a Rust type to the op-surface `ApiTypeDesc` VALUE tokens: references are
-/// stripped; `String`/`&str` ⇒ `string`; `Vec<u8>` ⇒ `bytes` and `Vec<T>` ⇒ a
-/// list; primitive scalars map to their op-surface names; any other single-name
-/// path is a model/entity reference (`{ model: Name }`).
-fn base_api_type(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
-    let ty = deref(ty);
-    if let Some(elem) = vec_inner(ty) {
-        if is_named(elem, "u8") {
-            return Ok(quote! { ::fluessig_derive::ApiTypeDesc::Scalar("bytes") });
-        }
-        let inner = base_api_type(elem)?;
-        return Ok(quote! { ::fluessig_derive::ApiTypeDesc::List(&#inner) });
-    }
-    let Type::Path(tp) = ty else {
-        return Err(unsupported_op_type(ty));
-    };
-    if tp.qself.is_some() || tp.path.segments.len() != 1 {
-        return Err(unsupported_op_type(ty));
-    }
-    let seg = &tp.path.segments[0];
-    if !matches!(seg.arguments, PathArguments::None) {
-        return Err(unsupported_op_type(ty));
-    }
-    let name = seg.ident.to_string();
-    if let Some(scalar) = api_scalar_name(&name) {
-        return Ok(quote! { ::fluessig_derive::ApiTypeDesc::Scalar(#scalar) });
-    }
-    // Any other bare type name is a model/entity reference. (Distinguishing a
-    // catalog enum — which lowers to `{ enum }` — from a model can't be done from
-    // the token alone; that would need a catalog cross-check at lowering. Op
-    // signatures here reference entities/DTOs, so `{ model }` is the right shape.)
-    Ok(quote! { ::fluessig_derive::ApiTypeDesc::Model(#name) })
-}
-
-/// A primitive Rust scalar → its op-surface scalar name, else `None` (⇒ a model
-/// reference). `String`/`str` both map to `string`.
-fn api_scalar_name(ident: &str) -> Option<&'static str> {
-    Some(match ident {
-        "String" | "str" => "string",
-        "bool" => "boolean",
-        "i8" => "int8",
-        "i16" => "int16",
-        "i32" => "int32",
-        "i64" => "int64",
-        "u8" => "uint8",
-        "u16" => "uint16",
-        "u32" => "uint32",
-        "u64" => "uint64",
-        "f32" => "float32",
-        "f64" => "float64",
-        _ => return None,
-    })
-}
-
 /// `&T` / `&mut T` → `T` (recursively) — an op param spelled `&str` is a `string`.
-fn deref(ty: &Type) -> &Type {
+pub(crate) fn deref(ty: &Type) -> &Type {
     match ty {
         Type::Reference(r) => deref(&r.elem),
         other => other,
@@ -1376,106 +1307,15 @@ fn deref(ty: &Type) -> &Type {
 }
 
 /// `Vec<T>` → `Some(T)`.
-fn vec_inner(ty: &Type) -> Option<&Type> {
+pub(crate) fn vec_inner(ty: &Type) -> Option<&Type> {
     single_type_arg(ty, "Vec")
 }
 
-/// `Result<T, …>` / `fluessig::Result<T>` → `T` (the op surface has no error
-/// channel, so the `Result` wrapper is transparent); any other type is returned
-/// unchanged.
-fn unwrap_result(ty: &Type) -> &Type {
-    let Type::Path(tp) = ty else { return ty };
-    let Some(seg) = tp.path.segments.last() else {
-        return ty;
-    };
-    if seg.ident != "Result" {
-        return ty;
-    }
-    let PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return ty;
-    };
-    args.args
-        .iter()
-        .find_map(|a| match a {
-            GenericArgument::Type(t) => Some(t),
-            _ => None,
-        })
-        .unwrap_or(ty)
-}
-
-/// `impl Iterator<Item = T>` → `T`. A `#[fluessig(stream)]` op must return an
-/// `impl Iterator` (the shape bindgen maps to a JS async iterator / Python
-/// generator / Ruby Enumerator).
-fn iterator_item(ty: &Type) -> syn::Result<&Type> {
-    let Type::ImplTrait(it) = ty else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "a #[fluessig(stream)] op must return `impl Iterator<Item = T>`",
-        ));
-    };
-    for bound in &it.bounds {
-        let syn::TypeParamBound::Trait(tb) = bound else {
-            continue;
-        };
-        let Some(seg) = tb.path.segments.last() else {
-            continue;
-        };
-        if seg.ident != "Iterator" {
-            continue;
-        }
-        let PathArguments::AngleBracketed(args) = &seg.arguments else {
-            continue;
-        };
-        for a in &args.args {
-            if let GenericArgument::AssocType(assoc) = a {
-                if assoc.ident == "Item" {
-                    return Ok(&assoc.ty);
-                }
-            }
-        }
-    }
-    Err(syn::Error::new_spanned(
-        ty,
-        "a #[fluessig(stream)] op must return `impl Iterator<Item = T>` (with an `Item =` binding)",
-    ))
-}
-
-/// The unit type `()` — a unary op returning it is `void`.
-fn is_unit(ty: &Type) -> bool {
-    matches!(ty, Type::Tuple(t) if t.elems.is_empty())
-}
-
 /// `ty` is the single-segment path `name` (no generics) — e.g. `is_named(t, "u8")`.
-fn is_named(ty: &Type, name: &str) -> bool {
+pub(crate) fn is_named(ty: &Type, name: &str) -> bool {
     let Type::Path(tp) = ty else { return false };
     tp.qself.is_none()
         && tp.path.segments.len() == 1
         && tp.path.segments[0].ident == name
         && matches!(tp.path.segments[0].arguments, PathArguments::None)
-}
-
-/// The `Self` type's name ident (`impl Entl` → `Entl`) — the interface name.
-fn self_ty_ident(ty: &Type) -> syn::Result<Ident> {
-    match ty {
-        Type::Path(tp) => tp
-            .path
-            .segments
-            .last()
-            .map(|s| s.ident.clone())
-            .ok_or_else(|| syn::Error::new_spanned(ty, "expected a named type")),
-        other => Err(syn::Error::new_spanned(
-            other,
-            "#[fluessig::export] applies to `impl <Name>` blocks",
-        )),
-    }
-}
-
-fn unsupported_op_type(ty: &Type) -> syn::Error {
-    syn::Error::new_spanned(
-        ty,
-        "unsupported op-surface type — supported: scalar primitives (i8..i64, \
-         u8..u64, f32/f64, bool, String/&str), `Vec<u8>` (bytes), `Vec<T>` \
-         (list), `Option<T>`, a model/entity name, and (returns only) \
-         `impl Iterator<Item = T>` for a #[fluessig(stream)] op.",
-    )
 }

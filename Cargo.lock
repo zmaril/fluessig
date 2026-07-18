@@ -99,6 +99,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "entl-schema-derive"
+version = "0.1.0"
+dependencies = [
+ "fluessig",
+ "fluessig-derive",
+ "serde_json",
+]
+
+[[package]]
 name = "fluessig"
 version = "0.1.0"
 dependencies = [

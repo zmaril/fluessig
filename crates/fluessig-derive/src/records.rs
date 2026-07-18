@@ -32,7 +32,7 @@ use fluessig::ir::{
     camel, snake, Cardinality, Catalog, Entity as IrEntity, Field, Relation, Struct, TypeRef,
 };
 
-use crate::{ScalarKind, SourceSpan};
+use crate::{RefResolver, ScalarKind, SourceSpan};
 
 // ─────────────────────────── descriptors ───────────────────────────
 
@@ -81,12 +81,20 @@ pub enum RecordTypeDesc {
     /// op surface). Records reference other records (`SinkOptions` → `TableRename`),
     /// so this lowers to a value-struct reference (`entity: false`).
     Model(&'static str),
+    /// A bare **named** type the macro can't classify from the token alone (Slice
+    /// 8b): a declared enum (`FileStatus`, `SinkTarget`), a declared or stock
+    /// semantic scalar (`ArrowBatch`, `Json`), or a reference to another record.
+    /// Resolved at lowering against the catalog's declared enums / scalars, exactly
+    /// as an entity's `Named` field is.
+    Named(&'static str),
     /// A list of the inner type (`Vec<T>`).
     List(&'static RecordTypeDesc),
 }
 
-/// Lower a [`RecordTypeDesc`] to the catalog's [`fluessig::ir::TypeRef`].
-fn lower_record_type(t: &RecordTypeDesc) -> TypeRef {
+/// Lower a [`RecordTypeDesc`] to the catalog's [`fluessig::ir::TypeRef`], resolving
+/// a [`RecordTypeDesc::Named`] against the catalog's declared enums / scalars via
+/// `resolver` (Slice 8b).
+fn lower_record_type(t: &RecordTypeDesc, resolver: &RefResolver) -> TypeRef {
     match t {
         RecordTypeDesc::Scalar(kind) => {
             let (name, base) = kind.catalog();
@@ -101,15 +109,16 @@ fn lower_record_type(t: &RecordTypeDesc) -> TypeRef {
             name: name.to_string(),
             entity: false,
         },
+        RecordTypeDesc::Named(name) => resolver.resolve_named(name),
         RecordTypeDesc::List(inner) => TypeRef::List {
-            of: Box::new(lower_record_type(inner)),
+            of: Box::new(lower_record_type(inner, resolver)),
         },
     }
 }
 
 /// Lower one [`RecordDescriptor`] to a `fluessig::ir::Struct` — a catalog value
 /// struct. Records are flat, so no field carries a relation.
-pub(crate) fn lower_record(r: &RecordDescriptor) -> Struct {
+pub(crate) fn lower_record(r: &RecordDescriptor, resolver: &RefResolver) -> Struct {
     Struct {
         name: r.name.to_string(),
         doc: r.doc.map(str::to_string),
@@ -118,7 +127,7 @@ pub(crate) fn lower_record(r: &RecordDescriptor) -> Struct {
             .iter()
             .map(|f| Field {
                 name: f.name.to_string(),
-                ty: lower_record_type(&f.ty),
+                ty: lower_record_type(&f.ty, resolver),
                 nullable: f.nullable,
                 doc: f.doc.map(str::to_string),
                 key: false,

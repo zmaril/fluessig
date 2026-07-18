@@ -85,12 +85,20 @@ pub use fluessig;
 // The derive macros and their traits share names (`Entity`, `Edge`) — they live
 // in different namespaces (macro vs type), exactly like `serde::Serialize` — so
 // a single `use fluessig_derive::{Entity, Edge};` brings in both halves.
-pub use fluessig_derive_macros::{catalog, export, AbstractRoot, Edge, Entity, Record};
+pub use fluessig_derive_macros::{
+    catalog, export, AbstractRoot, Edge, Entity, Enum, Record, Scalar,
+};
 
 use fluessig::api::{ApiDoc, ApiInterface, ApiOp, ApiParam, ApiType, Shape};
 use fluessig::ir::{
     camel, Cardinality, Catalog, Entity as IrEntity, Field, RelKind, Relation, Scalar, Struct,
     TypeRef, Versions,
+};
+
+mod decls;
+pub use decls::{
+    DefaultLit, DerivedDesc, EnumDescriptor, EnumType, EnumVariantDescriptor, ScalarDescriptor,
+    ScalarType,
 };
 
 mod records;
@@ -288,6 +296,13 @@ pub struct FieldDescriptor {
     /// fact, not a silent dedup (Slice 3, `derive-front-end.md` §2.5). Empty for
     /// the common case where the reference's own spelling is authoritative.
     pub shares: &'static [&'static str],
+    /// `#[fluessig(default = …)]` — the DDL DEFAULT for this column (Slice 8b,
+    /// entl FINDINGS #4). `None` when the field has no default.
+    pub default: Option<DefaultLit>,
+    /// `#[fluessig(derived(exists|count, of = "rel", filter(k = v)))]` — a derived
+    /// field (Slice 8b, DESIGN §9.3 the v1 exists/count slice). `None` for a
+    /// plain stored column.
+    pub derived: Option<DerivedDesc>,
     /// The `.rs` source location of this field's declaration (Slice 6) — the
     /// field name's `file!()` + `line!()`. Feeds loader diagnostics only; never
     /// lowered into the catalog.
@@ -314,6 +329,12 @@ pub enum FieldKind {
     /// abstract root. The enum type name resolves to the family at lowering; any
     /// per-site `cols(tag = …, key = …)` override rides in the [`PolyRef`].
     PolyReference(PolyRef),
+    /// A field typed by a bare **named** type the macro can't classify from the
+    /// token alone (Slice 8b): a declared enum (`RefKind`), a declared or stock
+    /// semantic scalar (`Oid`, `Json`, `utcDateTime`, `bytes`), or a reference to
+    /// another value struct. Resolved at lowering against the catalog's declared
+    /// enums / scalars ([`RefResolver::resolve_named`]).
+    Named(&'static str),
 }
 
 /// A polymorphic reference site (Slice 4): the generated family key-enum named at
@@ -480,16 +501,59 @@ struct RefResolver {
     /// Family roots keyed by their generated key-enum name, so a
     /// [`FieldKind::PolyReference`] typed `<Root>Id` finds its family (Slice 4).
     by_id_enum: HashMap<&'static str, &'static EntityDescriptor>,
+    /// Declared enum names, so a [`FieldKind::Named`] typed by an enum resolves to
+    /// `TypeRef::Enum` (Slice 8b).
+    enum_names: std::collections::HashSet<&'static str>,
+    /// Declared semantic scalars → their `base`, so a `Named` typed by a scalar
+    /// resolves to `TypeRef::Scalar { name, base }` (Slice 8b).
+    scalar_bases: HashMap<&'static str, Option<&'static str>>,
 }
 
 impl RefResolver {
-    fn new(entities: &[&'static EntityDescriptor]) -> Self {
+    fn new(
+        entities: &[&'static EntityDescriptor],
+        enums: &[&'static EnumDescriptor],
+        scalars: &[&'static ScalarDescriptor],
+    ) -> Self {
         RefResolver {
             by_name: entities.iter().map(|e| (e.name, *e)).collect(),
             by_id_enum: entities
                 .iter()
                 .filter_map(|e| e.id_enum.map(|id| (id, *e)))
                 .collect(),
+            enum_names: enums.iter().map(|e| e.name).collect(),
+            scalar_bases: scalars.iter().map(|s| (s.name, s.base)).collect(),
+        }
+    }
+
+    /// Resolve a [`FieldKind::Named`] type name to a [`TypeRef`] (Slice 8b): a
+    /// declared enum → `Enum`; a declared semantic scalar → `Scalar { name, base }`
+    /// with the declared carrier; a **stock** scalar (`Json` → `string`,
+    /// `utcDateTime` / `bytes` — roots with no base) → `Scalar`; anything else → a
+    /// value-struct reference (`Ref { entity: false }`), so a record referencing
+    /// another record still closes. Mirrors what the TypeSpec front end records for
+    /// the equivalent named type.
+    fn resolve_named(&self, name: &str) -> TypeRef {
+        if self.enum_names.contains(name) {
+            return TypeRef::Enum {
+                name: name.to_string(),
+            };
+        }
+        if let Some(base) = self.scalar_bases.get(name) {
+            return TypeRef::Scalar {
+                name: name.to_string(),
+                base: base.map(str::to_string),
+            };
+        }
+        if let Some(base) = stock_scalar_base(name) {
+            return TypeRef::Scalar {
+                name: name.to_string(),
+                base: base.map(str::to_string),
+            };
+        }
+        TypeRef::Ref {
+            name: name.to_string(),
+            entity: false,
         }
     }
 
@@ -601,6 +665,20 @@ impl RefResolver {
     }
 }
 
+/// A **stock** (built-in) semantic scalar's carrier, for the names the TypeSpec
+/// front end treats as built-ins rather than declared scalars (Slice 8b): `Json`
+/// refines `string`; `utcDateTime` / `offsetDateTime` / `bytes` are roots. `None`
+/// ⇒ not a stock scalar (the resolver then tries a value-struct reference). The
+/// numeric / `string` / `boolean` builtins never reach here — they arrive as
+/// primitive [`ScalarKind`]s from the macro.
+fn stock_scalar_base(name: &str) -> Option<Option<&'static str>> {
+    match name {
+        "Json" => Some(Some("string")),
+        "utcDateTime" | "offsetDateTime" | "bytes" => Some(None),
+        _ => None,
+    }
+}
+
 /// Lower one scalar/reference descriptor to an [`fluessig::ir::Field`], resolving
 /// references against the sibling descriptors via `resolver`. Flatten fields are
 /// expanded by the caller and never reach here.
@@ -653,6 +731,7 @@ fn lower_field(f: &FieldDescriptor, resolver: &RefResolver) -> Field {
             };
             (ty, Some(rel))
         }
+        FieldKind::Named(name) => (resolver.resolve_named(name), None),
         FieldKind::Flatten(_) => unreachable!("flatten fields are expanded before lowering"),
     };
     Field {
@@ -662,9 +741,31 @@ fn lower_field(f: &FieldDescriptor, resolver: &RefResolver) -> Field {
         doc: f.doc.map(str::to_string),
         key: f.key,
         column: None,
-        default: None,
-        derived: None,
+        default: f.default.map(DefaultLit::to_value),
+        derived: f.derived.map(lower_derived),
         relation,
+    }
+}
+
+/// Lower a [`DerivedDesc`] to the catalog's [`fluessig::ir::Derived`] (Slice 8b):
+/// the aggregate + relation name carry over, and the `(field, value)` filter pairs
+/// become the `{field: value}` map the loader validates and `sql.rs` renders into
+/// the `<table>_derived` view.
+fn lower_derived(d: DerivedDesc) -> fluessig::ir::Derived {
+    let filter = if d.filter.is_empty() {
+        None
+    } else {
+        Some(
+            d.filter
+                .iter()
+                .map(|(k, v)| (k.to_string(), serde_json::Value::from(*v)))
+                .collect(),
+        )
+    };
+    fluessig::ir::Derived {
+        agg: d.agg.to_string(),
+        of: d.of.to_string(),
+        filter,
     }
 }
 
@@ -704,6 +805,11 @@ fn lower_entity(d: &'static EntityDescriptor, resolver: &RefResolver) -> IrEntit
 fn lower_edge(e: &'static EdgeDescriptor, resolver: &RefResolver) -> (Field, Option<Struct>) {
     let mut source_columns = Vec::new();
     let mut target_columns = Vec::new();
+    // Discriminator columns for a polymorphic edge side (Slice 8b): a poly SOURCE
+    // (`subject: GhSubjectId` on `gh_labeled`) carries `sourceTypeColumn`; a poly
+    // TARGET (`child: GitObjectId` on `tree_entries`) carries `typeColumn`.
+    let mut source_type_column = None;
+    let mut type_column = None;
     let mut prop_fields = Vec::new();
     for ef in e.fields {
         let f = &ef.field;
@@ -713,6 +819,16 @@ fn lower_edge(e: &'static EdgeDescriptor, resolver: &RefResolver) -> (Field, Opt
             }
             (EdgeRole::Target, FieldKind::Reference(t)) => {
                 target_columns.extend(resolver.fk_columns_shared(f.name, t, f.shares));
+            }
+            (EdgeRole::Source, FieldKind::PolyReference(pr)) => {
+                let (_to, tag, cols) = resolver.poly_reference(&pr);
+                source_columns = cols;
+                source_type_column = tag;
+            }
+            (EdgeRole::Target, FieldKind::PolyReference(pr)) => {
+                let (_to, tag, cols) = resolver.poly_reference(&pr);
+                target_columns = cols;
+                type_column = tag;
             }
             _ => prop_fields.push(lower_field(f, resolver)),
         }
@@ -740,9 +856,9 @@ fn lower_edge(e: &'static EdgeDescriptor, resolver: &RefResolver) -> (Field, Opt
         properties: properties.clone(),
         table: Some(table),
         fk_columns: Some(target_columns),
-        type_column: None,
+        type_column,
         source_columns: Some(source_columns),
-        source_type_column: None,
+        source_type_column,
     };
     let field = Field {
         name: expose,
@@ -776,6 +892,18 @@ pub fn build_catalog(name: &str, version: &str, entities: &[&'static EntityDescr
     build_catalog_with_edges(name, version, entities, &[])
 }
 
+/// The registry of declared enums + scalars a catalog carries alongside its
+/// entities (Slice 8b): the enums / scalars a `Named` field type resolves against,
+/// and the arrays lowered into the catalog's `enums` / `scalars`. Grouped so the
+/// full-form builders don't grow two more positional slices.
+#[derive(Clone, Copy, Default)]
+pub struct TypeDecls<'a> {
+    /// The `#[derive(Enum)]` descriptors — lowered to the catalog's `enums`.
+    pub enums: &'a [&'static EnumDescriptor],
+    /// The `#[derive(Scalar)]` descriptors — lowered to the catalog's `scalars`.
+    pub scalars: &'a [&'static ScalarDescriptor],
+}
+
 /// Collect entity + edge descriptors into the in-memory [`fluessig::ir::Catalog`]
 /// (Slice 3). `name` becomes the catalog `source`; `version` stamps the emitter
 /// field (format 1 has no dedicated version slot, so it rides the stamp rather
@@ -805,7 +933,30 @@ pub fn build_catalog_full(
     edges: &[&'static EdgeDescriptor],
     records: &[&'static RecordDescriptor],
 ) -> Catalog {
-    let resolver = RefResolver::new(entities);
+    build_catalog_typed(
+        name,
+        version,
+        entities,
+        edges,
+        records,
+        TypeDecls::default(),
+    )
+}
+
+/// Collect entities + edges + records + **declared enums/scalars** into the
+/// catalog (Slice 8b). The enums lower to `enums`, the scalars to `scalars`, and
+/// both feed the [`RefResolver`] so a `Named` field type resolves to the right
+/// `TypeRef`. The plain [`build_catalog_full`] delegates here with empty decls, so
+/// the Slice 1–8a callers are unchanged.
+pub fn build_catalog_typed(
+    name: &str,
+    version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+    records: &[&'static RecordDescriptor],
+    decls: TypeDecls,
+) -> Catalog {
+    let resolver = RefResolver::new(entities, decls.enums, decls.scalars);
     let mut ir_entities: Vec<IrEntity> = entities
         .iter()
         .map(|d| lower_entity(d, &resolver))
@@ -827,12 +978,40 @@ pub fn build_catalog_full(
             compiler: None,
         },
         source: Some(name.to_string()),
-        scalars: Vec::<Scalar>::new(),
+        scalars: decls
+            .scalars
+            .iter()
+            .map(|s| Scalar {
+                name: s.name.to_string(),
+                base: s.base.map(str::to_string),
+            })
+            .collect(),
         unions: Vec::new(),
-        enums: Vec::new(),
+        enums: decls.enums.iter().map(|e| lower_enum(e)).collect(),
         entities: ir_entities,
         relation_properties,
-        value_structs: records.iter().map(|r| records::lower_record(r)).collect(),
+        value_structs: records
+            .iter()
+            .map(|r| records::lower_record(r, &resolver))
+            .collect(),
+    }
+}
+
+/// Lower an [`EnumDescriptor`] to the catalog's [`fluessig::ir::EnumDef`] (Slice
+/// 8b): each variant's catalog name + optional stored wire value (`added: "A"` →
+/// `value: Some("A")`).
+fn lower_enum(e: &EnumDescriptor) -> fluessig::ir::EnumDef {
+    fluessig::ir::EnumDef {
+        name: e.name.to_string(),
+        variants: e
+            .variants
+            .iter()
+            .map(|v| fluessig::ir::Variant {
+                name: v.name.to_string(),
+                value: v.value.map(serde_json::Value::from),
+                bindings: Default::default(),
+            })
+            .collect(),
     }
 }
 
@@ -865,7 +1044,27 @@ pub fn to_catalog_json_full(
     edges: &[&'static EdgeDescriptor],
     records: &[&'static RecordDescriptor],
 ) -> String {
-    let catalog = build_catalog_full(name, version, entities, edges, records);
+    to_catalog_json_typed(
+        name,
+        version,
+        entities,
+        edges,
+        records,
+        TypeDecls::default(),
+    )
+}
+
+/// Render `catalog.json` for a catalog with edges + records + declared
+/// enums/scalars (Slice 8b).
+pub fn to_catalog_json_typed(
+    name: &str,
+    version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+    records: &[&'static RecordDescriptor],
+    decls: TypeDecls,
+) -> String {
+    let catalog = build_catalog_typed(name, version, entities, edges, records, decls);
     let mut json = serde_json::to_string_pretty(&catalog).expect("catalog serializes");
     json.push('\n');
     json
@@ -1048,7 +1247,32 @@ pub fn build_api(
     records: &[&'static RecordDescriptor],
     interfaces: &[&'static InterfaceDescriptor],
 ) -> ApiDoc {
-    let catalog = build_catalog_full(name, version, entities, edges, records);
+    build_api_typed(
+        name,
+        version,
+        entities,
+        edges,
+        records,
+        interfaces,
+        TypeDecls::default(),
+    )
+}
+
+/// Collect op-interface descriptors into the [`fluessig::api::ApiDoc`], with the
+/// declared enums/scalars threaded through so an op/model field typed by an enum
+/// lowers to `{ enum }` and one typed by a semantic scalar to its scalar name
+/// (Slice 8b). The plain [`build_api`] delegates here with empty decls.
+#[allow(clippy::too_many_arguments)]
+pub fn build_api_typed(
+    name: &str,
+    version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+    records: &[&'static RecordDescriptor],
+    interfaces: &[&'static InterfaceDescriptor],
+    decls: TypeDecls,
+) -> ApiDoc {
+    let catalog = build_catalog_typed(name, version, entities, edges, records, decls);
     let api_interfaces: Vec<ApiInterface> = interfaces
         .iter()
         .map(|i| ApiInterface {
@@ -1081,7 +1305,29 @@ pub fn to_api_json(
     records: &[&'static RecordDescriptor],
     interfaces: &[&'static InterfaceDescriptor],
 ) -> String {
-    let api = build_api(name, version, entities, edges, records, interfaces);
+    to_api_json_typed(
+        name,
+        version,
+        entities,
+        edges,
+        records,
+        interfaces,
+        TypeDecls::default(),
+    )
+}
+
+/// Render `api.json` for a catalog with declared enums/scalars (Slice 8b).
+#[allow(clippy::too_many_arguments)]
+pub fn to_api_json_typed(
+    name: &str,
+    version: &str,
+    entities: &[&'static EntityDescriptor],
+    edges: &[&'static EdgeDescriptor],
+    records: &[&'static RecordDescriptor],
+    interfaces: &[&'static InterfaceDescriptor],
+    decls: TypeDecls,
+) -> String {
+    let api = build_api_typed(name, version, entities, edges, records, interfaces, decls);
     let mut json = serde_json::to_string_pretty(&api).expect("api serializes");
     json.push('\n');
     json

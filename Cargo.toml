@@ -5,6 +5,7 @@ members = [
     "crates/fluessig-runtime",
     "crates/cargo-fluessig",
     "crates/derive-demo",
+    "crates/entl-schema-derive",
 ]
 
 [package]

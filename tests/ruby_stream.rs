@@ -81,10 +81,48 @@ fn ruby_stream_throw_mode_projects_each_enumerator() {
         rb.contains("impl Drop for Events {") && rb.contains("self.stream.close();"),
         "Drop backstop closes the core stream:\n{rb}"
     );
-    // block-under-GVL route: the field stays Box (no cross-thread move)
+    // GVL-release route: the field still stays Box (the without_gvl closure runs
+    // on the SAME OS thread, so no cross-thread move / no Arc/Send needed)
     assert!(
         rb.contains("stream: Box<dyn PollStream<Event>>,"),
-        "the stream field stays Box (block-under-GVL, no cross-thread move):\n{rb}"
+        "the stream field stays Box (same-thread without_gvl, no cross-thread move):\n{rb}"
+    );
+    // ── GVL release: the blocking poll runs with the GVL released ──
+    // the `without_gvl` helper is emitted once in the prelude, with its FFI uses
+    assert!(
+        rb.contains("use std::ffi::c_void;") && rb.contains("use std::ptr;"),
+        "the without_gvl FFI uses are emitted in the prelude:\n{rb}"
+    );
+    assert!(
+        rb.contains("fn without_gvl<F, R>(func: F) -> R"),
+        "the without_gvl helper is emitted:\n{rb}"
+    );
+    // it releases the GVL via rb-sys's top-level rb_thread_call_without_gvl
+    assert!(
+        rb.contains("rb_sys::rb_thread_call_without_gvl("),
+        "without_gvl calls rb_sys::rb_thread_call_without_gvl:\n{rb}"
+    );
+    // no Send bound on the closure (same OS thread)
+    assert!(
+        rb.contains("F: FnOnce() -> R, // no Send bound: runs on the same OS thread"),
+        "the closure carries no Send bound:\n{rb}"
+    );
+    // the `each` poll site is wrapped: the poll runs inside without_gvl, the
+    // yield_value stays OUTSIDE (after without_gvl returns)
+    assert!(
+        rb.contains("let poll = without_gvl(|| rb_self.stream.poll(Duration::from_millis(500)));"),
+        "the each poll is wrapped in without_gvl:\n{rb}"
+    );
+    // the `.next` poll site is wrapped too
+    assert!(
+        rb.contains("let poll = without_gvl(|| self.stream.poll(Duration::from_millis(500)));"),
+        "the .next poll is wrapped in without_gvl:\n{rb}"
+    );
+    // the Ruby-touching op stays outside the released region: yield_value is not
+    // inside the without_gvl closure (it appears after `match poll`)
+    assert!(
+        rb.contains("match poll {") && rb.contains("let _: magnus::Value = ruby.yield_value(v)?;"),
+        "yield_value runs after without_gvl returns, on the matched Poll:\n{rb}"
     );
     // throw-mode emits NO ErrorEvent wrap class
     assert!(
@@ -204,6 +242,20 @@ fn ruby_stream_event_mode_yields_error_event() {
         rb.contains("s.define_method(\"each\", method!(Ticks::each, 0))?;")
             && rb.contains("return Ok(rb_self.enumeratorize(\"each\", ()).as_value());"),
         "event-mode still projects the each/Enumerator surface:\n{rb}"
+    );
+    // ── GVL release, event-mode: the each + .next polls are both wrapped, and the
+    // error-AS-EVENT yield stays OUTSIDE the released region ──
+    assert!(
+        rb.contains("fn without_gvl<F, R>(func: F) -> R")
+            && rb.contains("rb_sys::rb_thread_call_without_gvl("),
+        "event-mode emits the without_gvl helper:\n{rb}"
+    );
+    assert!(
+        rb.contains("let poll = without_gvl(|| rb_self.stream.poll(Duration::from_millis(500)));")
+            && rb.contains(
+                "let poll = without_gvl(|| self.stream.poll(Duration::from_millis(500)));"
+            ),
+        "event-mode wraps both the each and .next poll sites:\n{rb}"
     );
     // Drop backstop present in event-mode too
     assert!(

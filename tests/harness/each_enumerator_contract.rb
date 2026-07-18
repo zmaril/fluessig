@@ -17,6 +17,13 @@
 #
 # Run: `ruby tests/harness/each_enumerator_contract.rb`
 # Plain `ruby`, no gems, no build step. Prints `PASS:` per case, exits 1 on fail.
+#
+# NOTE: this mock asserts the observable each/Enumerator + dual-error contract
+# only; GVL-release behaviour is NOT observable in a pure-Ruby mock and is
+# verified separately (the generated bindings release the GVL around the blocking
+# poll via `rb_sys::rb_thread_call_without_gvl` — proven against real ruby 3.3.6,
+# a background thread advanced during a blocking `each`; see
+# notes/async-iterable-streams-ruby.md).
 
 # ── Poll kinds — the four arms of the core `Poll<T>` enum ──────────────────────
 ITEM = :item

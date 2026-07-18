@@ -1,0 +1,132 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "api_demo",
+  "models": [],
+  "unions": [],
+  "interfaces": [
+    {
+      "name": "Db",
+      "doc": "An open demo database. Heavy ops are unary; the change feed is a stream.",
+      "ops": [
+        {
+          "name": "open",
+          "doc": "Open (or create) the store at `path` and apply the schema.",
+          "shape": "ctor",
+          "params": [
+            {
+              "name": "path",
+              "type": "string"
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "repo",
+          "doc": "Look up one repo by id — `None` when absent.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "id",
+              "type": "string"
+            }
+          ],
+          "returns": {
+            "nullable": {
+              "model": "Repo"
+            }
+          }
+        },
+        {
+          "name": "pullRequestCount",
+          "doc": "Count the pull requests in a repo.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoId",
+              "type": "string"
+            }
+          ],
+          "returns": "int64"
+        },
+        {
+          "name": "repos",
+          "doc": "The repo ids known to the store.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "limit",
+              "type": "int32",
+              "optional": true
+            }
+          ],
+          "returns": {
+            "list": "string"
+          }
+        },
+        {
+          "name": "pullRequests",
+          "doc": "Stream every pull request in a repo (the stream plane). bindgen maps the\n`Iterator` to a JS async iterator / Python generator / Ruby Enumerator.",
+          "shape": "stream",
+          "params": [
+            {
+              "name": "repoId",
+              "type": "string"
+            }
+          ],
+          "returns": {
+            "model": "PullRequest"
+          }
+        },
+        {
+          "name": "watch",
+          "doc": "Poll-loop sync with a host callback — hand-written per binding, exactly as\nbefore; recorded in `api.json` but not auto-bound.",
+          "shape": "manual",
+          "params": [
+            {
+              "name": "intervalSecs",
+              "type": "int32"
+            }
+          ],
+          "returns": "void"
+        }
+      ]
+    },
+    {
+      "name": "GitHelpers",
+      "doc": "Stateless git helpers (no database handle). All unary.",
+      "ops": [
+        {
+          "name": "branchExists",
+          "doc": "Whether `name` is a branch in the repo at `repo_path`.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            },
+            {
+              "name": "name",
+              "type": "string"
+            }
+          ],
+          "returns": "boolean"
+        },
+        {
+          "name": "currentBranch",
+          "doc": "The current branch name at `repo_path`.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "repoPath",
+              "type": "string"
+            }
+          ],
+          "returns": "string"
+        }
+      ]
+    }
+  ]
+}

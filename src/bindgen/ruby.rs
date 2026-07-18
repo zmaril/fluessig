@@ -511,6 +511,12 @@ pub fn ruby_binding_with_options(
         .map(|i| i.name.clone())
         .unwrap_or_else(|| "Root".to_string());
     let gvl_panic = format!("{} called outside the Ruby GVL", module.to_lowercase());
+    // Does any op project a `stream` class? Only then do the blocking `poll`
+    // sites (and so the `without_gvl` GVL-release helper) exist.
+    let has_stream = api
+        .interfaces
+        .iter()
+        .any(|i| i.ops.iter().any(|o| o.shape == Shape::Stream));
     let mut t: rust::Tokens = quote! {
         use std::sync::Arc;
         use std::time::Duration;
@@ -528,6 +534,47 @@ pub fn ruby_binding_with_options(
             $['\n']
             $("/// Bulk bytes cross into Ruby as a binary String (via magnus's `bytes` feature).")
             pub type Bytes = bytes::Bytes;
+        };
+    }
+    if has_stream {
+        // The blocking `PollStream::poll` at every stream site runs with the Ruby
+        // GVL released via `rb_thread_call_without_gvl` — so an idling/blocking
+        // stream does not stall the whole Ruby VM (verified against ruby 3.3.6: a
+        // background thread advanced during a blocking `each`). `rb-sys` exposes
+        // this at the top level (magnus does NOT re-export it), so the CONSUMER
+        // crate must depend on `rb-sys` (~0.9) directly, alongside magnus. See
+        // notes/async-iterable-streams-ruby.md.
+        quote_in! { t =>
+            $['\n']
+            use std::ffi::c_void;
+            use std::ptr;
+            $['\n']
+            $("/// Run `func` with the Ruby GVL released; returns its result once the GVL is")
+            $("/// re-acquired. `func` MUST NOT touch any Ruby object (no Value/alloc) — extract")
+            $("/// the poll result here, act on it (yield/raise) only after this returns.")
+            fn without_gvl<F, R>(func: F) -> R
+            where
+                F: FnOnce() -> R, $("// no Send bound: runs on the same OS thread")
+            {
+                unsafe extern "C" fn trampoline<F, R>(data: *mut c_void) -> *mut c_void
+                where
+                    F: FnOnce() -> R,
+                {
+                    let slot = &mut *(data as *mut Option<F>);
+                    let f = slot.take().expect("gvl closure already consumed");
+                    Box::into_raw(Box::new(f())) as *mut c_void
+                }
+                let mut slot: Option<F> = Some(func);
+                let result_ptr = unsafe {
+                    rb_sys::rb_thread_call_without_gvl(
+                        Some(trampoline::<F, R>),
+                        &mut slot as *mut Option<F> as *mut c_void,
+                        None,
+                        ptr::null_mut(),
+                    )
+                };
+                *unsafe { Box::from_raw(result_ptr as *mut R) }
+            }
         };
     }
     t.line();
@@ -885,7 +932,10 @@ pub fn ruby_binding_with_options(
                     $("// surface, so a mid-stream core failure surfaces as `rberr(e)`.")
                     fn next(&self) -> Result<Option<$(&item)>, Error> {
                         loop {
-                            match self.stream.poll(Duration::from_millis(500)) {
+                            $("// GVL released around the blocking poll; the `Poll<item>` is a")
+                            $("// pure-Rust value, so no Ruby object is touched while released.")
+                            let poll = without_gvl(|| self.stream.poll(Duration::from_millis(500)));
+                            match poll {
                                 Poll::Item(v) => return Ok(Some(v)),
                                 Poll::Idle => continue,
                                 Poll::Closed => return Ok(None), $("// nil ends iteration")
@@ -898,15 +948,22 @@ pub fn ruby_binding_with_options(
                     $("// `Enumerator` over `each`, so `.lazy`/`.map`/`.next` compose (Ruby >= 3.1")
                     $("// for an Enumerator built from a yielding method). `Obj<Self>` is the")
                     $("// receiver so `enumeratorize` has the Ruby self value and the field is")
-                    $("// still reachable via Deref. The blocking `poll` runs UNDER the GVL —")
-                    $("// see notes/async-iterable-streams-ruby.md for the GVL-release follow-up.")
+                    $("// still reachable via Deref. The blocking `poll` runs with the GVL")
+                    $("// RELEASED (via `without_gvl` → `rb_thread_call_without_gvl`), so an")
+                    $("// idling/blocking stream does not stall other Ruby threads; the Ruby")
+                    $("// ops (yield/raise) stay OUTSIDE the released region. See")
+                    $("// notes/async-iterable-streams-ruby.md.")
                     fn each(ruby: &Ruby, rb_self: magnus::typed_data::Obj<Self>) -> Result<magnus::Value, Error> {
                         $("// No block => hand back an Enumerator so `.lazy`/`.map`/`.next` work.")
                         if !ruby.block_given() {
                             return Ok(rb_self.enumeratorize("each", ()).as_value());
                         }
                         loop {
-                            match rb_self.stream.poll(Duration::from_millis(500)) {
+                            $("// GVL released around the blocking poll; the `Poll<item>` is a")
+                            $("// pure-Rust value, so no Ruby object is touched while released.")
+                            $("// yield_value / the ErrorEvent yield / the raise all run AFTER.")
+                            let poll = without_gvl(|| rb_self.stream.poll(Duration::from_millis(500)));
+                            match poll {
                                 Poll::Item(v) => {
                                     let _: magnus::Value = ruby.yield_value(v)?;
                                 }

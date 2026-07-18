@@ -39,8 +39,9 @@ Each `stream` op's generated `#[magnus::wrap]` class carries **both** surfaces:
   `ruby_ty(api, opts, &op.returns)`, NOT the shared `ty()`, so a union-returning
   stream yields the structured `{Union}Union` carrier correctly — it tracks the
   structured-union state the rest of the Ruby backend uses.
-- **`Box`, not `Arc`.** The poll runs on the calling Ruby thread (block-under-GVL
-  — see below), so the handle is never moved cross-thread; the field stays
+- **`Box`, not `Arc`.** The poll runs on the calling Ruby thread — and the
+  GVL-release trampoline runs on that **same OS thread** (see below), so the
+  handle is never moved cross-thread; the field stays
   `stream: Box<dyn PollStream<item>>` (unchanged from P1). No `Send`/`Arc`.
 - **Ruby ≥ 3.1 caveat.** An `Enumerator` built from a **yielding** method (what
   `enumeratorize` produces here) is backed by a `Fiber`; Magnus's docs note that
@@ -48,29 +49,82 @@ Each `stream` op's generated `#[magnus::wrap]` class carries **both** surfaces:
   `.next` off the no-block `each` require **Ruby ≥ 3.1**. The block form
   (`each { ... }`) and the retained `.next` cursor have no such floor.
 
-## The GVL — block-under-GVL (with a documented follow-up)
+## The GVL — IMPLEMENTED: released around every blocking poll
 
-The blocking `PollStream::poll` runs on the calling Ruby thread. **Ideally** the
-GVL is released around it so a stream that idles does not stall the whole Ruby
-VM. **We do NOT release the GVL** in P2: `each` (like the retained `.next`
-cursor) calls `self.stream.poll(Duration::from_millis(500))` **under the GVL**.
+The blocking `PollStream::poll` runs on the calling Ruby thread. Both `each` and
+the retained `.next` cursor now **release the GVL** around that poll via
+`rb_sys::rb_thread_call_without_gvl`, so a stream that idles or blocks no longer
+stalls the whole Ruby VM — other Ruby threads run during the poll. (Was
+block-under-GVL through P2; this is the P2 follow-up, now done.)
 
-- **Why not release it here.** Magnus has **no safe wrapper** for
-  `rb_thread_call_without_gvl`; releasing requires raw FFI via `magnus::rb_sys`
-  → `rb_thread_call_without_gvl`, with the strict rule that **no Ruby object may
-  be touched while the GVL is released** (extract everything, poll released,
-  re-acquire, *then* `yield_value`). fluessig emits Rust **source strings** and
-  never compiles them, so a subtly-wrong `unsafe` FFI trampoline could not be
-  caught in CI — and emitting incorrect `unsafe` is worse than not releasing.
-  Block-under-GVL is **correct** (it only holds the GVL during the bounded 500 ms
-  poll), just not maximally concurrent. This matches the pre-existing `.next`
-  cursor exactly, so P2 introduces no new soundness surface.
-- **Follow-up.** GVL-release via `rb_thread_call_without_gvl` (extract handle →
-  poll released → re-acquire → `yield_value`, and revisit whether the closure
-  needs `Arc`/`Send`) is a **documented optimization follow-up**, gated on
-  pinning a known-correct `magnus::rb_sys` signature with high confidence. It
-  must not compromise the soundness of the `each`/Enumerator surface, which is
-  the actual P2 deliverable.
+**Verified against real ruby 3.3.6.** The exact FFI trampoline below was
+prototyped in a real magnus 0.8.2 + rb-sys 0.9.128 extension and exercised: a
+background Ruby thread demonstrably advanced ~600 increments during a blocking
+`each` while the GVL was released, vs **0** when the poll was held under the GVL.
+
+- **The `without_gvl` helper.** Emitted once into the binding prelude (only when
+  the API projects a stream), alongside `use std::ffi::c_void;` and
+  `use std::ptr;`:
+
+  ```rust
+  fn without_gvl<F, R>(func: F) -> R
+  where
+      F: FnOnce() -> R, // no Send bound: runs on the same OS thread
+  {
+      unsafe extern "C" fn trampoline<F, R>(data: *mut c_void) -> *mut c_void
+      where
+          F: FnOnce() -> R,
+      {
+          let slot = &mut *(data as *mut Option<F>);
+          let f = slot.take().expect("gvl closure already consumed");
+          Box::into_raw(Box::new(f())) as *mut c_void
+      }
+      let mut slot: Option<F> = Some(func);
+      let result_ptr = unsafe {
+          rb_sys::rb_thread_call_without_gvl(
+              Some(trampoline::<F, R>),
+              &mut slot as *mut Option<F> as *mut c_void,
+              None,             // ubf = None
+              ptr::null_mut(),  // data2 = null (a timeout-bounded poll needs no unblock fn)
+          )
+      };
+      *unsafe { Box::from_raw(result_ptr as *mut R) }
+  }
+  ```
+
+  Each poll site becomes
+  `let poll = without_gvl(|| self.stream.poll(Duration::from_millis(500)));`
+  and the `match` acts on the returned `Poll<item>`.
+
+- **`rb-sys` is a CONSUMER dependency.** `rb_thread_call_without_gvl` lives at the
+  **top level** of the `rb-sys` crate; **magnus does NOT re-export it**. So the
+  **consumer's** Ruby extension crate must depend on `rb-sys` (`~0.9`) **directly**,
+  in addition to `magnus`. fluessig only emits Rust **source strings** — it does
+  **not** compile them — so this dependency is **not** added to fluessig's
+  `Cargo.toml`; the consumer wires it explicitly. (This mirrors how the Python
+  half documents its `pyo3-async-runtimes` consumer requirement in
+  [`async-iterable-streams-python.md`](./async-iterable-streams-python.md).)
+
+- **No Ruby objects while released — the C-API invariant.** Ruby's C API forbids
+  touching any Ruby object (no `Value`, no alloc) while the GVL is released. The
+  codegen honours this structurally: the `without_gvl` closure captures **only**
+  `&self` / `&rb_self` (Rust state) and returns the `Poll<item>` **by value** —
+  and `item` is a pure-Rust value (the core's yielded type; conversion to a Ruby
+  `Value` happens later at `yield_value`). Every Ruby-touching action —
+  `yield_value`, constructing/yielding the `<Class>ErrorEvent`, raising via
+  `rberr`/`Error` — runs **after** `without_gvl` returns, i.e. once the GVL is
+  re-acquired, on the matched `Poll` arm.
+
+- **Same OS thread ⇒ no `Send`/`Arc`.** `rb_thread_call_without_gvl` runs the
+  trampoline on the **same** OS thread (it only drops/re-takes the GVL), so the
+  closure needs **no** `Send`/`Sync` bound and the stream field stays
+  `Box<dyn PollStream<item>>` (no `Arc`). The `Option<F>` slot + `Box`-in/`Box`-out
+  is the standard thunk pattern for passing a non-`extern "C"` closure and its
+  return value through the C boundary.
+
+- **Dual-error semantics unchanged.** Only the poll **call site** changed; the
+  throw-mode raise and event-mode terminal-`ErrorEvent` yield (below) are exactly
+  as in P2, and both remain outside the released region.
 
 ## Cancellation — `close()` on `Drop`
 

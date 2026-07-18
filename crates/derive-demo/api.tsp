@@ -10,14 +10,29 @@
 // hand-written core by discipline; the derive captures it from the `impl` block
 // that actually runs. Both lower to the same `api.json` op shapes.
 //
-// NB: the TypeSpec path additionally materialises the entities the ops reference
-// (`Repo`, `PullRequest`) as FLATTENED DTO `models` in api.json; the Slice-5
-// derive path emits the op surface only (empty `models`). The comparison is at
-// the OP level, per notes/derive-front-end-decisions.md (Slice 5 is the op
-// surface; the DTO/model layer is a separate concern).
+// Slice 8a Gap 2: both front ends now materialise the entities AND DTOs the ops
+// reference as FLATTENED `models` in api.json (a to-one relation → its FK
+// field(s); the referenced set closed transitively). The comparison covers BOTH
+// the ops AND the models (see tests/api_typespec_equivalence.rs).
 
 import "../../typespec/lib.tsp";
 using Fluessig;
+
+// ── DTOs / value structs (plain models, no @entity) the ops pass across ──
+model LoadStats {
+  commits: int64;
+  refs: int64;
+}
+
+model TableRename {
+  oldName: string;
+  newName: string;
+}
+
+model SinkOptions {
+  path?: string;
+  renames: TableRename[];
+}
 
 @entity
 @name("repos")
@@ -61,6 +76,12 @@ interface Db {
 
   /** Poll-loop sync with a host callback — hand-written per binding. */
   @manual watch(intervalSecs: int32): void;
+
+  /** Load and report a stats DTO (a value-struct return). */
+  load(): LoadStats;
+
+  /** Sink to a target described by a DTO param. */
+  sink(options: SinkOptions): int64;
 }
 
 /** Stateless git helpers (no database handle). All unary. */

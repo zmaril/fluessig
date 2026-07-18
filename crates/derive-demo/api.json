@@ -4,7 +4,102 @@
     "emitter": "fluessig-derive/0.1.0"
   },
   "source": "api_demo",
-  "models": [],
+  "models": [
+    {
+      "name": "LoadStats",
+      "doc": "What one load produced — a plain scalar DTO returned by `Db::load`.",
+      "fields": [
+        {
+          "name": "commits",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "refs",
+          "type": "int64",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "TableRename",
+      "doc": "One table rename — a DTO referenced *transitively*, only through\n`SinkOptions.renames`, so it proves the referenced-model closure grows past\nthe ops' direct references.",
+      "fields": [
+        {
+          "name": "oldName",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "newName",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "SinkOptions",
+      "doc": "Options for `Db::sink` — a DTO with a nullable scalar and a **list of another\nDTO** (`renames`), exercising the list + transitive-closure paths.",
+      "fields": [
+        {
+          "name": "path",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "renames",
+          "type": {
+            "list": {
+              "model": "TableRename"
+            }
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "Repo",
+      "doc": "A repository — a single-column-keyed reference target.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "remoteUrl",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "PullRequest",
+      "doc": "A pull request — a **composite-key** entity: identified by `(repo_id,\nnumber)`. `ref_cols(number = \"pr_number\")` declares that referencing sites\nspell the `number` key part as the column `pr_number` (and `repo_id` as-is);\nthe spelling lives here, on the target, not at each referencing site.",
+      "fields": [
+        {
+          "name": "repoId",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "number",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "authorId",
+          "type": "int64",
+          "nullable": true
+        }
+      ]
+    }
+  ],
   "unions": [],
   "interfaces": [
     {
@@ -91,6 +186,29 @@
             }
           ],
           "returns": "void"
+        },
+        {
+          "name": "load",
+          "doc": "Load and report a stats DTO (a `#[derive(Record)]` return, Slice 8a Gap 2).",
+          "shape": "unary",
+          "params": [],
+          "returns": {
+            "model": "LoadStats"
+          }
+        },
+        {
+          "name": "sink",
+          "doc": "Sink to a target described by a DTO param — `SinkOptions` (and, through it,\n`TableRename`) materialise into `api.json`'s `models`.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "options",
+              "type": {
+                "model": "SinkOptions"
+              }
+            }
+          ],
+          "returns": "int64"
         }
       ]
     },

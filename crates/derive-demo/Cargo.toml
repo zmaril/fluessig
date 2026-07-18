@@ -31,6 +31,10 @@ name = "fluessig-emit-poly"
 path = "src/bin/fluessig-emit-poly.rs"
 
 [[bin]]
+name = "fluessig-emit-leaf-fk"
+path = "src/bin/fluessig-emit-leaf-fk.rs"
+
+[[bin]]
 name = "fluessig-emit-api-catalog"
 path = "src/bin/fluessig-emit-api-catalog.rs"
 

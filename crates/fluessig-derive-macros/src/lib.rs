@@ -589,6 +589,38 @@ fn expand_edge(opts: EdgeOpts) -> syn::Result<proc_macro2::TokenStream> {
     })
 }
 
+// ─────────────────────────── #[derive(Record)] ───────────────────────────
+
+/// The `#[derive(Record)]` expansion lives in [`record`]; only the proc-macro
+/// entry point can sit at the crate root.
+mod record;
+
+/// Derive a `&'static RecordDescriptor` for a DTO / value struct (Slice 8a Gap 2).
+///
+/// A record is flat data the op surface passes across — no identity, no key, no
+/// entity FK relations. Fields are scalars, references to other records, and
+/// lists / `Option`s thereof.
+///
+/// ```ignore
+/// #[derive(Record)]
+/// pub struct SinkOptions {
+///     pub path: Option<String>,          // Option<T> ⇒ nullable
+///     pub renames: Vec<TableRename>,     // Vec<T> ⇒ a list; TableRename is another Record
+/// }
+/// ```
+#[proc_macro_derive(Record, attributes(fluessig))]
+pub fn derive_record(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    let opts = match record::RecordOpts::from_derive_input(&input) {
+        Ok(o) => o,
+        Err(e) => return e.write_errors().into(),
+    };
+    match record::expand_record(opts) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 // ─────────────────────────── shared field lowering ───────────────────────────
 
 /// Emit the `FieldDescriptor { … }` tokens for one struct field, honouring
@@ -894,6 +926,10 @@ struct CatalogInput {
     version: LitStr,
     entities: Vec<Ident>,
     edges: Vec<Ident>,
+    /// The `records: [SinkOptions, …]` DTO roots — `#[derive(Record)]` value
+    /// structs that lower to the catalog's `valueStructs` and are materialised
+    /// into `api.json`'s `models` when an op references them (Slice 8a Gap 2).
+    records: Vec<Ident>,
     /// The `api: [Entl, …]` op roots — types whose `#[fluessig::export] impl`
     /// blocks are lowered into `api.json` alongside the entity catalog (Slice 5).
     api: Vec<Ident>,
@@ -905,6 +941,7 @@ impl Parse for CatalogInput {
         let mut version = None;
         let mut entities = None;
         let mut edges = Vec::new();
+        let mut records = Vec::new();
         let mut api = Vec::new();
 
         while !input.is_empty() {
@@ -915,13 +952,14 @@ impl Parse for CatalogInput {
                 "version" => version = Some(parse_version(input)?),
                 "entities" => entities = Some(parse_ident_list(input)?),
                 "edges" => edges = parse_ident_list(input)?,
+                "records" => records = parse_ident_list(input)?,
                 "api" => api = parse_ident_list(input)?,
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
                             "unknown catalog! field `{other}` — supported: \
-                             name, version, entities, edges, api"
+                             name, version, entities, edges, records, api"
                         ),
                     ))
                 }
@@ -940,6 +978,7 @@ impl Parse for CatalogInput {
             entities: entities
                 .ok_or_else(|| syn::Error::new(input.span(), "catalog! is missing `entities`"))?,
             edges,
+            records,
             api,
         })
     }
@@ -988,16 +1027,21 @@ pub fn catalog(input: TokenStream) -> TokenStream {
         version,
         entities,
         edges,
+        records,
         api,
     } = parse_macro_input!(input as CatalogInput);
 
     // The generated `fluessig_catalog` module nests one level below the
-    // invocation scope, so entity/edge/api paths are reached through `super::`.
+    // invocation scope, so entity/edge/record/api paths are reached through
+    // `super::`.
     let entity_descriptors = entities.iter().map(|e| {
         quote! { <super::#e as ::fluessig_derive::Entity>::DESCRIPTOR }
     });
     let edge_descriptors = edges.iter().map(|e| {
         quote! { <super::#e as ::fluessig_derive::Edge>::DESCRIPTOR }
+    });
+    let record_descriptors = records.iter().map(|r| {
+        quote! { <super::#r as ::fluessig_derive::Record>::DESCRIPTOR }
     });
     let api_descriptors = api.iter().map(|a| {
         quote! { <super::#a as ::fluessig_derive::ApiExport>::DESCRIPTOR }
@@ -1015,6 +1059,11 @@ pub fn catalog(input: TokenStream) -> TokenStream {
             pub const EDGES: &[&'static ::fluessig_derive::EdgeDescriptor] =
                 &[ #( #edge_descriptors ),* ];
 
+            /// The record (DTO) descriptors listed in `catalog!`'s `records:`, in
+            /// declaration order (Slice 8a Gap 2). Empty when none are given.
+            pub const RECORDS: &[&'static ::fluessig_derive::RecordDescriptor] =
+                &[ #( #record_descriptors ),* ];
+
             /// The op-interface descriptors listed in `catalog!`'s `api:`, in
             /// declaration order (Slice 5). Empty when no `api:` roots are given.
             pub const API: &[&'static ::fluessig_derive::InterfaceDescriptor] =
@@ -1025,24 +1074,28 @@ pub fn catalog(input: TokenStream) -> TokenStream {
             /// The catalog version as declared in `catalog!`.
             pub const VERSION: &str = #version;
 
-            /// Build the in-memory `fluessig::Catalog` IR from the descriptors.
+            /// Build the in-memory `fluessig::Catalog` IR from the descriptors
+            /// (entities + edges + records → `valueStructs`).
             pub fn catalog() -> ::fluessig_derive::fluessig::Catalog {
-                ::fluessig_derive::build_catalog_with_edges(NAME, VERSION, ENTITIES, EDGES)
+                ::fluessig_derive::build_catalog_full(NAME, VERSION, ENTITIES, EDGES, RECORDS)
             }
 
             /// Render the `catalog.json` text the existing Rust loader consumes.
             pub fn to_json() -> ::std::string::String {
-                ::fluessig_derive::to_catalog_json_with_edges(NAME, VERSION, ENTITIES, EDGES)
+                ::fluessig_derive::to_catalog_json_full(NAME, VERSION, ENTITIES, EDGES, RECORDS)
             }
 
-            /// Build the in-memory `api.json` op-layer IR from the `api:` roots.
+            /// Build the in-memory `api.json` op-layer IR from the `api:` roots,
+            /// with the `models` materialised from the entities/records the ops
+            /// reference (Slice 8a Gap 2).
             pub fn api() -> ::fluessig_derive::fluessig::api::ApiDoc {
-                ::fluessig_derive::build_api(NAME, VERSION, API)
+                ::fluessig_derive::build_api(NAME, VERSION, ENTITIES, EDGES, RECORDS, API)
             }
 
-            /// Render the `api.json` text the loader + bindgen consume (Slice 5).
+            /// Render the `api.json` text the loader + bindgen consume (Slice 5 +
+            /// the Slice 8a Gap 2 `models` layer).
             pub fn api_to_json() -> ::std::string::String {
-                ::fluessig_derive::to_api_json(NAME, VERSION, API)
+                ::fluessig_derive::to_api_json(NAME, VERSION, ENTITIES, EDGES, RECORDS, API)
             }
         }
     }

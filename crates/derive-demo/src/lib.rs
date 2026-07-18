@@ -33,6 +33,10 @@ pub mod poly;
 /// wired into `catalog!`'s `api:` root list alongside the entity catalog.
 pub mod api;
 
+/// Slice 8a Gap 1: a direct `Id<Leaf>` FK into a composite-keyed family leaf —
+/// the resolver follows `extends` to spell the inherited composite FK columns.
+pub mod leaf_fk;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

@@ -1,0 +1,151 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "leaf_fk_demo",
+  "scalars": [],
+  "unions": [],
+  "enums": [],
+  "entities": [
+    {
+      "name": "Project",
+      "table": "projects",
+      "key": [
+        "id"
+      ],
+      "doc": "A project — the single-column-keyed reference target the composite family keys\non.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The project id (a slug).",
+          "key": true
+        }
+      ]
+    },
+    {
+      "name": "Ticket",
+      "abstract": true,
+      "key": [
+        "project_id",
+        "seq"
+      ],
+      "doc": "The tracker-item family root — a **composite** key `(project_id, seq)`. It\nshares its reference spelling once (`tag_col` + `ref_cols(seq = \"ticket_seq\")`)\nwith every site that points at the family, polymorphic or direct.",
+      "fields": [
+        {
+          "name": "project_id",
+          "type": {
+            "k": "ref",
+            "name": "Project",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The project the ticket lives in.",
+          "key": true,
+          "relation": {
+            "to": "Project",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "project_id"
+            ]
+          }
+        },
+        {
+          "name": "seq",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The per-project sequence number.",
+          "key": true
+        }
+      ]
+    },
+    {
+      "name": "Bug",
+      "table": "bugs",
+      "extends": "Ticket",
+      "key": [],
+      "doc": "A bug — a leaf of the Ticket family, inheriting `(project_id, seq)` into the\n`bugs` table.",
+      "fields": [
+        {
+          "name": "severity",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "How bad it is."
+        }
+      ]
+    },
+    {
+      "name": "Feature",
+      "table": "features",
+      "extends": "Ticket",
+      "key": [],
+      "doc": "A feature request — a leaf of the Ticket family, sharing the same composite\nkey.",
+      "fields": [
+        {
+          "name": "summary",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "A one-line summary."
+        }
+      ]
+    },
+    {
+      "name": "Watch",
+      "table": "watches",
+      "key": [
+        "id"
+      ],
+      "doc": "A watch subscription — the Gap-1 shape. `bug: Id<Bug>` is a **direct** FK into\na composite-keyed family leaf: the resolver walks `extends` to `Ticket`'s\ninherited key and materialises the two FK columns `(project_id, ticket_seq)`.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The subscription id.",
+          "key": true
+        },
+        {
+          "name": "bug",
+          "type": {
+            "k": "ref",
+            "name": "Bug",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The watched bug — a composite FK `(project_id, ticket_seq)` followed\nthrough `extends`, with no discriminator (the concrete leaf is known at the\nsite).",
+          "relation": {
+            "to": "Bug",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "project_id",
+              "ticket_seq"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "relationProperties": [],
+  "valueStructs": []
+}

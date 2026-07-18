@@ -197,6 +197,25 @@
                 },
                 "destructive": {
                   "const": true
+                },
+                "stream_error": {
+                  "type": "object",
+                  "description": "Per-stream-op override of the terminal error-event JS shape (node backend). Every field defaults to pi's `{ type: \"error\", reason, error }`; only legal on a `stream` op.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "tag_name": {
+                      "type": "string"
+                    },
+                    "tag_value": {
+                      "type": "string"
+                    },
+                    "reason_name": {
+                      "type": "string"
+                    },
+                    "error_name": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }

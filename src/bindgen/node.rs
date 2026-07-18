@@ -31,10 +31,20 @@ pub fn node_binding(
         }
 
         $("/// One poll result from a core stream (the sync primitive every stream shape dresses).")
+        $("/// `Failed(msg)` is the SECOND error model. Once a stream has started, pi's")
+        $("/// contract flips: a request/model/runtime failure is no longer thrown — it is")
+        $("/// ENCODED IN THE STREAM as a terminal error EVENT and the stream then completes")
+        $("/// (packages/ai/src/types.ts: after `stream()` returns, failures ride the stream,")
+        $("/// never reject the promise). `Failed` is the generic path for a core that surfaces")
+        $("/// a mid-stream failure as a Rust `Result`/error; a core that instead emits its")
+        $("/// terminal error as a normal union VARIANT of the element type flows through")
+        $("/// `Item` unchanged — both satisfy \"never throw after stream start\". The message")
+        $("/// is owned (`String`) so the enum stays trivially `Send` and dependency-free.")
         pub enum Poll<T> {
             Item(T),
             Idle,
             Closed,
+            Failed(String),
         }
 
         $("/// The one sync primitive: a blocking, timeout-bounded poll.")
@@ -174,112 +184,305 @@ pub fn node_binding(
         let trait_name = format!("{}Core", i.name);
         let impl_path = format!("crate::core_impl::{}Impl", i.name);
 
-        // stream classes + next-tasks
+        // stream classes + next-tasks. The error model is chosen per-op by
+        // `stream_error`: `None` (unannotated) = the DEFAULT idiomatic native-TS
+        // REJECT (a mid-stream `Poll::Failed` maps to `Err(err(e))`, so the awaited
+        // pull rejects and `for await` throws — safe by default, no silent-swallow);
+        // `Some(shape)` = opt-in error-AS-EVENT (mirror-a-library mode, e.g. pi's
+        // `{ type, reason, error }`), where the failure is yielded as a terminal
+        // event and the stream then completes (never rejects). `Poll::Failed(String)`
+        // is the core→binding channel in BOTH modes; only the mapping differs.
         for op in i.ops.iter().filter(|o| o.shape == Shape::Stream) {
             let class = pascal(&op.name);
             let (item, ts_item) = ty(api, &op.returns);
-            quote_in! { t =>
-                $['\r']
-                $(format!("/// Event stream from `{}.{}`.", i.name, op.name))
-                $("///")
-                $("/// Primary surface: a JS async-iterable — `for await (const ev of stream)`.")
-                $("/// Retained surface: `next()` poll cursor (resolves `null` at end) for")
-                $("/// consumers that cannot use async iteration or napi's `tokio_rt` feature.")
-                #[napi(async_iterator)]
-                pub struct $(&class) {
-                    stream: Arc<dyn PollStream<$(&item)>>,
-                }
+            match &op.stream_error {
+                // ── DEFAULT throw-mode (unannotated): native-TS reject ──
+                None => {
+                    let ret_ts = format!("Promise<{ts_item} | null>");
+                    quote_in! { t =>
+                        $['\r']
+                        $(format!("/// Event stream from `{}.{}`.", i.name, op.name))
+                        $("///")
+                        $("/// Primary surface: a JS async-iterable — `for await (const ev of stream)`.")
+                        $("/// Retained surface: `next()` poll cursor (resolves `null` at end) for")
+                        $("/// consumers that cannot use async iteration or napi's `tokio_rt` feature.")
+                        $("///")
+                        $("/// DEFAULT error model = idiomatic native-TS REJECT: a mid-stream core")
+                        $("/// failure (`Poll::Failed`) maps to `Err(err(e))`, so the awaited pull")
+                        $("/// REJECTS and the `for await` loop THROWS — safe by default, never a")
+                        $("/// silent-swallow. Annotate the op `@streamError` to opt into the")
+                        $("/// error-AS-EVENT model instead (mirror a source library like pi).")
+                        #[napi(async_iterator)]
+                        pub struct $(&class) {
+                            stream: Arc<dyn PollStream<$(&item)>>,
+                        }
 
-                $("// Async-iterable surface (Symbol.asyncIterator). napi drives one pull at a")
-                $("// time, so backpressure is one in-flight poll by construction.")
-                #[napi]
-                impl AsyncGenerator for $(&class) {
-                    type Yield = $(&item);
-                    type Next = ();
-                    type Return = ();
+                        $("// Async-iterable surface (Symbol.asyncIterator). napi drives one pull at a")
+                        $("// time, so backpressure is one in-flight poll by construction.")
+                        #[napi]
+                        impl AsyncGenerator for $(&class) {
+                            type Yield = $(&item);
+                            type Next = ();
+                            type Return = ();
 
-                    fn next(
-                        &mut self,
-                        _value: Option<Self::Next>,
-                    ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
-                        let stream = self.stream.clone();
-                        async move {
-                            loop {
-                                let s = stream.clone();
-                                $("// Drive the blocking poll off the async runtime so the Node")
-                                $("// event loop is never blocked.")
-                                let poll = napi::tokio::task::spawn_blocking(move || {
-                                    s.poll(Duration::from_millis(500))
-                                })
-                                .await
-                                .map_err(err)?;
-                                $("// Terminal-event seam (dual error model, gap 4). gap-4 adds ONE terminal")
-                                $("// arm here, `Poll::Failed(msg)`, mapping to the errors-as-events contract:")
-                                $("// build the configured terminal error event (default pi shape")
-                                $("// `{ type: \"error\", reason, error }`, schema-configurable via @streamError),")
-                                $("// `return Ok(Some(<error event>))`, then the next pull returns `Ok(None)` to")
-                                $("// complete — it must NEVER reject/throw. Errors thrown at stream construction")
-                                $("// (ctor/unary) stay thrown napi errors; rich typed error events arrive as")
-                                $("// normal `Poll::Item` union values and need no new machinery here.")
-                                match poll {
-                                    Poll::Item(v) => return Ok(Some(v)),
-                                    Poll::Idle => continue,
-                                    Poll::Closed => return Ok(None),
+                            fn next(
+                                &mut self,
+                                _value: Option<Self::Next>,
+                            ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+                                let stream = self.stream.clone();
+                                async move {
+                                    loop {
+                                        let s = stream.clone();
+                                        $("// Drive the blocking poll off the async runtime so the Node")
+                                        $("// event loop is never blocked.")
+                                        let poll = napi::tokio::task::spawn_blocking(move || {
+                                            s.poll(Duration::from_millis(500))
+                                        })
+                                        .await
+                                        .map_err(err)?;
+                                        $("// DEFAULT throw-mode: a mid-stream failure REJECTS the pull")
+                                        $("// (native TS — the `for await` loop throws). Opt into")
+                                        $("// error-as-event with `@streamError`.")
+                                        match poll {
+                                            Poll::Item(v) => return Ok(Some(v)),
+                                            Poll::Idle => continue,
+                                            Poll::Closed => return Ok(None),
+                                            Poll::Failed(e) => return Err(err(e)),
+                                        }
+                                    }
+                                }
+                            }
+
+                            fn complete(
+                                &mut self,
+                                _value: Option<Self::Return>,
+                            ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+                                $("// Cancellation: consumer called `return()` (e.g. `break` in for-await).")
+                                let stream = self.stream.clone();
+                                async move {
+                                    stream.close();
+                                    Ok(None)
                                 }
                             }
                         }
-                    }
 
-                    fn complete(
-                        &mut self,
-                        _value: Option<Self::Return>,
-                    ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
-                        $("// Cancellation: consumer called `return()` (e.g. `break` in for-await).")
-                        let stream = self.stream.clone();
-                        async move {
-                            stream.close();
-                            Ok(None)
-                        }
-                    }
-                }
-
-                $("// Backstop: guarantee core-side close even if the consumer neither")
-                $("// exhausts nor cancels the iterator.")
-                impl Drop for $(&class) {
-                    fn drop(&mut self) {
-                        self.stream.close();
-                    }
-                }
-
-                $("// Retained poll cursor: `next(): Promise<Item | null>`.")
-                pub struct Next$(&class)Task {
-                    stream: Arc<dyn PollStream<$(&item)>>,
-                }
-                impl Task for Next$(&class)Task {
-                    type Output = Option<$(&item)>;
-                    type JsValue = Option<$(&item)>;
-                    fn compute(&mut self) -> Result<Self::Output> {
-                        loop {
-                            match self.stream.poll(Duration::from_millis(500)) {
-                                Poll::Item(v) => return Ok(Some(v)),
-                                Poll::Idle => continue,
-                                Poll::Closed => return Ok(None),
+                        $("// Backstop: guarantee core-side close even if the consumer neither")
+                        $("// exhausts nor cancels the iterator.")
+                        impl Drop for $(&class) {
+                            fn drop(&mut self) {
+                                self.stream.close();
                             }
                         }
-                    }
-                    fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
-                        Ok(o)
-                    }
+
+                        $("// Retained poll cursor: `next(): Promise<Item | null>`.")
+                        pub struct Next$(&class)Task {
+                            stream: Arc<dyn PollStream<$(&item)>>,
+                        }
+                        impl Task for Next$(&class)Task {
+                            type Output = Option<$(&item)>;
+                            type JsValue = Option<$(&item)>;
+                            fn compute(&mut self) -> Result<Self::Output> {
+                                loop {
+                                    match self.stream.poll(Duration::from_millis(500)) {
+                                        Poll::Item(v) => return Ok(Some(v)),
+                                        Poll::Idle => continue,
+                                        Poll::Closed => return Ok(None),
+                                        $("// throw-mode: reject the pull (native TS).")
+                                        Poll::Failed(e) => return Err(err(e)),
+                                    }
+                                }
+                            }
+                            fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
+                                Ok(o)
+                            }
+                        }
+                        #[napi]
+                        impl $(&class) {
+                            #[napi(ts_return_type = $(quoted(ret_ts)))]
+                            pub fn next(&self) -> AsyncTask<Next$(&class)Task> {
+                                AsyncTask::new(Next$(&class)Task { stream: self.stream.clone() })
+                            }
+                        }
+                        $['\n']
+                    };
                 }
-                #[napi]
-                impl $(&class) {
-                    #[napi(ts_return_type = $(quoted(format!("Promise<{ts_item} | null>"))))]
-                    pub fn next(&self) -> AsyncTask<Next$(&class)Task> {
-                        AsyncTask::new(Next$(&class)Task { stream: self.stream.clone() })
-                    }
+                // ── OPT-IN event-mode (@streamError): error-as-event (mirror a library) ──
+                Some(se) => {
+                    let err_evt = format!("{class}ErrorEvent");
+                    // each field: a js_name attr only when the js-name diverges from the
+                    // rust ident (the tag always needs one — `type_` never equals its
+                    // js-name), mirroring the `{:?}` string-literal idiom above.
+                    let ev_field = |rust: &str, js: &str| {
+                        if js == rust {
+                            format!("pub {rust}: String,")
+                        } else {
+                            format!("#[napi(js_name = {js:?})] pub {rust}: String,")
+                        }
+                    };
+                    let ev_fields: Vec<String> = vec![
+                        ev_field("type_", &se.tag_name),
+                        ev_field("reason", &se.reason_name),
+                        ev_field("error", &se.error_name),
+                    ];
+                    let ret_ts = format!("Promise<{ts_item} | {err_evt} | null>");
+                    quote_in! { t =>
+                        $['\r']
+                        $(format!("/// The terminal error event yielded (NEVER thrown) when `{}.{}`'s core stream", i.name, op.name))
+                        $("/// fails after it has started — the opt-in `@streamError` (error-as-event)")
+                        $("/// model, mirroring a source library's contract (pi's post-start boundary as")
+                        $("/// a plain value). NOTE: a core that instead surfaces its terminal error as a")
+                        $("/// normal union VARIANT of the element type already rides out through")
+                        $("/// `Poll::Item`; this struct is only the carrier for a `Result`/error failure.")
+                        #[napi(object)]
+                        pub struct $(&err_evt) {
+                            $(for f in &ev_fields join ($['\r']) => $f)
+                        }
+                        $(format!("/// Event stream from `{}.{}`.", i.name, op.name))
+                        $("///")
+                        $("/// Primary surface: a JS async-iterable — `for await (const ev of stream)`.")
+                        $("/// Retained surface: `next()` poll cursor (resolves `null` at end) for")
+                        $("/// consumers that cannot use async iteration or napi's `tokio_rt` feature.")
+                        $("///")
+                        $("/// `@streamError` error model = error-AS-EVENT: a mid-stream core failure is")
+                        $("/// yielded as a terminal `<Op>ErrorEvent` and the stream then completes —")
+                        $("/// it NEVER rejects/throws (mirrors pi's contract, packages/ai/src/types.ts).")
+                        #[napi(async_iterator)]
+                        pub struct $(&class) {
+                            stream: Arc<dyn PollStream<$(&item)>>,
+                            $("// latched once the terminal error event is handed out — a started stream")
+                            $("// never restarts, so every subsequent next() must resolve null (done).")
+                            closed: Arc<std::sync::atomic::AtomicBool>,
+                        }
+
+                        $("// Async-iterable surface (Symbol.asyncIterator). napi drives one pull at a")
+                        $("// time, so backpressure is one in-flight poll by construction.")
+                        #[napi]
+                        impl AsyncGenerator for $(&class) {
+                            $("// Yield WIDENED to Either<item, error-event> — event-mode only.")
+                            $("// WHY the Either: the terminal error event is a distinct TOP-LEVEL shape")
+                            $("// `{ type, reason, error }` whose keys differ from the element/union")
+                            $("// carrier, so it cannot ride the plain `item` Yield — it must be a second")
+                            $("// arm. napi renders `Either<A, B>` as `A | B` in the generated `.d.ts`,")
+                            $("// so the async iterator's element type reads `item | <Op>ErrorEvent`.")
+                            $("// (Unannotated ops keep `type Yield = <item>` — this surface is untouched.)")
+                            type Yield = napi::bindgen_prelude::Either<$(&item), $(&err_evt)>;
+                            type Next = ();
+                            type Return = ();
+
+                            fn next(
+                                &mut self,
+                                _value: Option<Self::Next>,
+                            ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+                                let stream = self.stream.clone();
+                                let closed = self.closed.clone();
+                                async move {
+                                    use std::sync::atomic::Ordering;
+                                    $("// A started stream never restarts: once the terminal error event has")
+                                    $("// been handed out the latch is set, so every subsequent pull completes.")
+                                    if closed.load(Ordering::SeqCst) {
+                                        return Ok(None);
+                                    }
+                                    loop {
+                                        let s = stream.clone();
+                                        $("// Drive the blocking poll off the async runtime so the Node")
+                                        $("// event loop is never blocked.")
+                                        let poll = napi::tokio::task::spawn_blocking(move || {
+                                            s.poll(Duration::from_millis(500))
+                                        })
+                                        .await
+                                        .map_err(err)?;
+                                        $("// event-mode: a mid-stream failure is ENCODED IN THE STREAM as a")
+                                        $("// terminal error EVENT and the stream then completes — it must")
+                                        $("// NEVER reject/throw. `Poll::Failed` yields `Either::B(event)` then")
+                                        $("// the latch makes the next pull return `Ok(None)`.")
+                                        match poll {
+                                            Poll::Item(v) => return Ok(Some(napi::bindgen_prelude::Either::A(v))),
+                                            Poll::Idle => continue,
+                                            Poll::Closed => return Ok(None),
+                                            Poll::Failed(e) => {
+                                                $("// latch closed so the next pull completes, then hand the failure")
+                                                $("// out AS A VALUE — never a thrown/rejected error.")
+                                                closed.store(true, Ordering::SeqCst);
+                                                return Ok(Some(napi::bindgen_prelude::Either::B($(&err_evt) {
+                                                    type_: $(quoted(se.tag_value.clone())).into(),
+                                                    reason: "error".into(),
+                                                    error: e,
+                                                })));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            fn complete(
+                                &mut self,
+                                _value: Option<Self::Return>,
+                            ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+                                $("// Cancellation: consumer called `return()` (e.g. `break` in for-await).")
+                                let stream = self.stream.clone();
+                                async move {
+                                    stream.close();
+                                    Ok(None)
+                                }
+                            }
+                        }
+
+                        $("// Backstop: guarantee core-side close even if the consumer neither")
+                        $("// exhausts nor cancels the iterator.")
+                        impl Drop for $(&class) {
+                            fn drop(&mut self) {
+                                self.stream.close();
+                            }
+                        }
+
+                        $("// Retained poll cursor: `next(): Promise<Item | <Op>ErrorEvent | null>`.")
+                        pub struct Next$(&class)Task {
+                            stream: Arc<dyn PollStream<$(&item)>>,
+                            closed: Arc<std::sync::atomic::AtomicBool>,
+                        }
+                        impl Task for Next$(&class)Task {
+                            $("// Either::A = a normal item; Either::B = the terminal error event. The")
+                            $("// in-stream failure path is a VALUE, never a rejected promise.")
+                            type Output = Option<napi::bindgen_prelude::Either<$(&item), $(&err_evt)>>;
+                            type JsValue = Option<napi::bindgen_prelude::Either<$(&item), $(&err_evt)>>;
+                            fn compute(&mut self) -> Result<Self::Output> {
+                                use std::sync::atomic::Ordering;
+                                if self.closed.load(Ordering::SeqCst) {
+                                    return Ok(None);
+                                }
+                                loop {
+                                    match self.stream.poll(Duration::from_millis(500)) {
+                                        Poll::Item(v) => return Ok(Some(napi::bindgen_prelude::Either::A(v))),
+                                        Poll::Idle => continue,
+                                        Poll::Closed => return Ok(None),
+                                        Poll::Failed(e) => {
+                                            $("// latch closed so the next next() resolves null, then hand the")
+                                            $("// failure out AS A VALUE — never a thrown/rejected error.")
+                                            self.closed.store(true, Ordering::SeqCst);
+                                            return Ok(Some(napi::bindgen_prelude::Either::B($(&err_evt) {
+                                                type_: $(quoted(se.tag_value.clone())).into(),
+                                                reason: "error".into(),
+                                                error: e,
+                                            })));
+                                        }
+                                    }
+                                }
+                            }
+                            fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
+                                Ok(o)
+                            }
+                        }
+                        #[napi]
+                        impl $(&class) {
+                            #[napi(ts_return_type = $(quoted(ret_ts)))]
+                            pub fn next(&self) -> AsyncTask<Next$(&class)Task> {
+                                AsyncTask::new(Next$(&class)Task { stream: self.stream.clone(), closed: self.closed.clone() })
+                            }
+                        }
+                        $['\n']
+                    };
                 }
-                $['\n']
-            };
+            }
         }
 
         // unary op tasks
@@ -369,11 +572,23 @@ pub fn node_binding(
                     }
                     Shape::Stream => {
                         let class = pascal(&op.name);
+                        // The `closed` latch field exists only in event-mode
+                        // (`@streamError`); default throw-mode streams have no latch.
+                        let closed_init = if op.stream_error.is_some() {
+                            "closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),"
+                        } else {
+                            ""
+                        };
                         quote_in! { methods =>
                             $['\r']
+                            $("// pre-start boundary: building the stream (setup/validation) always")
+                            $("// THROWS on a core Err — independent of the stream's error model.")
                             #[napi]
                             pub fn $(&name)(&self, $(&ps)) -> Result<$(&class)> {
-                                Ok($(&class) { stream: Arc::from(self.core.$(&name)($(&names)).map_err(err)?) })
+                                Ok($(&class) {
+                                    stream: Arc::from(self.core.$(&name)($(&names)).map_err(err)?),
+                                    $closed_init
+                                })
                             }
                         }
                     }

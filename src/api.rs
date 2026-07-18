@@ -77,8 +77,52 @@ pub struct ApiOp {
     /// `@destructive` — flows into the MCP `destructiveHint` annotation.
     #[serde(default)]
     pub destructive: bool,
+    /// `@streamError(...)` — opts a stream op INTO the error-as-EVENT model and
+    /// (optionally) shapes that event, for the node backend. This field drives the
+    /// MODE, not just the shape: `None` (unannotated) → the DEFAULT idiomatic
+    /// native-TS model, where a core failure after stream start REJECTS the pull
+    /// (the `for await` loop throws — no silent-swallow); `Some(shape)` → the core
+    /// failure is yielded as a terminal error EVENT and the stream completes
+    /// (mirror-a-library mode, e.g. pi's `{ type: "error", reason, error }`). A bare
+    /// `@streamError` lowers to `Some(StreamErrorShape::default())` = pi's shape
+    /// verbatim; args override individual js-names / the tag value. Loader-checked
+    /// to be legal only on [`Shape::Stream`] (see [`load_api`]).
+    #[serde(default)]
+    pub stream_error: Option<StreamErrorShape>,
     pub params: Vec<ApiParam>,
     pub returns: ApiType,
+}
+
+/// The JS shape of a stream op's terminal error event (event-mode only, i.e. when
+/// `stream_error` is `Some`). Every field defaults to pi's post-start error shape
+/// (`{ type: "error", reason, error }`) verbatim, so a bare `@streamError` and an
+/// empty `{}` annotation lower identically; a schema author overrides only what
+/// they need. Field NAMES are js-names on the emitted `#[napi(object)]` struct;
+/// `tag_value` is the value stamped into the tag field.
+#[derive(Debug, Clone, Deserialize)]
+// container `default`: any field the author omits falls back to `Default` (pi's
+// shape below), so a partial `{ "tag_value": … }` fills the rest verbatim.
+#[serde(deny_unknown_fields, default)]
+pub struct StreamErrorShape {
+    /// JS field name of the discriminator tag (pi: `type`).
+    pub tag_name: String,
+    /// Value stamped into the discriminator tag (pi: `error`).
+    pub tag_value: String,
+    /// JS field name carrying the coarse reason (pi: `reason`).
+    pub reason_name: String,
+    /// JS field name carrying the core error message (pi renames `message`→`error`).
+    pub error_name: String,
+}
+
+impl Default for StreamErrorShape {
+    fn default() -> Self {
+        Self {
+            tag_name: "type".into(),
+            tag_value: "error".into(),
+            reason_name: "reason".into(),
+            error_name: "error".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -135,6 +179,18 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
             api.fluessig.format,
             crate::FORMAT_VERSION
         ));
+    }
+    // the loader validates: a `@streamError` shape is meaningless off the stream
+    // shape (nothing else has a post-start boundary to encode an error into).
+    for i in &api.interfaces {
+        for op in &i.ops {
+            if op.stream_error.is_some() && op.shape != Shape::Stream {
+                return Err(format!(
+                    "op `{}.{}`: stream_error (@streamError) is only valid on a stream op, but its shape is {:?}",
+                    i.name, op.name, op.shape
+                ));
+            }
+        }
     }
     Ok(api)
 }

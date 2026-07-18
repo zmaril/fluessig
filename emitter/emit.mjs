@@ -53,6 +53,18 @@ export async function emit(inputPath, outDir) {
     const a = d?.args?.[0];
     return a?.value?.name ?? a?.jsValue ?? null;
   };
+  // @streamError's positional scalar args → the sparse override object (only the
+  // keys the author actually set; the Rust StreamErrorShape fills the rest with
+  // pi's defaults). Keys mirror the ApiOp `stream_error` shape one-for-one.
+  const streamErrorShape = (op) => {
+    const [tagName, tagValue, reasonName, errorName] = decoJsArgs(op, "streamError") ?? [];
+    const s = {};
+    if (tagName != null) s.tag_name = tagName;
+    if (tagValue != null) s.tag_value = tagValue;
+    if (reasonName != null) s.reason_name = reasonName;
+    if (errorName != null) s.error_name = errorName;
+    return s;
+  };
 
   // ---- shared type lowering --------------------------------------------------
   function typeRef(t) {
@@ -191,6 +203,9 @@ export async function emit(inputPath, outDir) {
       // MCP tool annotations (readOnlyHint / destructiveHint); omitted when unset
       ...(hasDeco(op, "readonly") ? { readonly: true } : {}),
       ...(hasDeco(op, "destructive") ? { destructive: true } : {}),
+      // @streamError: the node backend's terminal error-event shape override.
+      // Only the overridden keys ride; absent → the Rust side uses pi's default.
+      ...(hasDeco(op, "streamError") ? { stream_error: streamErrorShape(op) } : {}),
       params: [...op.parameters.properties.values()].map((p) => ({
         name: p.name,
         type: apiType(p.type),

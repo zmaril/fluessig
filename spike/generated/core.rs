@@ -22,6 +22,10 @@ pub enum Poll<T> { Item(T), Idle, Closed }
 /// The one sync primitive every stream shape dresses (entl's ChangeStream::poll).
 pub trait PollStream<T>: Send + Sync {
     fn poll(&self, timeout: Duration) -> Poll<T>;
+    /// Release core-side resources. Called on async-iterator cancellation
+    /// (`return()`), on completion, and on drop. Must be idempotent; the
+    /// default is a no-op so poll-only cores need no change.
+    fn close(&self) {}
 }
 
 pub trait EntlCore: Send + Sync + Sized + 'static {

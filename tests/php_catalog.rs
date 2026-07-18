@@ -120,13 +120,25 @@ fn php_renders_the_union_fixture() {
         php.contains("pub struct Events"),
         "stream cursor class:\n{php}"
     );
+    // the sync cursor is fallible now: a terminal `Poll::Failed` throws a PHP
+    // exception (converged onto node's default throw-mode), so `next()` returns
+    // `PhpResult<Option<Event>>` and carries a `Poll::Failed` arm.
     assert!(
-        php.contains("pub fn next(&self) -> Option<Event>"),
-        "stream next():\n{php}"
+        php.contains("pub fn next(&self) -> PhpResult<Option<Event>>"),
+        "stream next() is fallible:\n{php}"
+    );
+    assert!(
+        php.contains("Poll::Failed(e) => return Err(err(e)),"),
+        "sync cursor throws on Poll::Failed:\n{php}"
     );
     assert!(
         php.contains("Box<dyn PollStream<Event>>"),
         "stream primitive:\n{php}"
+    );
+    // the runtime contract is imported, not re-declared inline
+    assert!(
+        php.contains("use fluessig_runtime::{Poll, PollStream};"),
+        "shared streaming contract imported from fluessig-runtime:\n{php}"
     );
 }
 

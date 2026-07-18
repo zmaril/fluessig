@@ -599,3 +599,44 @@ fn stream_op_projects_async_iterable_and_retains_poll_cursor() {
         "poll cursor keeps its nullable Promise ts type:\n{node}"
     );
 }
+
+#[test]
+fn sync_cursors_throw_on_poll_failed() {
+    // python/ruby/php stream cursors are SYNC; converging onto node's four-variant
+    // `Poll` contract means a terminal `Poll::Failed` now RAISES the language-native
+    // error (throw-mode) instead of being unreachable. Each cursor's poll-match
+    // gains a `Failed` arm and the method becomes fallible. All three also import
+    // the shared contract from fluessig-runtime rather than re-declaring it inline.
+    let api = fluessig::api::load_api(API).unwrap();
+    let enums: Vec<fluessig::bindgen::EnumDesc> = Vec::new();
+    let py = fluessig::bindgen::python_binding(&api, &enums, None);
+    let rb = fluessig::bindgen::ruby_binding(&api, &enums, None);
+
+    // python `__next__` is now `PyResult<Option<Event>>` and raises on failure
+    assert!(
+        py.contains("fn __next__(&self, py: Python<'_>) -> PyResult<Option<Event>>"),
+        "python __next__ is fallible:\n{py}"
+    );
+    assert!(
+        py.contains("Poll::Failed(e) => return Err(err(e)),"),
+        "python cursor raises on Poll::Failed:\n{py}"
+    );
+    assert!(
+        py.contains("use fluessig_runtime::{Poll, PollStream};"),
+        "python imports the shared contract:\n{py}"
+    );
+
+    // ruby `.next` is now `Result<Option<Event>, Error>` and raises on failure
+    assert!(
+        rb.contains("fn next(&self) -> Result<Option<Event>, Error>"),
+        "ruby .next is fallible:\n{rb}"
+    );
+    assert!(
+        rb.contains("Poll::Failed(e) => return Err(rberr(e)),"),
+        "ruby cursor raises on Poll::Failed:\n{rb}"
+    );
+    assert!(
+        rb.contains("use fluessig_runtime::{Poll, PollStream};"),
+        "ruby imports the shared contract:\n{rb}"
+    );
+}

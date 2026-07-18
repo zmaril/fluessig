@@ -1,8 +1,8 @@
 //! The Magnus (Ruby) template grid — one language's projection of the op shapes.
 //!
-//! straitjacket-allow-file:duplication — the per-language generators are
-//! DELIBERATELY parallel: the (language × shape) template grid is the design
-//! (see /translation.md); the truly shared pieces live in the parent module.
+//! The per-language generators are DELIBERATELY parallel: the (language × shape)
+//! template grid is the design (see /translation.md); the truly shared pieces
+//! live in the parent module.
 
 use genco::prelude::*;
 
@@ -787,12 +787,16 @@ pub fn ruby_binding_with_options(
                     stream: Box<dyn PollStream<$(&item)>>,
                 }
                 impl $(&class) {
-                    fn next(&self) -> Option<$(&item)> {
+                    $("// A terminal `Poll::Failed` raises a Ruby RuntimeError (mirrors node's")
+                    $("// default throw-mode): the sync `.next` cursor has no error-as-event")
+                    $("// surface, so a mid-stream core failure surfaces as `rberr(e)`.")
+                    fn next(&self) -> Result<Option<$(&item)>, Error> {
                         loop {
                             match self.stream.poll(Duration::from_millis(500)) {
-                                Poll::Item(v) => return Some(v),
+                                Poll::Item(v) => return Ok(Some(v)),
                                 Poll::Idle => continue,
-                                Poll::Closed => return None, $("// nil ends iteration")
+                                Poll::Closed => return Ok(None), $("// nil ends iteration")
+                                Poll::Failed(e) => return Err(rberr(e)), $("// raises on failure")
                             }
                         }
                     }

@@ -1,6 +1,7 @@
 // straitjacket-allow-file:duplication (generated)
 // GENERATED — the contract the bindings call into. Hand-implement this over entl-core.
-use std::time::Duration;
+// The streaming contract (Poll/PollStream) is the shared fluessig-runtime crate.
+use fluessig_runtime::{Poll, PollStream};
 
 /// What one git load produced.
 #[derive(Clone, Debug)]
@@ -15,17 +16,6 @@ pub struct ChangeBatch {
     pub table: String,
     pub op: String,
     pub rows_json: String,
-}
-
-pub enum Poll<T> { Item(T), Idle, Closed }
-
-/// The one sync primitive every stream shape dresses (entl's ChangeStream::poll).
-pub trait PollStream<T>: Send + Sync {
-    fn poll(&self, timeout: Duration) -> Poll<T>;
-    /// Release core-side resources. Called on async-iterator cancellation
-    /// (`return()`), on completion, and on drop. Must be idempotent; the
-    /// default is a no-op so poll-only cores need no change.
-    fn close(&self) {}
 }
 
 pub trait EntlCore: Send + Sync + Sized + 'static {

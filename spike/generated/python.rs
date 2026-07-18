@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use crate::core::{self, Poll, PollStream};
+use crate::core::{self};
+use fluessig_runtime::*;
 use crate::core::EntlCore;
 
 fn pyerr(e: impl std::fmt::Display) -> PyErr { PyRuntimeError::new_err(e.to_string()) }
@@ -42,12 +43,13 @@ pub struct Changes { stream: Box<dyn PollStream<core::ChangeBatch>> }
 #[pymethods]
 impl Changes {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> { slf }
-    fn __next__(&self, py: Python<'_>) -> Option<ChangeBatch> {
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<ChangeBatch>> {
         py.allow_threads(|| loop {
             match self.stream.poll(Duration::from_millis(500)) {
-                Poll::Item(b) => return Some(b.into()),
+                Poll::Item(b) => return Ok(Some(b.into())),
                 Poll::Idle => continue,
-                Poll::Closed => return None,   // None => StopIteration
+                Poll::Closed => return Ok(None),   // None => StopIteration
+                Poll::Failed(e) => return Err(pyerr(e)),   // terminal failure raises
             }
         })
     }

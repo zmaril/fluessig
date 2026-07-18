@@ -5,7 +5,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 use magnus::{function, method, prelude::*, Error, RHash, Ruby};
-use crate::core::{self, Poll, PollStream};
+use crate::core::{self};
+use fluessig_runtime::*;
 use crate::core::EntlCore;
 
 fn rberr(e: impl std::fmt::Display) -> Error {
@@ -38,6 +39,7 @@ impl Changes {
                 Poll::Item(b) => return Ok(Some(change_batch_hash(ruby, b)?)),
                 Poll::Idle => continue,
                 Poll::Closed => return Ok(None),
+                Poll::Failed(e) => return Err(rberr(e)), // terminal failure raises
             }
         }
     }

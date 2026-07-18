@@ -1,8 +1,8 @@
 //! The PyO3 (Python) template grid — one language's projection of the op shapes.
 //!
-//! straitjacket-allow-file:duplication — the per-language generators are
-//! DELIBERATELY parallel: the (language × shape) template grid is the design
-//! (see /translation.md); the truly shared pieces live in the parent module.
+//! The per-language generators are DELIBERATELY parallel: the (language × shape)
+//! template grid is the design (see /translation.md); the truly shared pieces
+//! live in the parent module.
 
 use genco::prelude::*;
 
@@ -625,12 +625,16 @@ pub fn python_binding_with_options(
                     fn __iter__(slf: PyRef<$("'_"), Self>) -> PyRef<$("'_"), Self> {
                         slf
                     }
-                    fn __next__(&self, py: Python<$("'_")>) -> Option<$(&item)> {
+                    $("// A terminal `Poll::Failed` raises a Python exception (mirrors node's")
+                    $("// default throw-mode): the sync iterator has no error-as-event surface,")
+                    $("// so a mid-stream core failure surfaces as `err(e)` out of `__next__`.")
+                    fn __next__(&self, py: Python<$("'_")>) -> PyResult<Option<$(&item)>> {
                         py.detach(|| loop {
                             match self.stream.poll(Duration::from_millis(500)) {
-                                Poll::Item(v) => return Some(v),
+                                Poll::Item(v) => return Ok(Some(v)),
                                 Poll::Idle => continue,
-                                Poll::Closed => return None, $("// None => StopIteration")
+                                Poll::Closed => return Ok(None), $("// None => StopIteration")
+                                Poll::Failed(e) => return Err(err(e)), $("// raises on failure")
                             }
                         })
                     }

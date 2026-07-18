@@ -3,6 +3,10 @@
 //! to twin columns in every dialect, and cross the op layer as the envelope
 //! carrier. Regenerate with:
 //!   cd emitter && node emit.mjs ../tests/fixtures/union.tsp
+//!
+//! straitjacket-allow-file:duplication — the per-language enum-parity assertions
+//! here are DELIBERATELY parallel to `tests/php_catalog.rs` (same fixture load,
+//! same name-only-enum setup); the cross-language token parity is the point.
 
 use fluessig::sql::{ddl, tables, Dialect};
 use fluessig::{load_catalog, TypeRef};

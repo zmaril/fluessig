@@ -28,6 +28,11 @@ pub mod advanced;
 /// families, and (tag, key) polymorphic reference sites.
 pub mod poly;
 
+/// Slice 5: the op surface — `#[fluessig::export]` on an `impl` block captures
+/// each method's shape (ctor / plain unary / stream / manual) into `api.json`,
+/// wired into `catalog!`'s `api:` root list alongside the entity catalog.
+pub mod api;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

@@ -1,4 +1,4 @@
-//! The fluessig Rust derive front end — support layer (Slices 1–4).
+//! The fluessig Rust derive front end — support layer (Slices 1–5).
 //!
 //! `derive-front-end.md` §1 splits the front end in two: a **derive → descriptor**
 //! step (pure `&'static` data, no behaviour) and a **descriptor → catalog** step
@@ -56,7 +56,13 @@
 //!   its own with `#[fluessig(cols(tag = …, key = …))]` (legacy per-site
 //!   variance, entl FINDINGS #7).
 //!
-//! Still out of scope: the op surface and spans — Slices 5–6.
+//! Slice 5 lands the **op surface** (`derive-front-end.md` §2.7): the
+//! `#[fluessig::export]` attribute macro captures a `impl` block's methods into
+//! an [`InterfaceDescriptor`] — op name, params, return, and op kind
+//! ([`OpKind`]: `ctor` / plain unary / `stream` / `manual`) — and `catalog!`'s
+//! `api:` root list lowers those into the `api.json` op layer via [`build_api`],
+//! the same file the loader validates and bindgen projects. Still out of scope:
+//! spans — Slice 6.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -71,11 +77,12 @@ pub use fluessig;
 // The derive macros and their traits share names (`Entity`, `Edge`) — they live
 // in different namespaces (macro vs type), exactly like `serde::Serialize` — so
 // a single `use fluessig_derive::{Entity, Edge};` brings in both halves.
-pub use fluessig_derive_macros::{catalog, AbstractRoot, Edge, Entity};
+pub use fluessig_derive_macros::{catalog, export, AbstractRoot, Edge, Entity};
 
+use fluessig::api::{ApiDoc, ApiInterface, ApiOp, ApiParam, ApiType, Shape};
 use fluessig::ir::{
-    Cardinality, Catalog, Entity as IrEntity, Field, RelKind, Relation, Scalar, Struct, TypeRef,
-    Versions,
+    camel, Cardinality, Catalog, Entity as IrEntity, Field, RelKind, Relation, Scalar, Struct,
+    TypeRef, Versions,
 };
 
 /// A type that describes a stored entity as pure `&'static` data. Implemented by
@@ -733,6 +740,198 @@ pub fn to_catalog_json_with_edges(
 ) -> String {
     let catalog = build_catalog_with_edges(name, version, entities, edges);
     let mut json = serde_json::to_string_pretty(&catalog).expect("catalog serializes");
+    json.push('\n');
+    json
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Slice 5 — the op surface (`api.json`)
+//
+// `derive-front-end.md` §2.7: **the impl that actually runs IS the interface**.
+// `#[fluessig::export]` on an `impl` block captures each method's shape (name,
+// params, return, op kind) into an [`InterfaceDescriptor`] — pure `&'static`
+// data, exactly like [`EntityDescriptor`] — and `catalog!`'s `api:` root list
+// lowers those descriptors into the same `api.json` the loader + bindgen already
+// consume, so declaration/implementation drift is impossible.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// A type (or unit-struct "namespace") whose `#[fluessig::export] impl` block
+/// was captured into an op interface. `#[fluessig::export]` expands to an
+/// `impl ApiExport for Self` carrying the `&'static InterfaceDescriptor`, so
+/// `catalog!`'s `api:` list can reach it as `<T as ApiExport>::DESCRIPTOR` —
+/// the op-surface twin of [`Entity`]/[`Edge`].
+pub trait ApiExport {
+    /// The descriptor the `#[fluessig::export]` macro expands to.
+    const DESCRIPTOR: &'static InterfaceDescriptor;
+}
+
+/// One op interface — the `#[fluessig::export] impl <Name>` block: its name (the
+/// `Self` type), the impl block's `///` doc, and the ops it exposes, in
+/// declaration order. Lowers to one `api.json` `ApiInterface`.
+#[derive(Debug, Clone, Copy)]
+pub struct InterfaceDescriptor {
+    /// The interface name — the `Self` type of the exported impl (`"Entl"`).
+    pub name: &'static str,
+    /// The impl block's `///` doc comment, if any.
+    pub doc: Option<&'static str>,
+    /// The captured ops, in declaration order.
+    pub ops: &'static [OpDescriptor],
+}
+
+/// One captured method: its Rust (snake_case) name, doc, op kind, params, and
+/// return type. The name/param names are camelCased at lowering to match the
+/// `api.json` op-surface convention (the TypeSpec `interface` path spells them
+/// lowerCamel too).
+#[derive(Debug, Clone, Copy)]
+pub struct OpDescriptor {
+    /// The Rust method name (snake_case); camelCased at lowering.
+    pub name: &'static str,
+    /// The method's `///` doc comment, if any.
+    pub doc: Option<&'static str>,
+    /// The op kind — `ctor` / plain unary / `stream` / `manual`.
+    pub kind: OpKind,
+    /// The method params (receiver excluded), in declaration order.
+    pub params: &'static [ParamDescriptor],
+    /// The return type as an op-surface type. A `ctor` is always `void`; a
+    /// `stream` carries its iterator's `Item` type (the per-batch type); a
+    /// `Result<T>` wrapper is transparent (unwrapped to `T`).
+    pub returns: ApiTypeDesc,
+}
+
+/// One op param: its Rust (snake_case) name (camelCased at lowering), its
+/// op-surface type, and whether it is optional (an `Option<T>` param lowers to
+/// `optional: true` carrying the *unwrapped* `T` — params use `optional`,
+/// returns use `nullable`, mirroring the TypeSpec op path).
+#[derive(Debug, Clone, Copy)]
+pub struct ParamDescriptor {
+    /// The Rust param name (snake_case); camelCased at lowering.
+    pub name: &'static str,
+    /// The param's op-surface type.
+    pub ty: ApiTypeDesc,
+    /// `Option<T>` param ⇒ `true`.
+    pub optional: bool,
+}
+
+/// The four op kinds (`derive-front-end.md` §2.7). Mirrors [`fluessig::api::Shape`];
+/// kept as its own front-end enum so the descriptor layer doesn't depend on the
+/// loader's serde types at the capture site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpKind {
+    /// `#[fluessig(ctor)]` — a constructor. Returns `void` on the op surface.
+    Ctor,
+    /// An untagged method — a plain unary op (the default).
+    Unary,
+    /// `#[fluessig(stream)]` — returns an iterator/stream; bindgen maps it to a
+    /// JS async iterator / Python generator / Ruby Enumerator.
+    Stream,
+    /// `#[fluessig(manual)]` — recorded in `api.json` but hand-written per
+    /// binding (not auto-bound).
+    Manual,
+}
+
+/// An op-surface type as pure `&'static` data — the front-end twin of
+/// [`fluessig::api::ApiType`], recursive through `&'static` so it lives in a
+/// `const`. Lowered to `ApiType` by [`lower_api_type`].
+#[derive(Debug, Clone, Copy)]
+pub enum ApiTypeDesc {
+    /// A scalar name (`"string"`, `"int64"`, `"boolean"`, `"bytes"`, `"void"`, …).
+    Scalar(&'static str),
+    /// A model/DTO or entity reference (`{ "model": name }`).
+    Model(&'static str),
+    /// An enum reference (`{ "enum": name }`).
+    Enum(&'static str),
+    /// A list of the inner type (`{ "list": inner }`).
+    List(&'static ApiTypeDesc),
+    /// A nullable inner type (`{ "nullable": inner }`) — an `Option<T>` return.
+    Nullable(&'static ApiTypeDesc),
+}
+
+/// Lower an [`ApiTypeDesc`] to the loader's [`fluessig::api::ApiType`].
+fn lower_api_type(t: &ApiTypeDesc) -> ApiType {
+    match t {
+        ApiTypeDesc::Scalar(s) => ApiType::Scalar((*s).to_string()),
+        ApiTypeDesc::Model(m) => ApiType::Model {
+            model: (*m).to_string(),
+        },
+        ApiTypeDesc::Enum(e) => ApiType::Enum {
+            r#enum: (*e).to_string(),
+        },
+        ApiTypeDesc::List(inner) => ApiType::List {
+            list: Box::new(lower_api_type(inner)),
+        },
+        ApiTypeDesc::Nullable(inner) => ApiType::Nullable {
+            nullable: Box::new(lower_api_type(inner)),
+        },
+    }
+}
+
+/// Lower one captured op to an [`fluessig::api::ApiOp`]. The name + param names
+/// camelCase to the op-surface convention; `readonly`/`destructive`/`stream_error`
+/// stay at their (unset) defaults — those op annotations are not part of Slice 5.
+fn lower_op(op: &OpDescriptor) -> ApiOp {
+    ApiOp {
+        name: camel(op.name),
+        doc: op.doc.map(str::to_string),
+        shape: match op.kind {
+            OpKind::Ctor => Shape::Ctor,
+            OpKind::Unary => Shape::Unary,
+            OpKind::Stream => Shape::Stream,
+            OpKind::Manual => Shape::Manual,
+        },
+        readonly: false,
+        destructive: false,
+        stream_error: None,
+        params: op
+            .params
+            .iter()
+            .map(|p| ApiParam {
+                name: camel(p.name),
+                ty: lower_api_type(&p.ty),
+                optional: p.optional.then_some(true),
+            })
+            .collect(),
+        returns: lower_api_type(&op.returns),
+        bindings: Default::default(),
+    }
+}
+
+/// Collect op-interface descriptors into the in-memory [`fluessig::api::ApiDoc`]
+/// — the same op-layer IR the loader validates and bindgen projects. `name`
+/// becomes the api `source`; `version` stamps the emitter field (as the catalog
+/// path does). `models` / `unions` stay empty: Slice 5 is the OP surface — the
+/// DTO/model layer (`#[derive(Record)]`, and materialising referenced entities
+/// as flattened api models the way the TypeSpec path does) is a separate concern.
+pub fn build_api(name: &str, version: &str, interfaces: &[&'static InterfaceDescriptor]) -> ApiDoc {
+    ApiDoc {
+        fluessig: Versions {
+            format: fluessig::FORMAT_VERSION,
+            emitter: Some(format!("fluessig-derive/{version}")),
+            compiler: None,
+        },
+        source: Some(name.to_string()),
+        models: Vec::new(),
+        unions: Vec::new(),
+        interfaces: interfaces
+            .iter()
+            .map(|i| ApiInterface {
+                name: i.name.to_string(),
+                doc: i.doc.map(str::to_string),
+                ops: i.ops.iter().map(lower_op).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Render `api.json` — pretty-printed with a trailing newline, matching the
+/// TypeSpec emitter's `JSON.stringify(…, null, 2) + "\n"` and the catalog
+/// printer's convention.
+pub fn to_api_json(
+    name: &str,
+    version: &str,
+    interfaces: &[&'static InterfaceDescriptor],
+) -> String {
+    let api = build_api(name, version, interfaces);
+    let mut json = serde_json::to_string_pretty(&api).expect("api serializes");
     json.push('\n');
     json
 }

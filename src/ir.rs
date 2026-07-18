@@ -311,6 +311,26 @@ impl Catalog {
     }
 }
 
+/// snake_case → lowerCamelCase (`gh_pull_requests` → `ghPullRequests`). The
+/// inverse spelling of [`snake`]; the op surface (`api.json`) names ops and
+/// params in lowerCamel, matching the TypeSpec `interface` path, so a
+/// snake_case Rust method/param lowers through here.
+pub fn camel(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut up = false;
+    for c in s.chars() {
+        if c == '_' {
+            up = true;
+        } else if up {
+            out.push(c.to_ascii_uppercase());
+            up = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// lowerCamel / PascalCase → snake_case (no pluralization — the dumb rule).
 pub fn snake(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);

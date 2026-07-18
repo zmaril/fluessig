@@ -232,3 +232,57 @@ fn union_validation_rejects_the_bad_shapes() {
     .unwrap_err();
     assert!(err.contains("duplicate variant tag"), "{err}");
 }
+
+#[test]
+fn stream_op_projects_async_iterable_and_retains_poll_cursor() {
+    // `Watch.events` (shape stream, returns `Event`) must project BOTH surfaces:
+    // the primary JS async-iterable (napi 3 `#[napi(async_iterator)]` +
+    // `impl AsyncGenerator`) AND the retained `next()` poll cursor. The class is
+    // `Events`, the item `Event`. Substrings match the rustfmt'd emission.
+    let api = fluessig::api::load_api(API).unwrap();
+    let enums: Vec<(String, Vec<String>)> = Vec::new();
+    let node = fluessig::bindgen::node_binding(&api, &enums, None);
+
+    // async-iterable surface
+    assert!(
+        node.contains("#[napi(async_iterator)]"),
+        "async-iterator attribute:\n{node}"
+    );
+    assert!(
+        node.contains("impl AsyncGenerator for Events"),
+        "AsyncGenerator impl on the stream class:\n{node}"
+    );
+    assert!(
+        node.contains("type Yield = Event;"),
+        "yields the item type:\n{node}"
+    );
+    // blocking poll driven off the runtime so the event loop is never blocked
+    assert!(
+        node.contains("napi::tokio::task::spawn_blocking"),
+        "spawn_blocking drives the blocking poll:\n{node}"
+    );
+
+    // cancellation / close(): default no-op on the trait, called on complete + drop
+    assert!(
+        node.contains("fn close(&self) {}"),
+        "default no-op close on the trait:\n{node}"
+    );
+    assert!(
+        node.contains("stream.close();"),
+        "cancellation closes the core stream:\n{node}"
+    );
+    assert!(
+        node.contains("impl Drop for Events"),
+        "Drop backstop closes the core stream:\n{node}"
+    );
+
+    // retained poll cursor still present
+    assert!(
+        node.contains("AsyncTask<NextEventsTask>"),
+        "poll cursor retained:\n{node}"
+    );
+    assert!(
+        node.contains("#[napi(ts_return_type = \"Promise<Event | null>\")]"),
+        "poll cursor keeps its nullable Promise ts type:\n{node}"
+    );
+}

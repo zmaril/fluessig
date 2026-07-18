@@ -19,9 +19,10 @@ pub fn node_binding(
 ) -> String {
     let mut t: rust::Tokens = quote! {
         $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
+        use std::future::Future;
         use std::sync::Arc;
         use std::time::Duration;
-        use napi::bindgen_prelude::{AsyncTask, Result};
+        use napi::bindgen_prelude::{AsyncGenerator, AsyncTask, Result};
         use napi::{Env, Task};
         use napi_derive::napi;
 
@@ -39,6 +40,10 @@ pub fn node_binding(
         $("/// The one sync primitive: a blocking, timeout-bounded poll.")
         pub trait PollStream<T>: Send + Sync {
             fn poll(&self, timeout: Duration) -> Poll<T>;
+            $("/// Release core-side resources. Called on async-iterator cancellation")
+            $("/// (`return()`), on completion, and on drop. Must be idempotent; the")
+            $("/// default is a no-op so poll-only cores need no change.")
+            fn close(&self) {}
         }
     };
     if api_uses_bytes(api) {
@@ -175,11 +180,78 @@ pub fn node_binding(
             let (item, ts_item) = ty(api, &op.returns);
             quote_in! { t =>
                 $['\r']
-                $(format!("/// Poll-based stream from `{}.{}` — call `next()` until it resolves null.", i.name, op.name))
-                #[napi]
+                $(format!("/// Event stream from `{}.{}`.", i.name, op.name))
+                $("///")
+                $("/// Primary surface: a JS async-iterable — `for await (const ev of stream)`.")
+                $("/// Retained surface: `next()` poll cursor (resolves `null` at end) for")
+                $("/// consumers that cannot use async iteration or napi's `tokio_rt` feature.")
+                #[napi(async_iterator)]
                 pub struct $(&class) {
                     stream: Arc<dyn PollStream<$(&item)>>,
                 }
+
+                $("// Async-iterable surface (Symbol.asyncIterator). napi drives one pull at a")
+                $("// time, so backpressure is one in-flight poll by construction.")
+                #[napi]
+                impl AsyncGenerator for $(&class) {
+                    type Yield = $(&item);
+                    type Next = ();
+                    type Return = ();
+
+                    fn next(
+                        &mut self,
+                        _value: Option<Self::Next>,
+                    ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+                        let stream = self.stream.clone();
+                        async move {
+                            loop {
+                                let s = stream.clone();
+                                $("// Drive the blocking poll off the async runtime so the Node")
+                                $("// event loop is never blocked.")
+                                let poll = napi::tokio::task::spawn_blocking(move || {
+                                    s.poll(Duration::from_millis(500))
+                                })
+                                .await
+                                .map_err(err)?;
+                                $("// Terminal-event seam (dual error model, gap 4). gap-4 adds ONE terminal")
+                                $("// arm here, `Poll::Failed(msg)`, mapping to the errors-as-events contract:")
+                                $("// build the configured terminal error event (default pi shape")
+                                $("// `{ type: \"error\", reason, error }`, schema-configurable via @streamError),")
+                                $("// `return Ok(Some(<error event>))`, then the next pull returns `Ok(None)` to")
+                                $("// complete — it must NEVER reject/throw. Errors thrown at stream construction")
+                                $("// (ctor/unary) stay thrown napi errors; rich typed error events arrive as")
+                                $("// normal `Poll::Item` union values and need no new machinery here.")
+                                match poll {
+                                    Poll::Item(v) => return Ok(Some(v)),
+                                    Poll::Idle => continue,
+                                    Poll::Closed => return Ok(None),
+                                }
+                            }
+                        }
+                    }
+
+                    fn complete(
+                        &mut self,
+                        _value: Option<Self::Return>,
+                    ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+                        $("// Cancellation: consumer called `return()` (e.g. `break` in for-await).")
+                        let stream = self.stream.clone();
+                        async move {
+                            stream.close();
+                            Ok(None)
+                        }
+                    }
+                }
+
+                $("// Backstop: guarantee core-side close even if the consumer neither")
+                $("// exhausts nor cancels the iterator.")
+                impl Drop for $(&class) {
+                    fn drop(&mut self) {
+                        self.stream.close();
+                    }
+                }
+
+                $("// Retained poll cursor: `next(): Promise<Item | null>`.")
                 pub struct Next$(&class)Task {
                     stream: Arc<dyn PollStream<$(&item)>>,
                 }

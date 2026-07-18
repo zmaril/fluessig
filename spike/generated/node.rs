@@ -6,7 +6,8 @@ use std::time::Duration;
 use napi::bindgen_prelude::{AsyncGenerator, AsyncTask, Result};
 use napi::{Env, Task};
 use napi_derive::napi;
-use crate::core::{self, Poll, PollStream};
+use crate::core::{self};
+use fluessig_runtime::*;
 use crate::core::EntlCore;
 
 fn err(e: impl std::fmt::Display) -> napi::Error { napi::Error::from_reason(e.to_string()) }
@@ -85,18 +86,14 @@ impl AsyncGenerator for Changes {
                 })
                 .await
                 .map_err(err)?;
-                // Terminal-event seam (dual error model, gap 4). gap-4 adds ONE terminal
-                // arm here, `Poll::Failed(msg)`, mapping to the errors-as-events contract:
-                // build the configured terminal error event (default pi shape
-                // `{ type: "error", reason, error }`, schema-configurable via @streamError),
-                // `return Ok(Some(<error event>))`, then the next pull returns `Ok(None)` to
-                // complete — it must NEVER reject/throw. Errors thrown at stream construction
-                // (ctor/unary) stay thrown napi errors; rich typed error events arrive as
-                // normal `Poll::Item` union values and need no new machinery here.
+                // DEFAULT throw-mode: a terminal `Poll::Failed` REJECTS the pull (native
+                // TS — the `for await` loop throws). The opt-in error-as-event model
+                // (`@streamError`) is a per-op alternative on the real backend.
                 match poll {
                     Poll::Item(b) => return Ok(Some(b.into())),
                     Poll::Idle => continue,
                     Poll::Closed => return Ok(None),
+                    Poll::Failed(e) => return Err(err(e)),
                 }
             }
         }
@@ -134,6 +131,7 @@ impl Task for NextChangesTask {
                 Poll::Item(b) => return Ok(Some(b.into())),
                 Poll::Idle => continue,
                 Poll::Closed => return Ok(None),
+                Poll::Failed(e) => return Err(err(e)),
             }
         }
     }

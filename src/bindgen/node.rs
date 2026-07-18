@@ -255,35 +255,11 @@ pub fn node_binding_with_options(
         $(&prelude_import)
         use napi::{Env, Task};
         use napi_derive::napi;
+        $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
+        use fluessig_runtime::{Poll, PollStream};
 
         fn err(e: impl std::fmt::Display) -> napi::Error {
             napi::Error::from_reason(e.to_string())
-        }
-
-        $("/// One poll result from a core stream (the sync primitive every stream shape dresses).")
-        $("/// `Failed(msg)` is the SECOND error model. Once a stream has started, pi's")
-        $("/// contract flips: a request/model/runtime failure is no longer thrown — it is")
-        $("/// ENCODED IN THE STREAM as a terminal error EVENT and the stream then completes")
-        $("/// (packages/ai/src/types.ts: after `stream()` returns, failures ride the stream,")
-        $("/// never reject the promise). `Failed` is the generic path for a core that surfaces")
-        $("/// a mid-stream failure as a Rust `Result`/error; a core that instead emits its")
-        $("/// terminal error as a normal union VARIANT of the element type flows through")
-        $("/// `Item` unchanged — both satisfy \"never throw after stream start\". The message")
-        $("/// is owned (`String`) so the enum stays trivially `Send` and dependency-free.")
-        pub enum Poll<T> {
-            Item(T),
-            Idle,
-            Closed,
-            Failed(String),
-        }
-
-        $("/// The one sync primitive: a blocking, timeout-bounded poll.")
-        pub trait PollStream<T>: Send + Sync {
-            fn poll(&self, timeout: Duration) -> Poll<T>;
-            $("/// Release core-side resources. Called on async-iterator cancellation")
-            $("/// (`return()`), on completion, and on drop. Must be idempotent; the")
-            $("/// default is a no-op so poll-only cores need no change.")
-            fn close(&self) {}
         }
     };
     if api_uses_bytes(api) {

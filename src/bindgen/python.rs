@@ -457,22 +457,13 @@ pub fn python_binding_with_options(
         use std::sync::Arc;
         use std::time::Duration;
         use pyo3::exceptions::PyRuntimeError;
+        use pyo3::exceptions::PyStopAsyncIteration;
         use pyo3::prelude::*;
+        $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
+        use fluessig_runtime::{Poll, PollStream};
 
         fn err(e: impl std::fmt::Display) -> PyErr {
             PyRuntimeError::new_err(e.to_string())
-        }
-
-        $("/// One poll result from a core stream (the sync primitive every stream shape dresses).")
-        pub enum Poll<T> {
-            Item(T),
-            Idle,
-            Closed,
-        }
-
-        $("/// The one sync primitive: a blocking, timeout-bounded poll.")
-        pub trait PollStream<T>: Send + Sync {
-            fn poll(&self, timeout: Duration) -> Poll<T>;
         }
     };
     if api_uses_bytes(api) {
@@ -618,35 +609,247 @@ pub fn python_binding_with_options(
         let trait_name = format!("{}Core", i.name);
         let impl_path = format!("crate::core_impl::{}Impl", i.name);
 
-        // stream classes: python iterators (GIL released while polling)
+        // stream classes: python async-iterables + a retained sync poll cursor.
+        // The error model is chosen per-op by `stream_error`, mirroring node:
+        // `None` (unannotated) = DEFAULT throw-mode — a mid-stream `Poll::Failed`
+        // RAISES (the awaited `__anext__` / sync `__next__` propagates `err(e)`);
+        // `Some(shape)` = opt-in error-AS-EVENT — the failure is yielded as a
+        // terminal `<Op>ErrorEvent` then the stream latches closed (NEVER raises).
+        // `Poll::Failed(String)` is the core→binding channel in BOTH modes.
         for op in i.ops.iter().filter(|o| o.shape == Shape::Stream) {
             let class = pascal(&op.name);
             class_names.push(class.clone());
             let (item, _) = python_ty(api, opts, &op.returns);
-            quote_in! { t =>
-                $['\r']
-                $(format!("/// Poll-based stream from `{}.{}`, dressed as a Python iterator.", i.name, op.name))
-                #[pyclass]
-                pub struct $(&class) {
-                    stream: Box<dyn PollStream<$(&item)>>,
-                }
-                #[pymethods]
-                impl $(&class) {
-                    fn __iter__(slf: PyRef<$("'_"), Self>) -> PyRef<$("'_"), Self> {
-                        slf
-                    }
-                    fn __next__(&self, py: Python<$("'_")>) -> Option<$(&item)> {
-                        py.detach(|| loop {
-                            match self.stream.poll(Duration::from_millis(500)) {
-                                Poll::Item(v) => return Some(v),
-                                Poll::Idle => continue,
-                                Poll::Closed => return None, $("// None => StopIteration")
+            match &op.stream_error {
+                // ── DEFAULT throw-mode (unannotated): raise on Poll::Failed ──
+                None => {
+                    quote_in! { t =>
+                        $['\r']
+                        $(format!("/// Event stream from `{}.{}`, dressed as a Python async-iterable.", i.name, op.name))
+                        $("///")
+                        $("/// Primary surface: `async for ev in stream` (`__aiter__`/`__anext__`),")
+                        $("/// driven off the asyncio loop. Retained surface: the sync iterator")
+                        $("/// (`__iter__`/`__next__`) poll cursor for consumers not on asyncio.")
+                        $("///")
+                        $("/// DEFAULT error model = RAISE: a mid-stream core failure (`Poll::Failed`)")
+                        $("/// maps to `Err(err(e))`, so the awaited `__anext__` (and the sync")
+                        $("/// `__next__`) propagates a Python exception. Annotate the op")
+                        $("/// `@streamError` to opt into the error-AS-EVENT model instead.")
+                        #[pyclass]
+                        pub struct $(&class) {
+                            $("// Arc, not Box: the async future is `'static` and moves the handle")
+                            $("// across `.await` / `spawn_blocking`.")
+                            stream: Arc<dyn PollStream<$(&item)>>,
+                        }
+                        #[pymethods]
+                        impl $(&class) {
+                            fn __iter__(slf: PyRef<$("'_"), Self>) -> PyRef<$("'_"), Self> {
+                                slf
                             }
-                        })
-                    }
+                            $("// Retained SYNC poll cursor. A terminal `Poll::Failed` raises a Python")
+                            $("// exception (throw-mode): the sync iterator has no error-as-event")
+                            $("// surface, so a mid-stream core failure surfaces as `err(e)`.")
+                            fn __next__(&self, py: Python<$("'_")>) -> PyResult<Option<$(&item)>> {
+                                py.detach(|| loop {
+                                    match self.stream.poll(Duration::from_millis(500)) {
+                                        Poll::Item(v) => return Ok(Some(v)),
+                                        Poll::Idle => continue,
+                                        Poll::Closed => return Ok(None), $("// None => StopIteration")
+                                        Poll::Failed(e) => return Err(err(e)), $("// raises on failure")
+                                    }
+                                })
+                            }
+                            fn __aiter__(slf: PyRef<$("'_"), Self>) -> PyRef<$("'_"), Self> {
+                                slf
+                            }
+                            $("// Async-iterable surface. `future_into_py` bridges the tokio future")
+                            $("// onto the running asyncio loop (needs the consumer's")
+                            $("// `pyo3-async-runtimes` tokio runtime — the pyo3 analogue of napi's")
+                            $("// `tokio_rt`). The blocking poll is driven off the loop via")
+                            $("// `spawn_blocking`, so the asyncio event loop is never blocked.")
+                            fn __anext__<$("'p")>(&self, py: Python<$("'p")>) -> PyResult<Bound<$("'p"), PyAny>> {
+                                let stream = self.stream.clone();
+                                pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                                    loop {
+                                        let s = stream.clone();
+                                        let poll = tokio::task::spawn_blocking(move || {
+                                            s.poll(Duration::from_millis(500))
+                                        })
+                                        .await
+                                        .map_err(err)?;
+                                        $("// throw-mode: a mid-stream failure REJECTS the awaited pull.")
+                                        match poll {
+                                            Poll::Item(v) => return Ok(v),
+                                            Poll::Idle => continue,
+                                            Poll::Closed => return Err(PyStopAsyncIteration::new_err(())),
+                                            Poll::Failed(e) => return Err(err(e)),
+                                        }
+                                    }
+                                })
+                            }
+                        }
+
+                        $("// Backstop: guarantee core-side close even if the consumer neither")
+                        $("// exhausts nor cancels the iterator. PyO3 has no async-generator")
+                        $("// `complete()` hook (unlike napi), so `Drop` is the only cancellation seam.")
+                        impl Drop for $(&class) {
+                            fn drop(&mut self) {
+                                self.stream.close();
+                            }
+                        }
+                        $['\n']
+                    };
                 }
-                $['\n']
-            };
+                // ── OPT-IN event-mode (@streamError): error-as-event ──
+                Some(se) => {
+                    let err_evt = format!("{class}ErrorEvent");
+                    class_names.push(err_evt.clone());
+                    // each field: a `#[pyo3(name = …)]` attr only when the python
+                    // getter name diverges from the rust ident (the tag always
+                    // needs one — `type_` never equals its python name), mirroring
+                    // node's `ev_field` js_name logic and the python DTO idiom.
+                    let ev_field = |rust: &str, py: &str| {
+                        if py == rust {
+                            format!("pub {rust}: String,")
+                        } else {
+                            format!("#[pyo3(name = {py:?})] pub {rust}: String,")
+                        }
+                    };
+                    let ev_fields: Vec<String> = vec![
+                        ev_field("type_", &se.tag_name),
+                        ev_field("reason", &se.reason_name),
+                        ev_field("error", &se.error_name),
+                    ];
+                    let tag_value = format!("{:?}", se.tag_value);
+                    quote_in! { t =>
+                        $['\r']
+                        $(format!("/// The terminal error event yielded (NEVER raised) when `{}.{}`'s core stream", i.name, op.name))
+                        $("/// fails after it has started — the opt-in `@streamError` (error-as-event)")
+                        $("/// model. A read-only carrier for a `Poll::Failed`; normal typed error")
+                        $("/// variants ride out through `Poll::Item` and need no such struct.")
+                        #[pyclass(get_all)]
+                        #[derive(Clone)]
+                        pub struct $(&err_evt) {
+                            $(for f in &ev_fields join ($['\r']) => $f)
+                        }
+                        $(format!("/// Event stream from `{}.{}`, dressed as a Python async-iterable.", i.name, op.name))
+                        $("///")
+                        $("/// Primary surface: `async for ev in stream` (`__aiter__`/`__anext__`),")
+                        $("/// driven off the asyncio loop. Retained surface: the sync iterator")
+                        $("/// (`__iter__`/`__next__`) poll cursor for consumers not on asyncio.")
+                        $("///")
+                        $("/// `@streamError` error model = error-AS-EVENT: a mid-stream core failure")
+                        $(format!("/// is yielded as a terminal `{err_evt}` and the stream then completes —"))
+                        $("/// it NEVER raises. A started stream never restarts, so once the event has")
+                        $("/// been handed out the `closed` latch makes every later pull end the stream.")
+                        #[pyclass]
+                        pub struct $(&class) {
+                            $("// Arc, not Box: the async future is `'static` and moves the handle")
+                            $("// across `.await` / `spawn_blocking`.")
+                            stream: Arc<dyn PollStream<$(&item)>>,
+                            $("// latched once the terminal error event is handed out — a started")
+                            $("// stream never restarts, so every subsequent pull ends the stream.")
+                            closed: Arc<std::sync::atomic::AtomicBool>,
+                        }
+                        #[pymethods]
+                        impl $(&class) {
+                            fn __iter__(slf: PyRef<$("'_"), Self>) -> PyRef<$("'_"), Self> {
+                                slf
+                            }
+                            $("// Retained SYNC poll cursor. event-mode: a mid-stream failure is")
+                            $(format!("// handed out AS the terminal `{err_evt}` value (never raised), then the"))
+                            $("// latch makes the next call end the stream. The heterogeneous yield")
+                            $("// (item | error-event) erases to a Python object.")
+                            fn __next__(&self, py: Python<$("'_")>) -> PyResult<Option<Py<PyAny>>> {
+                                use std::sync::atomic::Ordering;
+                                if self.closed.load(Ordering::SeqCst) {
+                                    return Ok(None); $("// None => StopIteration")
+                                }
+                                loop {
+                                    let poll = py.detach(|| self.stream.poll(Duration::from_millis(500)));
+                                    match poll {
+                                        Poll::Item(v) => {
+                                            return Ok(Some(v.into_pyobject(py).map_err(err)?.into_any().unbind()));
+                                        }
+                                        Poll::Idle => continue,
+                                        Poll::Closed => return Ok(None),
+                                        Poll::Failed(e) => {
+                                            self.closed.store(true, Ordering::SeqCst);
+                                            let ev = $(&err_evt) {
+                                                type_: $(&tag_value).into(),
+                                                reason: "error".into(),
+                                                error: e,
+                                            };
+                                            return Ok(Some(ev.into_pyobject(py).map_err(err)?.into_any().unbind()));
+                                        }
+                                    }
+                                }
+                            }
+                            fn __aiter__(slf: PyRef<$("'_"), Self>) -> PyRef<$("'_"), Self> {
+                                slf
+                            }
+                            $("// Async-iterable surface. `future_into_py` bridges the tokio future")
+                            $("// onto the running asyncio loop (needs the consumer's")
+                            $("// `pyo3-async-runtimes` tokio runtime — the pyo3 analogue of napi's")
+                            $("// `tokio_rt`). event-mode: a mid-stream failure is ENCODED IN THE")
+                            $(format!("// STREAM as a terminal `{err_evt}` and NEVER raises; the future resolves"))
+                            $("// to a `Py<PyAny>` because the item and the error event are distinct types.")
+                            fn __anext__<$("'p")>(&self, py: Python<$("'p")>) -> PyResult<Bound<$("'p"), PyAny>> {
+                                let stream = self.stream.clone();
+                                let closed = self.closed.clone();
+                                pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                                    use std::sync::atomic::Ordering;
+                                    $("// A started stream never restarts: once the terminal error event")
+                                    $("// has been handed out the latch is set, so every later pull ends.")
+                                    if closed.load(Ordering::SeqCst) {
+                                        return Err(PyStopAsyncIteration::new_err(()));
+                                    }
+                                    loop {
+                                        let s = stream.clone();
+                                        let poll = tokio::task::spawn_blocking(move || {
+                                            s.poll(Duration::from_millis(500))
+                                        })
+                                        .await
+                                        .map_err(err)?;
+                                        match poll {
+                                            Poll::Item(v) => {
+                                                return Python::attach(|py| {
+                                                    Ok(v.into_pyobject(py).map_err(err)?.into_any().unbind())
+                                                });
+                                            }
+                                            Poll::Idle => continue,
+                                            Poll::Closed => return Err(PyStopAsyncIteration::new_err(())),
+                                            Poll::Failed(e) => {
+                                                $("// latch closed so the next pull ends the stream, then hand the")
+                                                $("// failure out AS A VALUE — never a raised exception.")
+                                                closed.store(true, Ordering::SeqCst);
+                                                return Python::attach(|py| {
+                                                    let ev = $(&err_evt) {
+                                                        type_: $(&tag_value).into(),
+                                                        reason: "error".into(),
+                                                        error: e,
+                                                    };
+                                                    Ok(ev.into_pyobject(py).map_err(err)?.into_any().unbind())
+                                                });
+                                            }
+                                        }
+                                    }
+                                })
+                            }
+                        }
+
+                        $("// Backstop: guarantee core-side close even if the consumer neither")
+                        $("// exhausts nor cancels the iterator. PyO3 has no async-generator")
+                        $("// `complete()` hook (unlike napi), so `Drop` is the only cancellation seam.")
+                        impl Drop for $(&class) {
+                            fn drop(&mut self) {
+                                self.stream.close();
+                            }
+                        }
+                        $['\n']
+                    };
+                }
+            }
         }
 
         if has_ctor {
@@ -696,12 +899,24 @@ pub fn python_binding_with_options(
                     },
                     Shape::Stream => {
                         let class = pascal(&op.name);
+                        // The `closed` latch field exists only in event-mode
+                        // (`@streamError`); default throw-mode streams have no latch.
+                        let closed_init = if op.stream_error.is_some() {
+                            "closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),"
+                        } else {
+                            ""
+                        };
                         quote_in! { methods =>
                             $['\r']
+                            $("// pre-start boundary: building the stream (setup/validation) always")
+                            $("// RAISES on a core Err — independent of the stream's error model.")
                             #[pyo3(signature = ($(&signature)))]
                             fn $(&name)(&self, $(&fn_params)) -> PyResult<$(&class)> {
                                 $prelude
-                                Ok($(&class) { stream: self.core.$(&name)($(&args)).map_err(err)? })
+                                Ok($(&class) {
+                                    stream: Arc::from(self.core.$(&name)($(&args)).map_err(err)?),
+                                    $closed_init
+                                })
                             }
                         }
                     }

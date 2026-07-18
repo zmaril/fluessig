@@ -68,23 +68,13 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
         use std::sync::Arc;
         use std::time::Duration;
         use ext_php_rs::prelude::*;
+        $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
+        use fluessig_runtime::{Poll, PollStream};
 
         $("/// A core-layer failure becomes a thrown PHP exception (PHP is synchronous,")
         $("/// so a fallible op returns `PhpResult` and ext-php-rs raises on `Err`).")
         fn err(e: impl std::fmt::Display) -> PhpException {
             PhpException::default(e.to_string())
-        }
-
-        $("/// One poll result from a core stream (the sync primitive every stream shape dresses).")
-        pub enum Poll<T> {
-            Item(T),
-            Idle,
-            Closed,
-        }
-
-        $("/// The one sync primitive: a blocking, timeout-bounded poll.")
-        pub trait PollStream<T>: Send + Sync {
-            fn poll(&self, timeout: Duration) -> Poll<T>;
         }
     };
     if api_uses_bytes(api) {
@@ -242,13 +232,17 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                 }
                 #[php_impl]
                 impl $(&class) {
-                    $("/// The next item, or null once the stream is exhausted.")
-                    pub fn next(&self) -> Option<$(&item)> {
+                    $("/// The next item, or null once the stream is exhausted. A terminal")
+                    $("/// `Poll::Failed` throws a PHP exception (mirrors node's default")
+                    $("/// throw-mode): the sync cursor has no error-as-event surface, so a")
+                    $("/// mid-stream core failure surfaces as `err(e)` out of `next()`.")
+                    pub fn next(&self) -> PhpResult<Option<$(&item)>> {
                         loop {
                             match self.stream.poll(Duration::from_millis(500)) {
-                                Poll::Item(v) => return Some(v),
+                                Poll::Item(v) => return Ok(Some(v)),
                                 Poll::Idle => continue,
-                                Poll::Closed => return None, $("// null ends iteration")
+                                Poll::Closed => return Ok(None), $("// null ends iteration")
+                                Poll::Failed(e) => return Err(err(e)), $("// throws on failure")
                             }
                         }
                     }

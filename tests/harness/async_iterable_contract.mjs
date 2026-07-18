@@ -81,6 +81,18 @@ function makeStream(source) {
   };
 }
 
+// Poll-script fixture constructors — keep the object literals in one place so
+// each case reads as data, not repeated boilerplate.
+const item = (value) => ({ kind: "item", value });
+const closed = { kind: "closed" };
+
+// Wire a case: a fake poll source over `script`, the mock stream on top, and a
+// sink array for what `for await` observes.
+function wire(script) {
+  const source = makeSource(script);
+  return { source, stream: makeStream(source), seen: [] };
+}
+
 let failures = 0;
 function pass(name) {
   console.log(`PASS: ${name}`);
@@ -94,15 +106,8 @@ function fail(name, err) {
 // Case (a): for-await consumes all events IN ORDER and stops at done.
 async function caseOrder() {
   const name = "for-await consumes all events in order and stops at done";
-  const source = makeSource([
-    { kind: "item", value: "a" },
-    { kind: "idle" }, // idle is transparently skipped
-    { kind: "item", value: "b" },
-    { kind: "item", value: "c" },
-    { kind: "closed" },
-  ]);
-  const stream = makeStream(source);
-  const seen = [];
+  // idle polls are transparently skipped between items.
+  const { source, stream, seen } = wire([item("a"), { kind: "idle" }, item("b"), item("c"), closed]);
   for await (const ev of stream) seen.push(ev);
   assert.deepStrictEqual(seen, ["a", "b", "c"], "events arrive in order");
   assert.strictEqual(source.closeCount(), 0, "natural exhaustion does not close via return()");
@@ -112,14 +117,7 @@ async function caseOrder() {
 // Case (b): early `break` triggers return() -> core close() exactly once.
 async function caseBreak() {
   const name = "early break calls core close() exactly once and stops cleanly";
-  const source = makeSource([
-    { kind: "item", value: "a" },
-    { kind: "item", value: "b" },
-    { kind: "item", value: "c" },
-    { kind: "closed" },
-  ]);
-  const stream = makeStream(source);
-  const seen = [];
+  const { source, stream, seen } = wire([item("a"), item("b"), item("c"), closed]);
   for await (const ev of stream) {
     seen.push(ev);
     if (ev === "b") break; // cancellation
@@ -133,12 +131,7 @@ async function caseBreak() {
 async function caseError() {
   const name = "source error rejects awaited next() so for-await throws";
   const boom = new Error("poll source exploded");
-  const source = makeSource([
-    { kind: "item", value: "a" },
-    { kind: "failed", error: boom },
-  ]);
-  const stream = makeStream(source);
-  const seen = [];
+  const { stream, seen } = wire([item("a"), { kind: "failed", error: boom }]);
   let threw = null;
   try {
     for await (const ev of stream) seen.push(ev);

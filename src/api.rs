@@ -30,6 +30,11 @@ pub struct ApiUnion {
     pub name: String,
     #[serde(default)]
     pub doc: Option<String>,
+    /// Per-union discriminant field name for structured projection (format 1+).
+    /// Absent in existing fixtures — `None` falls back to the backend-global tag
+    /// field, reproducing prior behavior byte-for-byte.
+    #[serde(default)]
+    pub tag_field: Option<String>,
     pub variants: Vec<ApiUnionVariant>,
     /// Per-language export-name / package / module pins for this union symbol
     /// (see [`SymbolBinding`]). Empty ⇒ every backend's default rule.

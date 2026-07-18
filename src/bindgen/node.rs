@@ -6,7 +6,7 @@
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, Shape};
+use crate::api::{ApiDoc, ApiType, ApiUnion, Shape};
 
 use super::*;
 
@@ -16,19 +16,243 @@ use super::*;
 /// (`#[napi(js_name = …)]` on fields, `#[napi(value = …)]` on enum tokens).
 const LANG: &str = "node";
 
-/// Generate the napi (Node) binding: DTO structs, enums, core traits, per-op
-/// AsyncTasks, stream classes, free functions, and the handle class.
-///
-/// `enums` is the shared [`EnumDesc`] form; each variant's wire token comes from
-/// [`variant_token`] (a `node` pin wins, then the neutral `Variant.value`, then
-/// `to_lowercase()` — byte-identical to the un-pinned emission).
+/// napi's `Either` helper caps at `Either26` (`Either` = 2, `Either3`..=`Either26`).
+/// A union with more variants than this falls back to the JSON envelope carrier.
+const MAX_EITHER_ARITY: usize = 26;
+
+/// Backend options for the node (napi) generator. The 3-arg [`node_binding`]
+/// threads `NodeOptions::default()`, whose [`UnionProjection::default`] is now
+/// structured tagged-object projection (`Either{N}`); pass an explicit
+/// [`UnionProjection::Envelope`] to opt back into the historical JSON-string
+/// carrier.
+#[derive(Default, Clone)]
+pub struct NodeOptions {
+    /// How union return values and nested union DTO fields are lowered.
+    pub union_projection: UnionProjection,
+    /// When set, the package's public typings are fronted by this hand-written
+    /// `.d.ts` (napi collapses literal tags to `type: string` and can't express
+    /// `A | B`). The generated file carries an external-typings banner and omits
+    /// the inline `ts_return_type` hints on union-typed symbols so napi's own
+    /// `.d.ts` doesn't fight the external one.
+    pub external_dts: Option<String>,
+}
+
+/// A union eligible for structured projection (2..=26 variants), else `None`.
+fn structured_union<'a>(api: &'a ApiDoc, name: &str) -> Option<&'a ApiUnion> {
+    api.unions.iter().find(|u| u.name == name).filter(|u| {
+        let n = u.variants.len();
+        (2..=MAX_EITHER_ARITY).contains(&n)
+    })
+}
+
+/// napi's `Either` family name for an arity: 2 → `Either`, 3..=26 → `Either{n}`.
+fn either_name(n: usize) -> String {
+    if n == 2 {
+        "Either".to_string()
+    } else {
+        format!("Either{n}")
+    }
+}
+
+/// The exact set of `Either{N}` arities the structured projection will emit, so
+/// the prelude imports precisely those (napi's 2-arity is `Either`, 3..=26 are
+/// `Either3`..`Either26`). Importing an arity that never appears would trip a
+/// consumer's `-D warnings` on the unused import, so we walk every type position
+/// that goes through [`node_ty`] (DTO fields, op returns / stream items — union
+/// params ride the shared envelope `String` and never project) and collect the
+/// arities actually produced. Empty in envelope mode.
+fn either_arities(api: &ApiDoc, opts: &NodeOptions) -> std::collections::BTreeSet<usize> {
+    let mut set = std::collections::BTreeSet::new();
+    if !matches!(opts.union_projection, UnionProjection::Structured { .. }) {
+        return set;
+    }
+    fn walk(api: &ApiDoc, t: &ApiType, set: &mut std::collections::BTreeSet<usize>) {
+        match t {
+            ApiType::Union { union } => {
+                if let Some(u) = structured_union(api, union) {
+                    set.insert(u.variants.len());
+                }
+            }
+            ApiType::List { list } => walk(api, list, set),
+            ApiType::Nullable { nullable } => walk(api, nullable, set),
+            _ => {}
+        }
+    }
+    for m in &api.models {
+        for f in &m.fields {
+            walk(api, &f.ty, &mut set);
+        }
+    }
+    for i in &api.interfaces {
+        for op in &i.ops {
+            walk(api, &op.returns, &mut set);
+        }
+    }
+    set
+}
+
+/// Node's `<Interface>Core` traits: the shared [`emit_core_traits_with`] spine
+/// driven with node's structured return mapping ([`node_ty`]) instead of the
+/// envelope [`ty`], so a union-returning op's core-trait signature matches its
+/// napi `Task::Output` (`Either{N}<…>`) and `compute`'s unwrapped passthrough
+/// type-checks. This is the sole node divergence: union *params* still ride the
+/// shared envelope `String`, matching the handle methods and tasks. In envelope
+/// mode `node_ty` delegates to `ty`, so the output is byte-identical to the
+/// language default.
+fn emit_core_traits_node(t: &mut rust::Tokens, api: &ApiDoc, opts: &NodeOptions) {
+    emit_core_traits_with(t, api, |op| node_ty(api, opts, &op.returns).0);
+}
+
+/// The node `(rust, ts)` spelling of a type, applying structured union
+/// projection when [`NodeOptions::union_projection`] asks for it. Delegates to
+/// the shared [`ty`] for everything else, so envelope mode is byte-identical to
+/// the historical output.
+fn node_ty(api: &ApiDoc, opts: &NodeOptions, t: &ApiType) -> (String, String) {
+    match (t, &opts.union_projection) {
+        (ApiType::Union { union }, UnionProjection::Structured { .. }) => {
+            match structured_union(api, union) {
+                Some(u) => {
+                    let names: Vec<String> = u
+                        .variants
+                        .iter()
+                        .map(|v| tagged_variant_name(&u.name, &v.tag))
+                        .collect();
+                    let either = either_name(u.variants.len());
+                    (format!("{either}<{}>", names.join(", ")), names.join(" | "))
+                }
+                // too many (or too few) variants → envelope fallback
+                None => ty(api, t),
+            }
+        }
+        (ApiType::List { list }, _) => {
+            let (r, s) = node_ty(api, opts, list);
+            (format!("Vec<{r}>"), format!("{s}[]"))
+        }
+        (ApiType::Nullable { nullable }, _) => {
+            let (r, s) = node_ty(api, opts, nullable);
+            (format!("Option<{r}>"), format!("{s} | null"))
+        }
+        _ => ty(api, t),
+    }
+}
+
+/// Emit the per-variant tagged `#[napi(object)]` structs plus the literal-set
+/// `From<VariantModel>` conversions for every structurally-projected union.
+/// Nothing is emitted in envelope mode, keeping historical output unchanged.
+fn emit_union_variants(t: &mut rust::Tokens, api: &ApiDoc, opts: &NodeOptions) {
+    let UnionProjection::Structured { tag_field } = &opts.union_projection else {
+        return;
+    };
+    for u in &api.unions {
+        let n = u.variants.len();
+        if !(2..=MAX_EITHER_ARITY).contains(&n) {
+            quote_in! { *t =>
+                $['\r']
+                $(format!("// note: union {} has {n} variants; napi Either caps at {MAX_EITHER_ARITY} — kept as the JSON envelope carrier.", u.name))
+            };
+            continue;
+        }
+        let field = u.tag_field.clone().unwrap_or_else(|| tag_field.clone());
+        let ident = tag_ident(&field);
+        for v in &u.variants {
+            let sname = tagged_variant_name(&u.name, &v.tag);
+            let ApiType::Model { model } = &v.ty else {
+                quote_in! { *t =>
+                    $['\r']
+                    $(format!("// note: union {} variant {} is not a model ref — no tagged struct emitted.", u.name, v.tag))
+                };
+                continue;
+            };
+            let Some(m) = api.models.iter().find(|m| &m.name == model) else {
+                continue;
+            };
+            // struct fields: the tag first, then the variant model's real fields
+            let mut struct_fields: Vec<rust::Tokens> = Vec::new();
+            struct_fields.push(quote!($(format!("pub {ident}: String,"))));
+            let mut from_fields: Vec<String> = Vec::new();
+            from_fields.push(format!("{ident}: {:?}.into(),", v.tag));
+            for f in &m.fields {
+                let (r, _) = node_ty(api, opts, &f.ty);
+                let r = if f.nullable {
+                    format!("Option<{r}>")
+                } else {
+                    r
+                };
+                let fname = snake(&f.name);
+                struct_fields.push(quote!($(format!("pub {fname}: {r},"))));
+                from_fields.push(format!("{fname}: v.{fname},"));
+            }
+            quote_in! { *t =>
+                $['\r']
+                $(format!("/// `{}` union variant `{}` — the tag `{}` rides as the `{}` literal.", u.name, v.tag, v.tag, field))
+                #[napi(object)]
+                #[derive(Clone)]
+                pub struct $(&sname) {
+                    $(for f in &struct_fields join ($['\r']) => $f)
+                }
+                impl From<$model> for $(&sname) {
+                    fn from(v: $model) -> Self {
+                        Self {
+                            $(for f in &from_fields join ($['\r']) => $f)
+                        }
+                    }
+                }
+                $['\n']
+            };
+        }
+    }
+}
+
+/// The `#[napi(ts_return_type = "…")]` attribute line for a return position, or
+/// an empty string when the external-`.d.ts` mode suppresses it for a union.
+fn ts_return_attr(
+    api: &ApiDoc,
+    opts: &NodeOptions,
+    ret: &ApiType,
+    wrap: impl Fn(&str) -> String,
+) -> String {
+    if opts.external_dts.is_some() && matches!(ret, ApiType::Union { .. }) {
+        return String::new();
+    }
+    let (_, ts) = node_ty(api, opts, ret);
+    format!("#[napi(ts_return_type = {:?})]", wrap(&ts))
+}
+
+/// Generate the napi (Node) binding with default options: structured
+/// tagged-object union projection (`Either{N}`, tag field `"type"`) and no
+/// external `.d.ts`. A thin wrapper over [`node_binding_with_options`]; pass an
+/// explicit [`UnionProjection::Envelope`] to opt into the JSON-string carrier.
 pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+    node_binding_with_options(api, enums, banner_note, &NodeOptions::default())
+}
+
+/// Generate the napi (Node) binding: DTO structs, enums, core traits, per-op
+/// AsyncTasks, stream classes, free functions, and the handle class. `opts`
+/// selects union projection (envelope vs. structured `Either{N}`) and the
+/// external-`.d.ts` mode.
+pub fn node_binding_with_options(
+    api: &ApiDoc,
+    enums: &[EnumDesc],
+    banner_note: Option<&str>,
+    opts: &NodeOptions,
+) -> String {
+    // Structured projection emits bare `Either{N}<…>` in DTO fields, op returns,
+    // and `Task::Output`; napi's prelude glob is NOT imported, so the exact
+    // arities used must be named here (a real napi compile fails E0425 otherwise).
+    // Envelope mode produces no `Either`, so the set is empty and the import line
+    // is byte-identical to before.
+    let either_import: String = either_arities(api, opts)
+        .iter()
+        .map(|&n| format!(", {}", either_name(n)))
+        .collect();
+    let prelude_import =
+        format!("use napi::bindgen_prelude::{{AsyncGenerator, AsyncTask, Result{either_import}}};");
     let mut t: rust::Tokens = quote! {
         $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
         use std::future::Future;
         use std::sync::Arc;
         use std::time::Duration;
-        use napi::bindgen_prelude::{AsyncGenerator, AsyncTask, Result};
+        $(&prelude_import)
         use napi::{Env, Task};
         use napi_derive::napi;
 
@@ -170,7 +394,8 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
             .fields
             .iter()
             .map(|f| {
-                let (r, _) = ty(api, &f.ty);
+                // structured projection reaches nested union-typed DTO fields too
+                let (r, _) = node_ty(api, opts, &f.ty);
                 let r = if f.nullable {
                     format!("Option<{r}>")
                 } else {
@@ -201,7 +426,10 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         };
     }
 
-    emit_core_traits(&mut t, api);
+    // per-variant tagged structs (+ literal-set conversions) for structured unions
+    emit_union_variants(&mut t, api, opts);
+
+    emit_core_traits_node(&mut t, api, opts);
 
     // ── per-interface surface ──
     for i in &api.interfaces {
@@ -219,11 +447,13 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         // is the core→binding channel in BOTH modes; only the mapping differs.
         for op in i.ops.iter().filter(|o| o.shape == Shape::Stream) {
             let class = pascal(&op.name);
-            let (item, ts_item) = ty(api, &op.returns);
+            let (item, _) = node_ty(api, opts, &op.returns);
             match &op.stream_error {
                 // ── DEFAULT throw-mode (unannotated): native-TS reject ──
                 None => {
-                    let ret_ts = format!("Promise<{ts_item} | null>");
+                    let next_attr = ts_return_attr(api, opts, &op.returns, |ts| {
+                        format!("Promise<{ts} | null>")
+                    });
                     quote_in! { t =>
                         $['\r']
                         $(format!("/// Event stream from `{}.{}`.", i.name, op.name))
@@ -323,7 +553,7 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                         }
                         #[napi]
                         impl $(&class) {
-                            #[napi(ts_return_type = $(quoted(ret_ts)))]
+                            $next_attr
                             pub fn next(&self) -> AsyncTask<Next$(&class)Task> {
                                 AsyncTask::new(Next$(&class)Task { stream: self.stream.clone() })
                             }
@@ -349,7 +579,9 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                         ev_field("reason", &se.reason_name),
                         ev_field("error", &se.error_name),
                     ];
-                    let ret_ts = format!("Promise<{ts_item} | {err_evt} | null>");
+                    let next_attr = ts_return_attr(api, opts, &op.returns, |ts| {
+                        format!("Promise<{ts} | {err_evt} | null>")
+                    });
                     quote_in! { t =>
                         $['\r']
                         $(format!("/// The terminal error event yielded (NEVER thrown) when `{}.{}`'s core stream", i.name, op.name))
@@ -499,7 +731,7 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                         }
                         #[napi]
                         impl $(&class) {
-                            #[napi(ts_return_type = $(quoted(ret_ts)))]
+                            $next_attr
                             pub fn next(&self) -> AsyncTask<Next$(&class)Task> {
                                 AsyncTask::new(Next$(&class)Task { stream: self.stream.clone(), closed: self.closed.clone() })
                             }
@@ -514,7 +746,7 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         for op in i.ops.iter().filter(|o| o.shape == Shape::Unary) {
             let task = format!("{}Task", pascal(&op.name));
             let name = snake(&op.name);
-            let (ret, _) = ty(api, &op.returns);
+            let (ret, _) = node_ty(api, opts, &op.returns);
             let fields: Vec<String> = param_sig(api, op)
                 .iter()
                 .map(|(n, r)| format!("{n}: {r},"))
@@ -586,10 +818,11 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                     },
                     Shape::Unary => {
                         let task = format!("{}Task", pascal(&op.name));
-                        let (_, ts_ret) = ty(api, &op.returns);
+                        let attr =
+                            ts_return_attr(api, opts, &op.returns, |ts| format!("Promise<{ts}>"));
                         quote_in! { methods =>
                             $['\r']
-                            #[napi(ts_return_type = $(quoted(format!("Promise<{ts_ret}>"))))]
+                            $attr
                             pub fn $(&name)(&self, $(&ps)) -> AsyncTask<$(&task)> {
                                 AsyncTask::new($(&task) { core: self.core.clone(), $(&names) })
                             }
@@ -651,7 +884,7 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                     continue;
                 }
                 let task = format!("{}Task", pascal(&op.name));
-                let (_, ts_ret) = ty(api, &op.returns);
+                let attr = ts_return_attr(api, opts, &op.returns, |ts| format!("Promise<{ts}>"));
                 let params: Vec<String> = param_sig(api, op)
                     .iter()
                     .map(|(n, r)| format!("{n}: {r}"))
@@ -669,7 +902,7 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                 }
                 quote_in! { t =>
                     $['\r']
-                    #[napi(ts_return_type = $(quoted(format!("Promise<{ts_ret}>"))))]
+                    $attr
                     pub fn $(&name)($(&ps)) -> AsyncTask<$(&task)> {
                         AsyncTask::new($(&task) { $(&names) })
                     }
@@ -681,8 +914,18 @@ pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
 
     let src = api.source.as_deref().unwrap_or("the fluessig catalog");
     let body = t.to_file_string().expect("rust renders");
+    // external-.d.ts mode: the package's public typings are fronted by a
+    // hand-written file (napi collapses literal tags to `type: string`), so mark
+    // the generated file and rely on the suppressed union `ts_return_type` hints.
+    let ext_note = match &opts.external_dts {
+        Some(p) => format!(
+            "//! external-typings: public .d.ts fronted by `{p}` — napi union typings suppressed.\n"
+        ),
+        None => String::new(),
+    };
     crate::rustfmt::format(format!(
-        "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}#![allow(clippy::all)]\n\n{body}",
-        note_line(banner_note)
+        "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}{}#![allow(clippy::all)]\n\n{body}",
+        note_line(banner_note),
+        ext_note
     ))
 }

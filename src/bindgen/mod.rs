@@ -21,16 +21,78 @@ mod python;
 mod ruby;
 
 pub use mcp::{manifest as mcp_manifest, mcp_module};
-pub use node::node_binding;
+pub use node::{node_binding, node_binding_with_options, NodeOptions};
 pub use php::php_binding;
-pub use python::python_binding;
-pub use ruby::ruby_binding;
+pub use python::{python_binding, python_binding_with_options, PythonOptions};
+pub use ruby::{ruby_binding, ruby_binding_with_options, RubyOptions};
 
 use std::collections::BTreeMap;
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiOp, ApiType, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, Shape};
+
+/// How a backend lowers a tagged discriminated union crossing the FFI. Shared by
+/// every structured-capable backend (node/python/ruby); the default is
+/// [`UnionProjection::Structured`] with tag field `"type"` — the user is the sole
+/// consumer of the generated surface and wants tagged objects by default. The
+/// [`UnionProjection::Envelope`] carrier stays reachable as an explicit opt-out
+/// (`--*-union-mode envelope`), reproducing the historical JSON-string output.
+#[derive(Clone)]
+pub enum UnionProjection {
+    /// The historical carrier: the union rides as its JSON envelope text
+    /// `{"kind": tag, "payload": body}` typed as `String`.
+    Envelope,
+    /// Structured projection: each union lowers to per-variant tagged objects
+    /// (napi `Either{N}` / PyO3 `#[pyclass]` variants / Magnus wrapped classes)
+    /// that embed the discriminant as a literal `tag_field` (per-union override
+    /// via [`ApiUnion::tag_field`]).
+    Structured { tag_field: String },
+}
+
+impl Default for UnionProjection {
+    fn default() -> Self {
+        UnionProjection::Structured {
+            tag_field: "type".into(),
+        }
+    }
+}
+
+/// The per-variant tagged type name for a union variant, e.g. `EventPayload` +
+/// tag `message` → `EventPayloadMessage`. Shared by every structured backend.
+pub(super) fn tagged_variant_name(union_name: &str, tag: &str) -> String {
+    format!("{union_name}{}", pascal(tag))
+}
+
+/// The Rust enum name a structured union projects its return/field type to, e.g.
+/// `EventPayload` → `EventPayloadUnion` (python/ruby wrap the tagged variants in
+/// a convertible enum; node uses napi's `Either{N}` instead).
+pub(super) fn union_enum_name(union_name: &str) -> String {
+    format!("{union_name}Union")
+}
+
+/// The discriminant field ident, raw-escaped when the configured tag field is a
+/// Rust keyword (the pi default `type` → `r#type`). Shared by every structured
+/// backend so the literal-set and getter idents agree.
+pub(super) fn tag_ident(tag_field: &str) -> String {
+    // The keywords a tag field could realistically collide with.
+    const KEYWORDS: &[&str] = &[
+        "type", "match", "move", "ref", "self", "impl", "fn", "enum", "struct", "mod", "as", "in",
+        "box", "async", "await", "dyn",
+    ];
+    let n = snake(tag_field);
+    if KEYWORDS.contains(&n.as_str()) {
+        format!("r#{n}")
+    } else {
+        n
+    }
+}
+
+/// The effective discriminant field name for a union: its per-union
+/// [`ApiUnion::tag_field`] override, else the backend-global `tag_field`.
+pub(super) fn union_tag_field(u: &ApiUnion, global: &str) -> String {
+    u.tag_field.clone().unwrap_or_else(|| global.to_string())
+}
 
 /// Re-exported so backends (and the php backend when `php.rs` lands its own
 /// consumer) reach the pinning type through `crate::bindgen`.
@@ -328,37 +390,40 @@ fn param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The `(snake name, "n: ty, …" param list, rust return type)` triple every
-/// per-op emission loop opens with.
-fn op_sig(api: &ApiDoc, op: &ApiOp) -> (String, String, String) {
-    let name = snake(&op.name);
-    let params: Vec<String> = param_sig(api, op)
-        .iter()
-        .map(|(n, r)| format!("{n}: {r}"))
-        .collect();
-    let (ret, _) = ty(api, &op.returns);
-    (name, params.join(", "), ret)
-}
-
-/// The `<Interface>Core` traits — identical across every language's generated
-/// file (each binding implements them once via `entl_core::binding_core_impls!`).
-fn emit_core_traits(t: &mut rust::Tokens, api: &ApiDoc) {
+/// Emit the `<Interface>Core` traits, resolving each op's return type via
+/// `ret_ty`. This is the single shared spine every language's generated file
+/// drives (the traits are implemented once per binding via
+/// `entl_core::binding_core_impls!`): python/ruby and the node envelope default
+/// pass the shared [`ty`] (a union rides as its `String` envelope), while the
+/// node structured projection passes [`node::node_ty`] so a union return is the
+/// `Either{N}<…>` that matches its napi `Task::Output`. `has_ctor` selects the
+/// stateful `&self` receiver for non-ctor ops.
+pub(super) fn emit_core_traits_with(
+    t: &mut rust::Tokens,
+    api: &ApiDoc,
+    mut ret_ty: impl FnMut(&ApiOp) -> String,
+) {
     for i in &api.interfaces {
         let trait_name = format!("{}Core", i.name);
+        let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
         let mut methods: Vec<rust::Tokens> = Vec::new();
         for op in &i.ops {
             if op.shape == Shape::Manual {
                 continue;
             }
-            let (name, ps, ret) = op_sig(api, op);
+            let name = snake(&op.name);
+            let ps = param_sig(api, op)
+                .iter()
+                .map(|(n, r)| format!("{n}: {r}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ret = ret_ty(op);
             let sig = match op.shape {
                 Shape::Ctor => format!("fn {name}({ps}) -> anyhow::Result<Self>"),
                 Shape::Stream => {
                     format!("fn {name}(&self, {ps}) -> anyhow::Result<Box<dyn PollStream<{ret}>>>")
                 }
-                _ if i.ops.iter().any(|o| o.shape == Shape::Ctor) => {
-                    format!("fn {name}(&self, {ps}) -> anyhow::Result<{ret}>")
-                }
+                _ if has_ctor => format!("fn {name}(&self, {ps}) -> anyhow::Result<{ret}>"),
                 _ => format!("fn {name}({ps}) -> anyhow::Result<{ret}>"),
             };
             methods.push(quote!($sig;));
@@ -372,4 +437,10 @@ fn emit_core_traits(t: &mut rust::Tokens, api: &ApiDoc) {
             $['\n']
         };
     }
+}
+
+/// The `<Interface>Core` traits with the shared envelope return mapping — the
+/// carrier python/ruby and the node envelope default all share.
+fn emit_core_traits(t: &mut rust::Tokens, api: &ApiDoc) {
+    emit_core_traits_with(t, api, |op| ty(api, &op.returns).0);
 }

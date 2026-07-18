@@ -22,7 +22,13 @@ use std::collections::BTreeMap;
 
 use crate::api::{ApiDoc, ApiOp, ApiType, Shape};
 
-use super::snake;
+use super::{pinned_name, snake, EnumDesc};
+
+/// This backend's language slug — the key it reads out of every symbol's
+/// `bindings` map via the shared [`pinned_name`] resolver. MCP hardcodes no pin;
+/// its rename levers are the DTO field's serde `rename` and the matching
+/// manifest property name.
+const LANG: &str = "mcp";
 
 /// Does this type reach a binary carrier (`bytes` / `ArrowBatch`), directly or
 /// through model fields? Such ops don't project (MCP tools speak JSON).
@@ -69,7 +75,7 @@ fn projects(api: &ApiDoc, op: &ApiOp) -> bool {
 /// A type's JSON Schema; model defs collect into `defs` (per-tool `$defs`).
 fn schema_of(
     api: &ApiDoc,
-    enums: &[(String, Vec<String>)],
+    enums: &[EnumDesc],
     t: &ApiType,
     defs: &mut BTreeMap<String, Value>,
 ) -> Value {
@@ -85,10 +91,16 @@ fn schema_of(
             _ => json!({"type": "string"}), // semantic scalars ride as strings
         },
         ApiType::Enum { r#enum } => {
-            let variants: Vec<&str> = enums
+            // Each member's schema token is an `mcp` pin when present, else the
+            // catalog name verbatim (the pre-pinning behaviour, byte-identical).
+            let variants: Vec<String> = enums
                 .iter()
                 .find(|(n, _)| n == r#enum)
-                .map(|(_, vs)| vs.iter().map(String::as_str).collect())
+                .map(|(_, vs)| {
+                    vs.iter()
+                        .map(|v| pinned_name(&v.bindings, LANG).unwrap_or_else(|| v.name.clone()))
+                        .collect()
+                })
                 .unwrap_or_default();
             json!({"type": "string", "enum": variants})
         }
@@ -109,9 +121,13 @@ fn schema_of(
                 let mut props = Map::new();
                 let mut required = Vec::new();
                 for f in &m.fields {
-                    props.insert(f.name.clone(), schema_of(api, enums, &f.ty, defs));
+                    // The wire property name is an `mcp` pin when present, else
+                    // the field name verbatim (byte-identical un-pinned). The
+                    // generated serde DTO carries the matching `rename`.
+                    let key = pinned_name(&f.bindings, LANG).unwrap_or_else(|| f.name.clone());
+                    props.insert(key.clone(), schema_of(api, enums, &f.ty, defs));
                     if !f.nullable {
-                        required.push(Value::String(f.name.clone()));
+                        required.push(Value::String(key));
                     }
                 }
                 let mut def = Map::new();
@@ -163,7 +179,7 @@ fn schema_of(
 /// The MCP tools manifest: `{"tools": [{name, description, inputSchema,
 /// annotations}, …]}`. `enums` carries the catalog's enum variants (the api
 /// layer doesn't) — same convention as the binding generators.
-pub fn manifest(api: &ApiDoc, enums: &[(String, Vec<String>)]) -> Value {
+pub fn manifest(api: &ApiDoc, enums: &[EnumDesc]) -> Value {
     let mut tools = Vec::new();
     for i in &api.interfaces {
         for op in i.ops.iter().filter(|op| projects(api, op)) {
@@ -296,11 +312,7 @@ fn projected_models(api: &ApiDoc) -> Vec<&crate::api::ApiModel> {
 
 /// The generated Rust MCP module: serde DTOs + `<Iface>Mcp` traits +
 /// `dispatch()` + the embedded `TOOLS_JSON` manifest.
-pub fn mcp_module(
-    api: &ApiDoc,
-    enums: &[(String, Vec<String>)],
-    banner_note: Option<&str>,
-) -> String {
+pub fn mcp_module(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
     let src = api.source.as_deref().unwrap_or("the fluessig catalog");
     let mut out = String::new();
     out.push_str(&format!(
@@ -328,8 +340,22 @@ pub fn mcp_module(
             } else {
                 ty
             };
-            if f.nullable {
-                out.push_str("    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n");
+            // An `mcp` pin fixes the exact wire name via serde `rename`,
+            // overriding the struct-level `rename_all = "camelCase"`; combined
+            // with the nullable default/skip when both apply. Un-pinned ⇒ the
+            // original attrs, byte-identical.
+            let pin = pinned_name(&f.bindings, LANG);
+            match (&pin, f.nullable) {
+                (Some(nm), true) => out.push_str(&format!(
+                    "    #[serde(rename = \"{nm}\", default, skip_serializing_if = \"Option::is_none\")]\n"
+                )),
+                (Some(nm), false) => {
+                    out.push_str(&format!("    #[serde(rename = \"{nm}\")]\n"))
+                }
+                (None, true) => out.push_str(
+                    "    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n",
+                ),
+                (None, false) => {}
             }
             out.push_str(&format!("    pub {}: {},\n", snake(&f.name), ty));
         }

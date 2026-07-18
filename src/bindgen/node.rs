@@ -10,13 +10,19 @@ use crate::api::{ApiDoc, Shape};
 
 use super::*;
 
+/// This backend's language slug — the key it reads out of every symbol's
+/// `bindings` map through the shared [`pinned_name`] / [`variant_token`]
+/// resolver. Node hardcodes no pin; it only knows its own rename syntax
+/// (`#[napi(js_name = …)]` on fields, `#[napi(value = …)]` on enum tokens).
+const LANG: &str = "node";
+
 /// Generate the napi (Node) binding: DTO structs, enums, core traits, per-op
 /// AsyncTasks, stream classes, free functions, and the handle class.
-pub fn node_binding(
-    api: &ApiDoc,
-    enums: &[(String, Vec<String>)],
-    banner_note: Option<&str>,
-) -> String {
+///
+/// `enums` is the shared [`EnumDesc`] form; each variant's wire token comes from
+/// [`variant_token`] (a `node` pin wins, then the neutral `Variant.value`, then
+/// `to_lowercase()` — byte-identical to the un-pinned emission).
+pub fn node_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
     let mut t: rust::Tokens = quote! {
         $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
         use std::future::Future;
@@ -77,10 +83,19 @@ pub fn node_binding(
             continue;
         }
         // each line: `#[napi(value = "<wire token>")] <PascalVariant>,` — the
-        // token is the catalog member lowercased, identical to ruby's `wire()`.
+        // token comes from the shared resolver (a `node` pin wins, then the
+        // neutral `Variant.value`, else the catalog member lowercased, identical
+        // to ruby's `wire()`). The Rust variant ident is always `pascal(name)`,
+        // independent of the wire token.
         let vs: Vec<String> = variants
             .iter()
-            .map(|v| format!("#[napi(value = {:?})] {},", v.to_lowercase(), pascal(v)))
+            .map(|v| {
+                format!(
+                    "#[napi(value = {:?})] {},",
+                    variant_token(v, LANG),
+                    pascal(&v.name)
+                )
+            })
             .collect();
         // napi 3 no longer auto-derives Clone/Copy on #[napi] enums; option
         // structs that carry one derive Clone, so the enum must too.
@@ -161,8 +176,18 @@ pub fn node_binding(
                 } else {
                     r
                 };
+                // The Rust field ident is always `snake(&f.name)` (a valid
+                // ident); a `node` pin puts the exact JS spelling ONLY in a
+                // `#[napi(js_name = "…")]` attr, overriding napi's default
+                // snake→camel casing. Un-pinned ⇒ no attr, byte-identical.
                 let n = snake(&f.name);
-                quote!(pub $n: $r,)
+                match pinned_name(&f.bindings, LANG) {
+                    Some(js) => {
+                        let attr = format!("#[napi(js_name = {js:?})]");
+                        quote!($attr pub $n: $r,)
+                    }
+                    None => quote!(pub $n: $r,),
+                }
             })
             .collect();
         quote_in! { t =>

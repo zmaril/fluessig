@@ -3,8 +3,36 @@
 //! names `arrow`, TypeSpec, or any store — those are all codecs over this
 //! (notes/design.md §2/§4).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// A per-symbol, per-language projection override — the language-agnostic core
+/// of export-name (and package/module) pinning. Keyed in a symbol's `bindings`
+/// map by language slug (`node`/`python`/`ruby`/`php`/`mcp`), it lets a
+/// conformance surface reproduce a target's EXACT emitted spellings and
+/// grouping rather than re-deriving them from a per-backend casing rule.
+///
+/// Every field is optional and the whole struct is `#[serde(default)]`: a
+/// symbol with no entry for a language (or an entry that leaves a field `None`)
+/// falls back to that backend's own rule, so an empty `bindings` map is
+/// byte-identical to the pre-pinning emission. Resolved through
+/// [`crate::bindgen::pinned_name`] / [`crate::bindgen::pinned_group`].
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+pub struct SymbolBinding {
+    /// The exact emitted symbol name for this language (napi `js_name`, pyo3
+    /// `name`, the Ruby method / enum wire string, the ext-php-rs `#[rename]`,
+    /// the MCP serde `rename`). `None` ⇒ the backend's default casing.
+    pub name: Option<String>,
+    /// The exact target package name this symbol groups under (verbatim; e.g. a
+    /// scoped npm name). Feeds the opt-in fan-out; ignored in single-file mode.
+    pub package: Option<String>,
+    /// The exact nested module path this symbol groups under (verbatim; e.g. a
+    /// deep `../src/*` path). Feeds the opt-in fan-out; ignored single-file.
+    pub module: Option<String>,
+}
 
 /// A whole lowered catalog: the model layer of one authored `.tsp`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +106,11 @@ pub struct Variant {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
+    /// Per-language export-name pins for this enum token (see [`SymbolBinding`]).
+    /// A `bindings[lang].name` takes precedence over `value` (the neutral wire
+    /// fallback); empty ⇒ the backend's default token rule.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, SymbolBinding>,
 }
 
 /// A stored entity (table / collection / node label). `abstract` + `extends`

@@ -70,9 +70,15 @@
                 },
                 "nullable": {
                   "type": "boolean"
+                },
+                "bindings": {
+                  "$ref": "#/$defs/bindings"
                 }
               }
             }
+          },
+          "bindings": {
+            "$ref": "#/$defs/bindings"
           }
         }
       }
@@ -115,6 +121,9 @@
                 }
               }
             }
+          },
+          "bindings": {
+            "$ref": "#/$defs/bindings"
           }
         }
       }
@@ -216,6 +225,9 @@
                       "type": "string"
                     }
                   }
+                },
+                "bindings": {
+                  "$ref": "#/$defs/bindings"
                 }
               }
             }
@@ -225,6 +237,34 @@
     }
   },
   "$defs": {
+    "bindings": {
+      "description": "Per-symbol, per-language export-name / package / module pins, keyed by language slug (node/python/ruby/php/mcp). Empty ⇒ every backend applies its own default casing/grouping (byte-identical to no pinning).",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "package": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "module": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
     "apiType": {
       "oneOf": [
         {

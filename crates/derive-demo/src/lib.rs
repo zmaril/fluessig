@@ -23,6 +23,11 @@ pub mod graph;
 /// sharing (`#[fluessig(flatten)]`, `#[derive(Edge)]`, `#[fluessig(shares(…))]`).
 pub mod advanced;
 
+/// Slice 4: polymorphic families — `#[derive(AbstractRoot)]` generating the
+/// `<Root>Id` key enums + the `AbstractRoot` alias, scalar- and composite-keyed
+/// families, and (tag, key) polymorphic reference sites.
+pub mod poly;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

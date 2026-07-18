@@ -1,0 +1,361 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "poly_demo",
+  "scalars": [],
+  "unions": [],
+  "enums": [],
+  "entities": [
+    {
+      "name": "Repo",
+      "table": "repos",
+      "key": [
+        "id"
+      ],
+      "doc": "A repository — the single-column-keyed reference target the composite family\nkeys on.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The repo id (a path hash).",
+          "key": true
+        }
+      ]
+    },
+    {
+      "name": "GitObject",
+      "abstract": true,
+      "key": [
+        "oid"
+      ],
+      "doc": "The git-object family root (entl DESIGN §2 Layer B). `abstract_root(Commit,\nTree, Blob)` closes the leaf set and generates the key enum + the\n`AbstractRoot` alias; `tag_col` / `ref_col` spell how a polymorphic reference\nto the family names its (type, key) columns. The root carries the family key\n(`oid`) + a repo association, and is never a table of its own.",
+      "fields": [
+        {
+          "name": "oid",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "Object id — the content hash. Globally unique ⇒ the family key is `oid`.",
+          "key": true
+        },
+        {
+          "name": "repo_id",
+          "type": {
+            "k": "ref",
+            "name": "Repo",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The repo this object was seen in (an association, not a key member).",
+          "relation": {
+            "to": "Repo",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo_id"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Commit",
+      "table": "commits",
+      "extends": "GitObject",
+      "key": [],
+      "doc": "One commit — a leaf of the GitObject family. `extends` inherits the family key\n(`oid`) + columns (`repo_id`) into the `commits` table.",
+      "fields": [
+        {
+          "name": "message",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The full commit message."
+        },
+        {
+          "name": "summary",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The first line of the message."
+        }
+      ]
+    },
+    {
+      "name": "Tree",
+      "table": "trees",
+      "extends": "GitObject",
+      "key": [],
+      "doc": "A tree — a leaf with no own columns beyond the inherited family key (entl's\n`Tree` is likewise just the object identity plus its `entries` edge).",
+      "fields": []
+    },
+    {
+      "name": "Blob",
+      "table": "blobs",
+      "extends": "GitObject",
+      "key": [],
+      "doc": "A blob — a leaf carrying content metadata on top of the family key.",
+      "fields": [
+        {
+          "name": "size",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The blob size in bytes."
+        },
+        {
+          "name": "is_binary",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": false,
+          "doc": "Whether the blob is binary."
+        }
+      ]
+    },
+    {
+      "name": "GitRef",
+      "table": "git_refs",
+      "key": [
+        "id"
+      ],
+      "doc": "A git ref — a **polymorphic reference** into the GitObject family using the\nfamily-declared spelling: `target` materialises `(obj_type, obj_oid)`.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The ref id.",
+          "key": true
+        },
+        {
+          "name": "target",
+          "type": {
+            "k": "ref",
+            "name": "GitObject",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The object the ref points at — any leaf of the family. Spelled\n`(obj_type, obj_oid)` from GitObject's `tag_col` / `ref_col`.",
+          "relation": {
+            "to": "GitObject",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "obj_oid"
+            ],
+            "typeColumn": "obj_type"
+          }
+        }
+      ]
+    },
+    {
+      "name": "TreeEntry",
+      "table": "tree_entries",
+      "key": [
+        "tree_oid",
+        "name"
+      ],
+      "doc": "A tree entry — a **polymorphic reference** with a **per-site `cols(...)`\noverride** (legacy spelling `entry_type` / `child_oid`), proving the override\npath coexists with the family default.",
+      "fields": [
+        {
+          "name": "tree_oid",
+          "type": {
+            "k": "ref",
+            "name": "Tree",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The tree this entry belongs to.",
+          "key": true,
+          "relation": {
+            "to": "Tree",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "tree_oid"
+            ]
+          }
+        },
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The entry name within the tree.",
+          "key": true
+        },
+        {
+          "name": "child",
+          "type": {
+            "k": "ref",
+            "name": "GitObject",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The object this entry points at — spelled `(entry_type, child_oid)`,\noverriding the family's default `(obj_type, obj_oid)`.",
+          "relation": {
+            "to": "GitObject",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "child_oid"
+            ],
+            "typeColumn": "entry_type"
+          }
+        }
+      ]
+    },
+    {
+      "name": "GhSubject",
+      "abstract": true,
+      "key": [
+        "repo_id",
+        "number"
+      ],
+      "doc": "The PR/Issue family root — a **composite** key `(repo_id, number)`. The\ngenerated enum carries the whole key per variant:\n`GhSubjectId { GhPullRequest(Id<Repo>, i32), GhIssue(Id<Repo>, i32) }`. The\nfamily declares its reference spelling once — `tag_col = \"subject_type\"` and\n`ref_cols(number = \"subject_number\")` (the `repo_id` part keeps its name).",
+      "fields": [
+        {
+          "name": "repo_id",
+          "type": {
+            "k": "ref",
+            "name": "Repo",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The repo the subject belongs to.",
+          "key": true,
+          "relation": {
+            "to": "Repo",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo_id"
+            ]
+          }
+        },
+        {
+          "name": "number",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The subject number within the repo.",
+          "key": true
+        }
+      ]
+    },
+    {
+      "name": "GhPullRequest",
+      "table": "gh_pull_requests",
+      "extends": "GhSubject",
+      "key": [],
+      "doc": "A pull request — a leaf of the GhSubject family. `extends` inherits the\ncomposite family key `(repo_id, number)` into `gh_pull_requests`.",
+      "fields": [
+        {
+          "name": "title",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The PR title."
+        },
+        {
+          "name": "state",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The PR state (open/closed/merged)."
+        }
+      ]
+    },
+    {
+      "name": "GhIssue",
+      "table": "gh_issues",
+      "extends": "GhSubject",
+      "key": [],
+      "doc": "An issue — a leaf of the GhSubject family, sharing the same composite key.",
+      "fields": [
+        {
+          "name": "title",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The issue title."
+        }
+      ]
+    },
+    {
+      "name": "GhComment",
+      "table": "gh_comments",
+      "key": [
+        "id"
+      ],
+      "doc": "An issue/PR comment — a **polymorphic reference** into the GhSubject family\nusing the family-declared spelling: `subject` materialises\n`(subject_type, repo_id, subject_number)`.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The comment id.",
+          "key": true
+        },
+        {
+          "name": "subject",
+          "type": {
+            "k": "ref",
+            "name": "GhSubject",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The subject (PR or issue) the comment is on — a (type, key) pair.",
+          "relation": {
+            "to": "GhSubject",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo_id",
+              "subject_number"
+            ],
+            "typeColumn": "subject_type"
+          }
+        }
+      ]
+    }
+  ],
+  "relationProperties": [],
+  "valueStructs": []
+}

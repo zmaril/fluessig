@@ -14,8 +14,10 @@
 //! in the PR (`advanced.tsp`); here we guard the load and the physical
 //! projection in CI.
 
+mod common;
+use common::col;
 use fluessig::load_catalog;
-use fluessig::sql::{tables, Dialect, TableDef};
+use fluessig::sql::{tables, Dialect};
 use fluessig_derive::{
     to_catalog_json_with_edges, EdgeDescriptor, EdgeFieldDescriptor, EdgeRole, Entity,
     FieldDescriptor, FieldKind,
@@ -24,13 +26,6 @@ use fluessig_derive::{
 fn advanced() -> fluessig::ir::Catalog {
     let json = derive_demo::advanced::fluessig_catalog::to_json();
     load_catalog(&json).expect("Slice 3 derive catalog must load clean")
-}
-
-fn col<'a>(t: &'a TableDef, n: &str) -> &'a fluessig::sql::ColumnDef {
-    t.columns
-        .iter()
-        .find(|c| c.name == n)
-        .unwrap_or_else(|| panic!("column {n} missing from {}", t.name))
 }
 
 /// `#[fluessig(flatten)]` embeds the root's columns into the leaf: `commits`

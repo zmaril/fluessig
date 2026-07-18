@@ -25,3 +25,7 @@ path = "src/bin/fluessig-emit-graph.rs"
 [[bin]]
 name = "fluessig-emit-advanced"
 path = "src/bin/fluessig-emit-advanced.rs"
+
+[[bin]]
+name = "fluessig-emit-poly"
+path = "src/bin/fluessig-emit-poly.rs"

@@ -1,4 +1,4 @@
-//! The fluessig Rust derive front end — support layer (Slices 1–3).
+//! The fluessig Rust derive front end — support layer (Slices 1–4).
 //!
 //! `derive-front-end.md` §1 splits the front end in two: a **derive → descriptor**
 //! step (pure `&'static` data, no behaviour) and a **descriptor → catalog** step
@@ -34,10 +34,33 @@
 //!   and a real same-table constraint), rather than a spelling coincidence the
 //!   physical projection silently dedups.
 //!
-//! Still out of scope: polymorphism (`abstract_root`), the op surface, and spans
-//! — Slices 4–6 (`notes/derive-front-end-decisions.md`).
+//! Slice 4 lands **polymorphism** (`notes/derive-front-end-decisions.md`,
+//! Decision #3): a **family** is an abstract root + a closed set of concrete
+//! leaves that share one key, and a polymorphic reference is a (type-tag, key)
+//! column pair.
+//!
+//! * **`#[derive(AbstractRoot)]`** on a family root (with
+//!   `#[fluessig(abstract_root(Commit, Tree, Blob), tag_col = …, ref_col = …)]`)
+//!   generates a real native sum type `<Root>Id` — one variant per leaf, each
+//!   carrying the family key (heterogeneous across families: `GitObjectId`
+//!   carries a scalar `Oid`, `GhSubjectId` a composite `(Id<Repo>, i32)`) — plus
+//!   `impl AbstractRoot for <Root> { type Id = <Root>Id; }` so the conjured name
+//!   is discoverable via `<Root as AbstractRoot>::Id`. The root is also an
+//!   `Entity` (marked abstract, no table, carrying the family key).
+//! * **Leaves** declare `#[fluessig(extends = Root)]`; they lower to the catalog
+//!   `extends`, inheriting the family key + columns through the loader's
+//!   `flattened_*` (the same shape the TypeSpec `extends` path produces).
+//! * **Polymorphic references** — a field typed `<Root>Id`
+//!   ([`FieldKind::PolyReference`]) lowers to the (tag, key) column pair, spelled
+//!   from the family (`tag_col` / `ref_col` / `ref_cols`) unless the site pins
+//!   its own with `#[fluessig(cols(tag = …, key = …))]` (legacy per-site
+//!   variance, entl FINDINGS #7).
+//!
+//! Still out of scope: the op surface and spans — Slices 5–6.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 /// The engine crate, re-exported so macro-generated code can name the IR
@@ -48,7 +71,7 @@ pub use fluessig;
 // The derive macros and their traits share names (`Entity`, `Edge`) — they live
 // in different namespaces (macro vs type), exactly like `serde::Serialize` — so
 // a single `use fluessig_derive::{Entity, Edge};` brings in both halves.
-pub use fluessig_derive_macros::{catalog, Edge, Entity};
+pub use fluessig_derive_macros::{catalog, AbstractRoot, Edge, Entity};
 
 use fluessig::ir::{
     Cardinality, Catalog, Entity as IrEntity, Field, RelKind, Relation, Scalar, Struct, TypeRef,
@@ -69,6 +92,16 @@ pub trait Edge {
     const DESCRIPTOR: &'static EdgeDescriptor;
 }
 
+/// A polymorphic family root (Slice 4, Decision #3). `#[derive(AbstractRoot)]`
+/// generates the named key enum `<Root>Id` — one variant per leaf carrying the
+/// family key — and implements this trait so the generated name has a
+/// go-to-definition answer: `<Root as AbstractRoot>::Id`. The one convention to
+/// document is `abstract_root(A, B, C)` generates `<Root>Id`.
+pub trait AbstractRoot {
+    /// The generated key enum (`<Root>Id`).
+    type Id;
+}
+
 /// A typed foreign-key value: `Id<T>` stands in for `T`'s primary key at a
 /// referencing site (Slice 2). `#[derive(Entity)]` reads the `T` in a field
 /// typed `Id<T>` / `Option<Id<T>>` and lowers the field to a single foreign-key
@@ -80,6 +113,37 @@ pub trait Edge {
 /// (Row-value storage — `Id<T>` actually holding `T`'s key — is a later concern,
 /// out of scope here.)
 pub struct Id<T: ?Sized>(PhantomData<T>);
+
+// `Id<T>` is a zero-size typed marker, so it carries the standard value traits
+// *unconditionally* — a `#[derive]` would wrongly bound them on `T`, which would
+// then propagate onto every generated `<Root>Id` enum that carries an `Id<T>`
+// key part (Slice 4). Hand-written impls keep the enums `Debug`/`Clone`/`Eq`/
+// `Hash` regardless of the referenced entity's own traits.
+impl<T: ?Sized> Clone for Id<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: ?Sized> Copy for Id<T> {}
+impl<T: ?Sized> fmt::Debug for Id<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Id")
+    }
+}
+impl<T: ?Sized> PartialEq for Id<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl<T: ?Sized> Eq for Id<T> {}
+impl<T: ?Sized> Hash for Id<T> {
+    fn hash<H: Hasher>(&self, _: &mut H) {}
+}
+impl<T: ?Sized> Default for Id<T> {
+    fn default() -> Self {
+        Id(PhantomData)
+    }
+}
 
 /// A whole entity, captured by the derive: its model name, optional physical
 /// table override (`#[fluessig(name = "…")]`), doc comment, columns, and the
@@ -102,6 +166,27 @@ pub struct EntityDescriptor {
     /// Slice 2). Empty ⇒ a single-column target takes the referencing field name;
     /// a composite target lists a spelling per key member here.
     pub ref_cols: &'static [RefColDescriptor],
+    /// The abstract family root this entity extends (a concrete leaf), if any
+    /// (Slice 4). Lowered to the catalog `extends` — the leaf inherits the family
+    /// key + columns through the loader's `flattened_*`, so its own `key` is empty
+    /// and it never re-lists the root's columns.
+    pub extends: Option<&'static str>,
+    /// For a family root (`#[derive(AbstractRoot)]`): the closed leaf set.
+    /// Non-empty ⇒ this entity is an abstract root (`is_abstract`), has no table
+    /// of its own, and carries the family key the leaves share (Slice 4).
+    pub abstract_leaves: &'static [&'static str],
+    /// For a family root: the generated key-enum type name (`<Name>Id`), so a
+    /// polymorphic reference site typed `<Name>Id` resolves to this family.
+    pub id_enum: Option<&'static str>,
+    /// For a family root: the discriminator (type-tag) column a polymorphic
+    /// reference to the family materialises (`tag_col`). A per-site
+    /// `cols(tag = …)` overrides it.
+    pub tag_col: Option<&'static str>,
+    /// For a single-column-keyed family root: the key column a polymorphic
+    /// reference spells by default (`ref_col`). Composite families spell each key
+    /// part via [`EntityDescriptor::ref_cols`] instead; a per-site `cols(key = …)`
+    /// overrides a single-key family's spelling.
+    pub ref_col: Option<&'static str>,
 }
 
 /// One `ref_cols(field = "column")` entry: a key field of the declaring entity
@@ -153,6 +238,28 @@ pub enum FieldKind {
     /// columns are spliced in at this field's position (Slice 3). The embedding
     /// field name itself is not a column.
     Flatten(&'static EntityDescriptor),
+    /// A polymorphic family reference (Slice 4): a field typed `<Root>Id` (the
+    /// generated key enum) lowers to the (type-tag, key) column pair into the
+    /// abstract root. The enum type name resolves to the family at lowering; any
+    /// per-site `cols(tag = …, key = …)` override rides in the [`PolyRef`].
+    PolyReference(PolyRef),
+}
+
+/// A polymorphic reference site (Slice 4): the generated family key-enum named at
+/// the field, plus optional per-site column-name overrides. With no override the
+/// spelling comes from the family (`tag_col` / `ref_col` / `ref_cols`); the
+/// override exists only for legacy per-site variance (entl FINDINGS #7).
+#[derive(Debug, Clone, Copy)]
+pub struct PolyRef {
+    /// The generated key-enum type named at the site (`"GhSubjectId"`), resolved
+    /// to its family via [`EntityDescriptor::id_enum`] at lowering.
+    pub id_enum: &'static str,
+    /// `cols(tag = "…")`: a per-site discriminator column, overriding the
+    /// family's `tag_col`.
+    pub tag_col: Option<&'static str>,
+    /// `cols(key = "…")`: a per-site key column (single-key families only),
+    /// overriding the family's `ref_col`.
+    pub ref_col: Option<&'static str>,
 }
 
 /// The scalar carriers the derive understands. The mapping to the catalog's
@@ -258,17 +365,95 @@ fn expanded_fields(d: &'static EntityDescriptor) -> Vec<&'static FieldDescriptor
     out
 }
 
+/// `"GhSubjectId"` → `"GhSubject"` — the family name a generated key enum names by
+/// the `<Root>Id` convention (Decision #3). Used only as the fallback when a
+/// polymorphic reference's enum doesn't resolve to a known family, so
+/// `relation.to` still names the intended (missing) entity for the loader to flag.
+fn strip_id(id_enum: &str) -> String {
+    id_enum.strip_suffix("Id").unwrap_or(id_enum).to_string()
+}
+
+/// A descriptor's key fields (its `#[key]` members, flatten-expanded).
+fn key_fields(desc: &'static EntityDescriptor) -> Vec<&'static FieldDescriptor> {
+    expanded_fields(desc)
+        .into_iter()
+        .filter(|f| f.key)
+        .collect()
+}
+
+/// Spell a composite target's key columns as referencing sites see them: each key
+/// part via the target's `ref_cols` override, else the key field's own name.
+/// Shared by the `Id<T>` FK resolver ([`RefResolver::fk_columns`]) and the
+/// polymorphic-reference resolver ([`RefResolver::poly_reference`]) — both spell a
+/// multi-column target key the same way.
+fn spell_composite_key(desc: &EntityDescriptor, keys: &[&FieldDescriptor]) -> Vec<String> {
+    keys.iter()
+        .map(|kf| {
+            desc.ref_cols
+                .iter()
+                .find(|rc| rc.field == kf.name)
+                .map(|rc| rc.column.to_string())
+                .unwrap_or_else(|| kf.name.to_string())
+        })
+        .collect()
+}
+
 /// An index over the descriptors being lowered together, so a reference field can
 /// resolve its target's key spelling. Built once per [`build_catalog`] call.
 struct RefResolver {
     by_name: HashMap<&'static str, &'static EntityDescriptor>,
+    /// Family roots keyed by their generated key-enum name, so a
+    /// [`FieldKind::PolyReference`] typed `<Root>Id` finds its family (Slice 4).
+    by_id_enum: HashMap<&'static str, &'static EntityDescriptor>,
 }
 
 impl RefResolver {
     fn new(entities: &[&'static EntityDescriptor]) -> Self {
         RefResolver {
             by_name: entities.iter().map(|e| (e.name, *e)).collect(),
+            by_id_enum: entities
+                .iter()
+                .filter_map(|e| e.id_enum.map(|id| (id, *e)))
+                .collect(),
         }
+    }
+
+    /// Resolve a polymorphic reference to `(target family, tag column, fk
+    /// columns)` (Slice 4). The family comes from the enum name; the tag is the
+    /// per-site override else the family's `tag_col`; the fk columns are the
+    /// family key spelled by the per-site override / family `ref_col` (single
+    /// key) or each key part via the family's `ref_cols` (composite). An
+    /// unresolved enum falls back to the `Id`-stripped name so the loader reports
+    /// the missing family.
+    fn poly_reference(&self, pr: &PolyRef) -> (String, Option<String>, Vec<String>) {
+        let family = self.by_id_enum.get(pr.id_enum).copied();
+        let to = family
+            .map(|f| f.name.to_string())
+            .unwrap_or_else(|| strip_id(pr.id_enum));
+        let tag = pr
+            .tag_col
+            .or_else(|| family.and_then(|f| f.tag_col))
+            .map(str::to_string);
+        let fk = match family {
+            None => pr.ref_col.map(|c| vec![c.to_string()]).unwrap_or_default(),
+            Some(desc) => {
+                let keys = key_fields(desc);
+                if keys.len() <= 1 {
+                    // single-key family: site override → family ref_col → key name
+                    let col = pr
+                        .ref_col
+                        .or(desc.ref_col)
+                        .map(str::to_string)
+                        .or_else(|| keys.first().map(|f| f.name.to_string()))
+                        .unwrap_or_default();
+                    vec![col]
+                } else {
+                    // composite family: each key part via the family's ref_cols
+                    spell_composite_key(desc, &keys)
+                }
+            }
+        };
+        (to, tag, fk)
     }
 
     /// The foreign-key columns a field materialises to reference `target`.
@@ -284,26 +469,14 @@ impl RefResolver {
     /// A dangling target (typo'd `Id<T>`) resolves to `[field_name]`; the emitted
     /// `relation.to` still points at the missing entity, so the loader catches it.
     fn fk_columns(&self, field_name: &str, target: &str) -> Vec<String> {
-        let Some(desc) = self.by_name.get(target) else {
+        let Some(&desc) = self.by_name.get(target) else {
             return vec![field_name.to_string()];
         };
-        let key_fields: Vec<&FieldDescriptor> = expanded_fields(desc)
-            .into_iter()
-            .filter(|f| f.key)
-            .collect();
-        if key_fields.len() <= 1 {
+        let keys = key_fields(desc);
+        if keys.len() <= 1 {
             return vec![field_name.to_string()];
         }
-        key_fields
-            .iter()
-            .map(|kf| {
-                desc.ref_cols
-                    .iter()
-                    .find(|rc| rc.field == kf.name)
-                    .map(|rc| rc.column.to_string())
-                    .unwrap_or_else(|| kf.name.to_string())
-            })
-            .collect()
+        spell_composite_key(desc, &keys)
     }
 
     /// The FK columns of a reference, with any `shares(col, …)` override applied
@@ -353,6 +526,25 @@ fn lower_field(f: &FieldDescriptor, resolver: &RefResolver) -> Field {
             };
             (ty, Some(rel))
         }
+        FieldKind::PolyReference(pr) => {
+            let (to, type_column, fk) = resolver.poly_reference(&pr);
+            let ty = TypeRef::Ref {
+                name: to.clone(),
+                entity: true,
+            };
+            let rel = Relation {
+                to,
+                cardinality: Cardinality::One,
+                kind: RelKind::Association,
+                properties: None,
+                table: None,
+                fk_columns: Some(fk),
+                type_column,
+                source_columns: None,
+                source_type_column: None,
+            };
+            (ty, Some(rel))
+        }
         FieldKind::Flatten(_) => unreachable!("flatten fields are expanded before lowering"),
     };
     Field {
@@ -369,6 +561,9 @@ fn lower_field(f: &FieldDescriptor, resolver: &RefResolver) -> Field {
 }
 
 /// Lower one descriptor to an [`fluessig::ir::Entity`], expanding flatten fields.
+/// A family root (`abstract_leaves` non-empty) lowers to an abstract entity with
+/// no table of its own; a leaf carries its `extends` so the loader inherits the
+/// family key + columns (Slice 4).
 fn lower_entity(d: &'static EntityDescriptor, resolver: &RefResolver) -> IrEntity {
     let fields = expanded_fields(d);
     let key = fields
@@ -376,11 +571,17 @@ fn lower_entity(d: &'static EntityDescriptor, resolver: &RefResolver) -> IrEntit
         .filter(|f| f.key)
         .map(|f| f.name.to_string())
         .collect();
+    let is_abstract = !d.abstract_leaves.is_empty();
     IrEntity {
         name: d.name.to_string(),
-        table: d.table.map(str::to_string),
-        is_abstract: false,
-        extends: None,
+        // an abstract root has no table of its own (@name belongs on the leaves)
+        table: if is_abstract {
+            None
+        } else {
+            d.table.map(str::to_string)
+        },
+        is_abstract,
+        extends: d.extends.map(str::to_string),
         key,
         doc: d.doc.map(str::to_string),
         fields: fields.iter().map(|f| lower_field(f, resolver)).collect(),

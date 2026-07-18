@@ -47,14 +47,19 @@
 //! Field/type mapping (`Id<T>`, `<Root>Id`, scalars, `Option<…>`, op params and
 //! returns) stays `syn`-level — the macro sees the literal tokens, which is more
 //! direct than reconstructing from a monomorphised type
-//! (`notes/derive-front-end-decisions.md`, decision #4). Still out of scope:
-//! spans — Slice 6.
+//! (`notes/derive-front-end-decisions.md`, decision #4).
+//!
+//! Slice 6 adds **source spans**: each descriptor gains a
+//! `fluessig_derive::SourceSpan` carrying the declaration's `file!()` + `line!()`
+//! ([`span_tokens`] emits the built-ins *carrying* the item's span, so rustc
+//! resolves them to the real `.rs` line per field). Spans feed loader diagnostics
+//! only — they never enter the lowered catalog.
 
 use darling::ast::{Data, NestedMeta};
 use darling::util::Ignored;
 use darling::{FromDeriveInput, FromField, FromMeta};
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input,
@@ -373,6 +378,7 @@ fn entity_descriptor_impl(a: EntityDescriptorArgs) -> syn::Result<proc_macro2::T
     let id_enum_tokens = option_str(a.id_enum);
     let tag_col_tokens = option_str(a.tag_col);
     let ref_col_tokens_single = option_str(a.ref_col);
+    let span = span_tokens(ident.span());
 
     Ok(quote! {
         impl ::fluessig_derive::Entity for #ident {
@@ -388,6 +394,7 @@ fn entity_descriptor_impl(a: EntityDescriptorArgs) -> syn::Result<proc_macro2::T
                     id_enum: #id_enum_tokens,
                     tag_col: #tag_col_tokens,
                     ref_col: #ref_col_tokens_single,
+                    span: #span,
                 };
         }
     })
@@ -564,6 +571,7 @@ fn expand_edge(opts: EdgeOpts) -> syn::Result<proc_macro2::TokenStream> {
         });
     }
 
+    let span = span_tokens(ident.span());
     Ok(quote! {
         impl ::fluessig_derive::Edge for #ident {
             const DESCRIPTOR: &'static ::fluessig_derive::EdgeDescriptor =
@@ -575,6 +583,7 @@ fn expand_edge(opts: EdgeOpts) -> syn::Result<proc_macro2::TokenStream> {
                     to: #to_str,
                     expose: #expose_tokens,
                     fields: &[ #( #edge_fields ),* ],
+                    span: #span,
                 };
         }
     })
@@ -615,6 +624,7 @@ fn field_descriptor_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenSt
         map_field_type(&field.ty)?
     };
 
+    let span = field_span_tokens(field);
     Ok(quote! {
         ::fluessig_derive::FieldDescriptor {
             name: #fname,
@@ -623,8 +633,27 @@ fn field_descriptor_tokens(field: &FluField) -> syn::Result<proc_macro2::TokenSt
             key: #is_key,
             doc: #doc_tokens,
             shares: #shares_tokens,
+            span: #span,
         }
     })
+}
+
+/// The `SourceSpan { file, line }` tokens for a declaration at `span` (Slice 6).
+/// `file!()` / `line!()` are emitted *carrying* `span`, so rustc resolves the
+/// built-ins against the declaration's real source location — the `.rs` file:line
+/// the design (`derive-front-end.md` §2.1) wants loader diagnostics to point at.
+/// This is the `file!()`/`line!()` route the design suggests over
+/// `proc_macro2::Span::start()`, which is unreliable on stable; the built-ins
+/// resolve per-field with exact line fidelity.
+fn span_tokens(span: proc_macro2::Span) -> proc_macro2::TokenStream {
+    let file = quote_spanned!(span=> ::core::file!());
+    let line = quote_spanned!(span=> ::core::line!());
+    quote! { ::fluessig_derive::SourceSpan { file: #file, line: #line } }
+}
+
+/// The span tokens for a named struct field — its field-name ident's location.
+fn field_span_tokens(field: &FluField) -> proc_macro2::TokenStream {
+    span_tokens(field.ident.as_ref().expect("named field").span())
 }
 
 /// `Some("s")` / `None` tokens from an optional string.
@@ -1058,7 +1087,9 @@ pub fn export(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
     let self_ty = &item.self_ty;
-    let iface_name = self_ty_ident(self_ty)?.to_string();
+    let iface_ident = self_ty_ident(self_ty)?;
+    let iface_name = iface_ident.to_string();
+    let iface_span = span_tokens(iface_ident.span());
     let iface_doc = option_str(doc_string(&item.attrs).as_deref());
 
     // Build the op descriptors from the ORIGINAL methods (op-kind tags + docs
@@ -1081,6 +1112,7 @@ fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
                     name: #iface_name,
                     doc: #iface_doc,
                     ops: &[ #( #ops ),* ],
+                    span: #iface_span,
                 };
         }
     })
@@ -1094,6 +1126,7 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
     let (kind_tokens, kind) = method_kind(&f.attrs)?;
     let params = param_descriptors(&f.sig)?;
     let returns = return_descriptor(kind, &f.sig)?;
+    let span = span_tokens(f.sig.ident.span());
     Ok(quote! {
         ::fluessig_derive::OpDescriptor {
             name: #name,
@@ -1101,6 +1134,7 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
             kind: #kind_tokens,
             params: &[ #( #params ),* ],
             returns: #returns,
+            span: #span,
         }
     })
 }
@@ -1173,8 +1207,9 @@ fn param_descriptors(sig: &syn::Signature) -> syn::Result<Vec<proc_macro2::Token
             Some(inner) => (base_api_type(inner)?, true),
             None => (base_api_type(&pt.ty)?, false),
         };
+        let span = span_tokens(pi.ident.span());
         out.push(quote! {
-            ::fluessig_derive::ParamDescriptor { name: #name, ty: #ty, optional: #optional }
+            ::fluessig_derive::ParamDescriptor { name: #name, ty: #ty, optional: #optional, span: #span }
         });
     }
     Ok(out)

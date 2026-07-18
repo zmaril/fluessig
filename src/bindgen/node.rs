@@ -247,6 +247,10 @@ pub fn node_binding_with_options(
         .collect();
     let prelude_import =
         format!("use napi::bindgen_prelude::{{AsyncGenerator, AsyncTask, Result{either_import}}};");
+    // The shared streaming-contract import flows through the use-emitter
+    // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
+    // generated `use` line has one emission path; renders byte-identically.
+    let runtime_import = RUNTIME_STREAM_IMPORT.render();
     let mut t: rust::Tokens = quote! {
         $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
         use std::future::Future;
@@ -256,7 +260,7 @@ pub fn node_binding_with_options(
         use napi::{Env, Task};
         use napi_derive::napi;
         $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
-        use fluessig_runtime::{Poll, PollStream};
+        $(&runtime_import)
 
         fn err(e: impl std::fmt::Display) -> napi::Error {
             napi::Error::from_reason(e.to_string())

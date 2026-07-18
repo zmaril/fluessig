@@ -23,8 +23,8 @@ mod ruby;
 
 pub use fanout::{
     common_path_for, external_refs, fan_out_crate, group_module_path, group_table, render_mod_tree,
-    render_use_block, resolve_module_paths, ExternalRef, FanOutSpec, FannedCrate, GroupKey,
-    GroupTable, ModEntry, COMMON_MOD,
+    render_use_block, resolve_module_paths, ExternalImport, ExternalRef, FanOutSpec, FannedCrate,
+    GroupKey, GroupTable, ModEntry, COMMON_MOD, RUNTIME_STREAM_IMPORT,
 };
 pub use mcp::{manifest as mcp_manifest, mcp_module};
 pub use node::{node_binding, node_binding_with_options, NodeOptions};

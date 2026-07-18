@@ -494,6 +494,36 @@ fn spell_composite_key(ref_cols: &[RefColDescriptor], keys: &[&FieldDescriptor])
         .collect()
 }
 
+/// Insert a polymorphic **source** reference's discriminator `tag` into the
+/// family's spelled source-key `cols`, at the physical position it materialises:
+/// immediately before the family's **last (most-local) key column**. A
+/// scope-then-identity composite key `["repo_id", "subject_number"]` with tag
+/// `"subject_type"` becomes `["repo_id", "subject_type", "subject_number"]` — the
+/// discriminator qualifies the local identity, sitting *after* the leading
+/// shared/scope key column(s). A single-key family `["oid"]` becomes
+/// `["<tag>", "oid"]` (tag first), matching the discriminator-prepended layout the
+/// entity to-one and edge **target** paths already use (`sql.rs`).
+///
+/// This mirrors what the TypeSpec front end declares explicitly through
+/// `@fkSource(#[…tag…], tag)` — the emitter takes the source-column array verbatim,
+/// so the tag rides at whatever position the author wrote. entl declares it in the
+/// middle (`#["repo_id", "subject_type", "subject_number"]`), so the derive adopts
+/// the equivalent convention rather than leaving the tag out (which sent
+/// `sql.rs`'s `position()` lookup to the fallback that appends the tag LAST,
+/// reordering `gh_labeled` / `gh_assignees` to `(repo_id, subject_number,
+/// subject_type)`). `source_type_column` still carries the tag name, so `sql.rs`
+/// filters it back out of the data columns and re-inserts it at exactly this
+/// position; an interleaved `sourceColumns` is what makes that lookup land.
+fn interleave_source_tag(mut cols: Vec<String>, tag: Option<&str>) -> Vec<String> {
+    if let Some(tag) = tag {
+        if !cols.iter().any(|c| c == tag) {
+            let pos = cols.len().saturating_sub(1);
+            cols.insert(pos, tag.to_string());
+        }
+    }
+    cols
+}
+
 /// An index over the descriptors being lowered together, so a reference field can
 /// resolve its target's key spelling. Built once per [`build_catalog`] call.
 struct RefResolver {
@@ -822,7 +852,10 @@ fn lower_edge(e: &'static EdgeDescriptor, resolver: &RefResolver) -> (Field, Opt
             }
             (EdgeRole::Source, FieldKind::PolyReference(pr)) => {
                 let (_to, tag, cols) = resolver.poly_reference(&pr);
-                source_columns = cols;
+                // A poly SOURCE spells the discriminator INTO its source-column
+                // tuple at the family's declared position (before the local key),
+                // so `sql.rs` lands it there instead of appending it last.
+                source_columns = interleave_source_tag(cols, tag.as_deref());
                 source_type_column = tag;
             }
             (EdgeRole::Target, FieldKind::PolyReference(pr)) => {

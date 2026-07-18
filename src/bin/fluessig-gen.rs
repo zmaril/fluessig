@@ -11,6 +11,13 @@
 //! (e.g. a lint-suppression line). Off by default: fluessig doesn't bake any
 //! tool-specific markers into its output.
 //!
+//! Cross-package fan-out (opt-in): `--<lang>-out <pattern> --<lang>-mod-out
+//! <root.rs>` splits a language's DTO surface into one file per pinned
+//! `(package, module)` group (`{package}`/`{module}` substituted verbatim), a
+//! shared `common.rs` (enums + un-pinned DTOs, emitted once), and the generated
+//! ROOT module `<root.rs>` — a `#[path]` mod-tree + `pub use` re-exports that
+//! make the split output compile as ONE crate. No group pins ⇒ nothing written.
+//!
 //! `--readme <template.md> --readme-out <pattern>` renders one Markdown template
 //! per target language (see [`fluessig::readme`]). A `{lang}` in the pattern
 //! fans out over `--readme-langs <slugs>` (default: all four); without it,
@@ -79,6 +86,15 @@ fn main() {
     let ruby_out = flag("--ruby-out");
     let php_out = flag("--php-out");
     let mcp_out = flag("--mcp-out");
+    // The generated ROOT module that ties a language's fanned group files into
+    // one crate (the `#[path]` mod-tree + `pub use` re-exports + Python
+    // `register()` re-collection). Required alongside the matching `--<lang>-out`
+    // pattern: fan-out now emits a compilable crate, not orphan group files.
+    let node_mod_out = flag("--node-mod-out");
+    let python_mod_out = flag("--python-mod-out");
+    let ruby_mod_out = flag("--ruby-mod-out");
+    let php_mod_out = flag("--php-mod-out");
+    let mcp_mod_out = flag("--mcp-mod-out");
     let py_models = flag("--py-models");
     let ts_tables = flag("--ts-tables");
     let ts_drizzle = flag("--ts-drizzle");
@@ -233,45 +249,86 @@ fn main() {
             write(&m, fluessig::bindgen::mcp_module(&api, &enums, note));
         }
 
-        // ── opt-in package/module fan-out ──
-        // One file per distinct `(package, module)` group the schema pins for
-        // the language; `{package}`/`{module}` substituted verbatim. A language
-        // with no group pins produces nothing. See `bindgen::fan_out`'s KNOWN
-        // LIMITATION: group files are the DTO surface and cross-group references
-        // are not yet import-resolved, so this stays strictly opt-in.
+        // ── opt-in package/module fan-out (cross-package import subsystem) ──
+        // One file per distinct `(package, module)` group the schema pins for the
+        // language, PLUS a shared `common` file (enums + un-pinned DTOs, emitted
+        // once) and a generated ROOT module. Each group file carries `use
+        // crate::<sanitized-path>::Symbol;` imports for its cross-group refs; the
+        // root binds each verbatim on-disk path to a valid Rust `mod` via
+        // `#[path]` and `pub use`-re-exports the flat surface — so the split
+        // output COMPILES. A language with no group pins produces nothing.
+        let write_p = |path: &str, content: String| {
+            if let Some(dir) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+                    eprintln!("mkdir {}: {e}", dir.display());
+                    std::process::exit(1);
+                });
+            }
+            write(path, content);
+        };
         let fan = |lang: &str,
                    pattern: Option<String>,
-                   render: &dyn Fn(&fluessig::api::ApiDoc) -> String| {
-            if let Some(pat) = pattern {
-                let groups = fluessig::bindgen::fan_out(&api, lang, &pat);
-                if groups.is_empty() {
-                    eprintln!("note: --{lang}-out given but the schema carries no {lang} package/module pins; nothing fanned out");
+                   mod_out: Option<String>,
+                   render: &dyn Fn(
+            &fluessig::api::ApiDoc,
+            &[fluessig::bindgen::EnumDesc],
+        ) -> String| {
+            let Some(pat) = pattern else {
+                if mod_out.is_some() {
+                    eprintln!("--{lang}-mod-out requires --{lang}-out <pattern>");
+                    std::process::exit(2);
                 }
-                for (path, sub) in groups {
-                    if let Some(dir) = std::path::Path::new(&path).parent() {
-                        std::fs::create_dir_all(dir).unwrap_or_else(|e| {
-                            eprintln!("mkdir {}: {e}", dir.display());
-                            std::process::exit(1);
-                        });
+                return;
+            };
+            let Some(mo) = mod_out else {
+                eprintln!(
+                    "--{lang}-out requires --{lang}-mod-out <root.rs> (the root module that ties the fanned files into one crate)"
+                );
+                std::process::exit(2);
+            };
+            let common = fluessig::bindgen::common_path_for(&mo);
+            let spec = fluessig::bindgen::FanOutSpec {
+                lang,
+                pattern: &pat,
+                mod_out: &mo,
+                common_out: &common,
+                note,
+                mcp_models_only: lang == "mcp",
+            };
+            match fluessig::bindgen::fan_out_crate(&api, &enums, &spec, render) {
+                Ok(None) => eprintln!(
+                    "note: --{lang}-out given but the schema carries no {lang} package/module pins; nothing fanned out"
+                ),
+                Ok(Some(fc)) => {
+                    for (path, content) in fc.group_files {
+                        write_p(&path, content);
                     }
-                    write(&path, render(&sub));
+                    if let Some((path, content)) = fc.common_file {
+                        write_p(&path, content);
+                    }
+                    let (path, content) = fc.root_file;
+                    write_p(&path, content);
+                }
+                Err(e) => {
+                    eprintln!("fan-out error ({lang}): {e}");
+                    std::process::exit(1);
                 }
             }
         };
-        fan("node", node_out, &|a| {
-            fluessig::bindgen::node_binding(a, &enums, note)
+        fan("node", node_out, node_mod_out, &|a, e| {
+            fluessig::bindgen::node_binding(a, e, note)
         });
-        fan("python", python_out, &|a| {
-            fluessig::bindgen::python_binding(a, &enums, note)
+        fan("python", python_out, python_mod_out, &|a, e| {
+            fluessig::bindgen::python_binding(a, e, note)
         });
-        fan("ruby", ruby_out, &|a| {
-            fluessig::bindgen::ruby_binding(a, &enums, note)
+        fan("ruby", ruby_out, ruby_mod_out, &|a, e| {
+            fluessig::bindgen::ruby_binding(a, e, note)
         });
-        fan("php", php_out, &|a| {
-            fluessig::bindgen::php_binding(a, &enums, note)
+        fan("php", php_out, php_mod_out, &|a, e| {
+            fluessig::bindgen::php_binding(a, e, note)
         });
-        fan("mcp", mcp_out, &|a| {
-            fluessig::bindgen::mcp_module(a, &enums, note)
+        fan("mcp", mcp_out, mcp_mod_out, &|a, e| {
+            fluessig::bindgen::mcp_module(a, e, note)
         });
     }
 

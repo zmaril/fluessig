@@ -14,12 +14,18 @@
 //! engine. Generated code references `crate::core_impl::{GitImpl, EntlImpl}` by
 //! convention.
 
+mod fanout;
 mod mcp;
 mod node;
 mod php;
 mod python;
 mod ruby;
 
+pub use fanout::{
+    common_path_for, external_refs, fan_out_crate, group_module_path, group_table, render_mod_tree,
+    render_use_block, resolve_module_paths, ExternalRef, FanOutSpec, FannedCrate, GroupKey,
+    GroupTable, ModEntry, COMMON_MOD,
+};
 pub use mcp::{manifest as mcp_manifest, mcp_module};
 pub use node::{node_binding, node_binding_with_options, NodeOptions};
 pub use php::php_binding;
@@ -234,12 +240,15 @@ pub fn fan_out_path(pattern: &str, group: &SymbolGroup) -> String {
 /// supported and byte-identical to today). The group set is exactly the
 /// schema's distinct `(package, module)` pairs — there is NO closed registry.
 ///
-/// KNOWN LIMITATION (deliberate, documented): when a symbol in one group
-/// references a DTO in another group, this does NOT resolve that reference into
-/// a cross-package import / qualified path — that cross-file subsystem is an
-/// M7-scale follow-on. A fanned-out file may therefore not compile standalone,
-/// which is exactly why fan-out is gated behind the opt-in CLI flag and the
-/// single-file default is left untouched.
+/// This is the LOW-LEVEL primitive: it partitions the DTO surface but does NOT
+/// resolve a cross-group reference (a group-A DTO field typed as a group-B DTO)
+/// into an import — so a bare `fan_out` sub-document does not compile standalone.
+/// The cross-package import subsystem ([`fan_out_crate`]) layers on top: it
+/// emits each group file's `use crate::<sanitized-path>::Symbol;` imports, homes
+/// every enum once in a shared `common` module, and generates the root
+/// `#[path]` mod-tree + `pub use` re-exports that make the split output COMPILE.
+/// Use [`fan_out_crate`] to produce a compilable crate; `fan_out` alone remains
+/// for callers that only need the raw per-group partition.
 pub fn fan_out(api: &ApiDoc, lang: &str, pattern: &str) -> Vec<(String, ApiDoc)> {
     symbol_groups(api, lang)
         .into_iter()

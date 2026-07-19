@@ -15,7 +15,7 @@ front end is the only moving part.
    author is a Rust developer. This is the reversal `derive-front-end.md` §4 called "the
    single biggest strategic consequence" — taken deliberately, not by default.
 
-2. **TypeSpec is retired, not kept as a second front end.** The derive front end
+2. **TypeSpec is retired, not kept as a second front end. — DONE.** The derive front end
    *replaces* the TypeSpec front end rather than competing with it indefinitely. The path
    is therefore a **migration**, not permanent dual-grammar upkeep: build the derive
    front end, port `entl.tsp` and `disponent.tsp` to derives, then delete the TypeSpec
@@ -23,6 +23,13 @@ front end is the only moving part.
    bundling the TypeSpec compiler — is deleted with it, per §4 "Gained"). Until the port
    is proven at parity, the TypeSpec emitter stays in the tree; it is removed only once
    derives reproduce every consumer catalog byte-for-byte.
+
+   **Completed.** Both consumers (entl#77, disponent#77) are migrated + merged, and the
+   TypeSpec front end has been removed: the `@fluessig/emitter` Node emitter, the
+   `@fluessig/typespec` decorator library, all `.tsp` sources, and Node are gone from the
+   toolchain. The `#[derive(Entity)]` front end is now the only front end;
+   `cargo fluessig emit` replaces `node emit.mjs`. The emitted `catalog.json` / `api.json`
+   are retained as frozen fixtures (entl's parity target + the engine's dogfood catalogs).
 
 3. **Polymorphic references use generated named key enums, not an opaque generic.**
    `abstract_root(Commit, Tree, Blob)` generates a real sum type and reference sites use

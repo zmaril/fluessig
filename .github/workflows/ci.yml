@@ -32,9 +32,6 @@ jobs:
               - 'catalog.json'
               - 'api.json'
               - 'schema_docs.json'
-              - 'entl.tsp'
-              - 'typespec/**'
-              - 'emitter/**'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -53,17 +50,3 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-
-  emitter:
-    name: emitter (TypeSpec -> catalog.json)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 20
-      - run: npm install
-        working-directory: emitter
-      - run: node test.mjs
-        working-directory: emitter

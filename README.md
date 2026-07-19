@@ -1,5 +1,5 @@
-<!-- housekeeper:description Describe a typed entity graph once (TypeSpec); project it everywhere — DDL, ORM models, format codecs, and language bindings. -->
-<!-- housekeeper:topics codegen, orm, rust, schema, sql, typespec -->
+<!-- housekeeper:description Describe a typed entity graph once; project it everywhere — DDL, ORM models, format codecs, and language bindings. -->
+<!-- housekeeper:topics codegen, orm, rust, schema, sql -->
 <p align="center"><img src="assets/logo.png" alt="fluessig" width="200"></p>
 
 # fluessig
@@ -7,13 +7,6 @@
 Describe a typed entity graph **once**; project it **everywhere** — DDL, ORM
 models, format codecs, language bindings, and an Arrow-fed data plane, all
 generated from a single catalog.
-
-> [!NOTE]
-> fluessig is mid-pivot and moving fast. The strategic front end is a Rust
-> `#[derive(Entity)]` surface; the original TypeSpec front end still drives
-> every consumer today and is retired only once the derives reproduce every
-> consumer catalog byte for byte. Both are documented here — reach for the
-> derive front end for new work.
 
 ## The model
 
@@ -37,15 +30,9 @@ There's no published crate yet — build the engine from a checkout:
 cargo build --release      # -> target/release/fluessig-gen
 ```
 
-The TypeSpec front end also needs the emitter's npm deps (`cd emitter && npm
-install`); the derive front end needs only the Rust workspace.
+The front end needs only the Rust workspace — no Node, no npm.
 
 ## Usage
-
-fluessig has **two front ends** — reach for the derive front end for new work,
-the TypeSpec one for parity with today's consumers.
-
-### The derive front end (Rust-first — the direction)
 
 Author your schema as ordinary Rust structs and emit the same `catalog.json`
 the engine consumes. `#[derive(Entity)]` and `#[derive(Edge)]` describe scalars
@@ -61,26 +48,20 @@ cargo fluessig emit                    # -> catalog.json (default bin: fluessig-
 cargo fluessig emit --bin my-emit -o schema/catalog.json
 ```
 
-This is Slices 1–3 of the [derive front-end plan][decisions]: the derives,
-`Id<T>` FKs plus composite keys, and the attribute grammar have landed on
-`main`. Polymorphism, the op surface, span-accurate docs, a drift guard, and
-the TypeSpec-retirement migration are still ahead — so until parity is proven,
-the TypeSpec front end stays.
-
-[decisions]: notes/derive-front-end-decisions.md
-
-### The TypeSpec front end (current — what consumers run today)
-
-Author the schema in TypeSpec and lower it with the Node emitter, then generate
-from the catalog with the Rust engine:
+Once you have a `catalog.json` (plus `api.json`), generate from it with the
+Rust engine:
 
 ```sh
-cd emitter && npm install
-node emit.mjs path/to/schema.tsp --out schema/   # -> catalog.json + api.json
 cargo run --bin fluessig-gen -- --help           # generate DDL / ORM / bindings
 ```
 
-Both [entl] and [disponent] drive this path today (see **Consumers**).
+The derive front end is the [only front end][decisions]: the derives, `Id<T>`
+FKs plus composite keys, the attribute grammar, polymorphism, the op surface,
+span-accurate docs, and the drift guard have all landed. Both [entl] and
+[disponent] author their schemas as Rust derives (see **Consumers**). The
+earlier TypeSpec front end has been retired.
+
+[decisions]: notes/derive-front-end-decisions.md
 
 ## README multiplexing
 
@@ -111,8 +92,6 @@ missing variants are hard errors.
 ```
 src/                            the engine: catalog/api loaders, per-dialect DDL,
                                 the README multiplexer (readme.rs), fluessig-gen.
-emitter/                        the TypeSpec front end (emit.mjs) + its tests.
-typespec/                       the TypeSpec library shared with consumers.
 crates/fluessig-derive          the Rust derive front end (entities as structs).
 crates/fluessig-derive-macros   its proc-macros: #[derive(Entity)], catalog!, ...
 crates/cargo-fluessig           the `cargo fluessig emit` subcommand.
@@ -124,9 +103,8 @@ scripts/                        dev.sh (setup), coverage.sh.
 ## Build & test
 
 ```sh
-scripts/dev.sh                       # build the Rust workspace + install emitter deps
+scripts/dev.sh                       # build the Rust workspace
 cargo test                           # engine + derive-crate + fixture tests
-(cd emitter && node test.mjs)        # the TypeSpec emitter's tests
 scripts/coverage.sh                  # cargo-llvm-cov summary (--html for a report)
 ```
 
@@ -135,7 +113,7 @@ scripts/coverage.sh                  # cargo-llvm-cov summary (--html for a repo
 [entl] and [disponent] both keep their schema as a fluessig catalog and
 generate from it at build time. They locate this repo via `FLUESSIG_DIR` — a
 sibling `../fluessig` checkout by default, or a pinned clone in CI — and run the
-TypeSpec emitter plus `fluessig-gen` from their own `scripts/gen.sh`.
+derive front end plus `fluessig-gen` from their own `scripts/gen.sh`.
 
 [entl]: https://github.com/zmaril/entl
 [disponent]: https://github.com/zmaril/disponent
@@ -144,19 +122,18 @@ TypeSpec emitter plus `fluessig-gen` from their own `scripts/gen.sh`.
 
 Issues and PRs welcome. PR titles follow [Conventional Commits] (`type(scope):
 summary`) — CI checks it. Run `cargo fmt`, `cargo clippy -- -D warnings`, and
-`cargo test` (plus the emitter's `node test.mjs`) before pushing.
+`cargo test` before pushing.
 
 [Conventional Commits]: https://www.conventionalcommits.org
 
 ## Conventions & gotchas
 
-- **Byte-stable emitter output.** `@typespec/compiler` is pinned exact in
-  `emitter/package.json` — a caret range let a patch bump reorder the emitter's
-  output and churn every consumer's committed catalog. Pin it exact; bump it
-  deliberately.
-- **Enums carry their wire value.** The Node emitter lowers a TypeSpec enum to
-  its members and keeps the wire value when it differs from the name; on the SQL
-  side an enum column is `text`.
+- **Byte-stable catalog output.** The derive front end emits a deterministic
+  `catalog.json`; consumers commit the output and regenerate when their schema
+  changes. A catalog reorder is a real regression — the drift guard catches it.
+- **Enums carry their wire value.** The front end lowers an enum to its members
+  and keeps the wire value when it differs from the name; on the SQL side an
+  enum column is `text`.
 - **Conventional Commits.** Commit messages follow the Conventional Commits
   spec.
 

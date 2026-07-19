@@ -6,6 +6,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+- The TypeSpec front end — the `@fluessig/emitter` Node emitter, the
+  `@fluessig/typespec` decorator library, all `.tsp` sources, and Node from the
+  toolchain. The Rust `#[derive(Entity)]` front end is now the only front end;
+  `cargo fluessig emit` replaces `node emit.mjs`. The emitted `catalog.json` /
+  `api.json` are kept as frozen fixtures (entl's parity target + the engine's
+  dogfood catalogs).
+
 ### Added
 - Node backend: a per-stream-op error model. The DEFAULT (unannotated) is
   idiomatic native TS — a mid-stream core failure REJECTS the pull, so the

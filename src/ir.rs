@@ -1,7 +1,6 @@
-//! The IR — serde mirror of `catalog.json` (format 0, frozen by
-//! `emitter/catalog.schema.json`). Deliberately its own vocabulary: nothing here
-//! names `arrow`, TypeSpec, or any store — those are all codecs over this
-//! (notes/design.md §2/§4).
+//! The IR — serde mirror of `catalog.json` (format 0). Deliberately its own
+//! vocabulary: nothing here names `arrow` or any store — those are all codecs
+//! over this (notes/design.md §2/§4).
 
 use std::collections::BTreeMap;
 

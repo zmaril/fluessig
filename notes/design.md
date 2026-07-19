@@ -1,5 +1,12 @@
 # fluessig — design
 
+> [!NOTE]
+> **Superseded.** This document describes the original TypeSpec front end, which
+> has been retired. The Rust `#[derive(Entity)]` front end is now the only front
+> end — see [`derive-front-end-decisions.md`](./derive-front-end-decisions.md).
+> The catalog contract, the loader, and every back end described below are
+> unchanged; only the authoring surface moved from TypeSpec to Rust derives.
+
 *flüssig* (German, "fluid"): describe your data once, in **TypeSpec**; let it flow into whatever
 shape a store needs. fluessig is **a schema language + a generator + a data-marshalling runtime** —
 it turns one model into DDL, ORM mappings, and format codecs for many stores: relational, document,

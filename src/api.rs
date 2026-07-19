@@ -1,6 +1,6 @@
-//! The op-layer IR — serde mirror of `api.json` (format 0, frozen by
-//! `emitter/api.schema.json`): interfaces, ops with shapes, params, returns,
-//! and the DTO models the ops reference. The input to [`crate::bindgen`].
+//! The op-layer IR — serde mirror of `api.json` (format 0): interfaces, ops with
+//! shapes, params, returns, and the DTO models the ops reference. The input to
+//! [`crate::bindgen`].
 
 use std::collections::BTreeMap;
 

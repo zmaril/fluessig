@@ -4,7 +4,8 @@
 //! - [`manifest`]: the tools manifest as JSON — one tool per projected op
 //!   (`<iface>_<op>`), input schemas from the DTO models (docs ported from the
 //!   tsp, unions as discriminated `oneOf` envelopes), `readOnlyHint` /
-//!   `destructiveHint` from `@readonly` / `@destructive`.
+//!   `destructiveHint` / `workerHint` from `@readonly` / `@destructive` /
+//!   `@worker`.
 //! - [`mcp_module`]: a generated Rust module — plain-serde DTO structs, one
 //!   `<Iface>Mcp` trait per interface, a `dispatch()` that maps (tool name,
 //!   JSON args) onto the trait call, and the manifest embedded as
@@ -241,6 +242,9 @@ pub fn manifest(api: &ApiDoc, enums: &[EnumDesc]) -> Value {
             }
             if op.destructive {
                 ann.insert("destructiveHint".into(), true.into());
+            }
+            if op.worker {
+                ann.insert("workerHint".into(), true.into());
             }
             if !ann.is_empty() {
                 tool.insert("annotations".into(), Value::Object(ann));

@@ -187,6 +187,7 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
         } else {
             quote! { ::core::option::Option::None }
         };
+    let worker = meta.worker;
     let params = param_descriptors(&f.sig)?;
     let returns = return_descriptor(meta.kind, &f.sig)?;
     let span = span_tokens(f.sig.ident.span());
@@ -201,6 +202,7 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
             readonly: #readonly,
             destructive: #destructive,
             result_error: #result_error,
+            worker: #worker,
             params: &[ #( #params ),* ],
             returns: #returns,
             span: #span,
@@ -241,11 +243,11 @@ fn result_error_ident(sig: &syn::Signature) -> Option<Ident> {
 }
 
 /// The op-shaping tags on a method: its kind (`ctor` / plain unary / `stream` /
-/// `manual`) plus the `readonly` / `destructive` FLAGS that compose with it (a
-/// readonly op is still unary/stream; a destructive op likewise). Tags may ride one
-/// `#[fluessig(a, b)]` or several `#[fluessig(a)] #[fluessig(b)]` — so
-/// `@readonly @stream` (disponent's `events` / `driverPlan`) is expressible either
-/// way. At most one KIND; the flags default off.
+/// `manual`) plus the `readonly` / `destructive` / `worker` FLAGS that compose with
+/// it (a readonly op is still unary/stream; a destructive op likewise; a worker op
+/// likewise). Tags may ride one `#[fluessig(a, b)]` or several
+/// `#[fluessig(a)] #[fluessig(b)]` — so `@readonly @stream` (disponent's `events` /
+/// `driverPlan`) is expressible either way. At most one KIND; the flags default off.
 struct MethodMeta {
     kind: OpKindChoice,
     /// The per-op async marker — `Some(true)` = `#[fluessig(async)]` (opt into the
@@ -262,6 +264,8 @@ struct MethodMeta {
     /// projection (error-as-value). A projection modifier legal on a plain
     /// synchronous unary op only, like `#[fluessig(sync)]`.
     result: bool,
+    /// `#[fluessig(worker)]` — safe on a worker-role MCP surface (→ `workerHint`).
+    worker: bool,
 }
 
 /// One parsed tag inside a `#[fluessig(…)]` op attribute. The `async` keyword is
@@ -299,6 +303,7 @@ fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
     let mut name_pin: Option<String> = None;
     let mut result = false;
     let mut result_span: Option<proc_macro2::Span> = None;
+    let mut worker = false;
     for a in attrs {
         if !a.path().is_ident("fluessig") {
             continue;
@@ -351,6 +356,7 @@ fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
                             result = true;
                             result_span = Some(id.span());
                         }
+                        "worker" => worker = true,
                         kind_tag @ ("ctor" | "stream" | "manual") => {
                             if kind.is_some() {
                                 return Err(syn::Error::new_spanned(
@@ -375,7 +381,8 @@ fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
                                      projection overrides #[fluessig(async)] / #[fluessig(sync)] \
                                      (synchronous is the default), the node result-envelope \
                                      opt-in #[fluessig(result)], the flags \
-                                     #[fluessig(readonly)] / #[fluessig(destructive)], and/or the \
+                                     #[fluessig(readonly)] / #[fluessig(destructive)] / \
+                                     #[fluessig(worker)], and/or the \
                                      export-name pin #[fluessig(name = \"…\")]"
                                 ),
                             ))
@@ -451,6 +458,7 @@ fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
         destructive,
         name_pin,
         result,
+        worker,
     })
 }
 

@@ -6,6 +6,7 @@ members = [
     "crates/cargo-fluessig",
     "crates/derive-demo",
     "crates/entl-schema-derive",
+    "crates/disponent-schema-derive",
     "crates/fluessig-publish",
 ]
 # The root is a hybrid package+workspace; without default-members a bare
@@ -19,6 +20,7 @@ default-members = [
     "crates/cargo-fluessig",
     "crates/derive-demo",
     "crates/entl-schema-derive",
+    "crates/disponent-schema-derive",
     "crates/fluessig-publish",
 ]
 resolver = "2"

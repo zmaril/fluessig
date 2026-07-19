@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fluessig::api::{ApiField, ApiInterface, ApiModel, ApiType};
+use fluessig::api::{ApiField, ApiInterface, ApiModel, ApiType, ApiUnion, ApiUnionVariant};
 use fluessig::ir::{
     camel, snake, Cardinality, Catalog, Entity as IrEntity, Field, Relation, Struct, TypeRef,
 };
@@ -237,33 +237,47 @@ fn dto_fields(catalog: &Catalog, fields: &[Field]) -> Vec<(String, TypeRef, bool
     out
 }
 
-/// The `{ model }` a model-field type ultimately names, if any — unwrapping `list`
-/// (the emitter's `addTypeRef`).
-fn model_ref_name(ty: &TypeRef) -> Option<&str> {
-    match ty {
-        TypeRef::Ref { name, .. } => Some(name),
-        TypeRef::List { of } => model_ref_name(of),
-        _ => None,
-    }
-}
-
-/// The `{ model }` an op param/return `ApiType` names, unwrapping list/nullable —
-/// the seed side of the emitter's `seedApiType`.
-fn api_model_ref(t: &ApiType) -> Option<&str> {
+/// Seed the referenced sets from one op param/return `ApiType` (unwrapping
+/// list/nullable) — the emitter's `seedApiType`: a `{ model }` seeds a model, a
+/// `{ union }` seeds a union.
+fn seed_api_type(t: &ApiType, models: &mut HashSet<String>, unions: &mut HashSet<String>) {
     match t {
-        ApiType::Model { model } => Some(model),
-        ApiType::List { list } => api_model_ref(list),
-        ApiType::Nullable { nullable } => api_model_ref(nullable),
-        _ => None,
+        ApiType::Model { model } => {
+            models.insert(model.clone());
+        }
+        ApiType::Union { union } => {
+            unions.insert(union.clone());
+        }
+        ApiType::List { list } => seed_api_type(list, models, unions),
+        ApiType::Nullable { nullable } => seed_api_type(nullable, models, unions),
+        _ => {}
     }
 }
 
-/// Materialise `api.json`'s `models` array (Slice 8a Gap 2): the entities/DTOs the
-/// ops reference — seeded from op params/returns, then closed transitively over
-/// referenced models' LOWERED fields — flattened, in the emitter's candidate order
-/// (value structs first, then entities). A direct Rust port of the emitter's model
-/// closure, over the same lowered catalog, so it equals the TypeSpec path.
-pub(crate) fn build_models(catalog: &Catalog, interfaces: &[ApiInterface]) -> Vec<ApiModel> {
+/// Close one catalog field/variant `TypeRef` into the referenced sets (the
+/// emitter's `addTypeRef`): unwrap `list`, then a `Ref` grows the model set and a
+/// named `Union` grows the union set. Returns whether either set grew.
+fn add_type_ref(ty: &TypeRef, models: &mut HashSet<String>, unions: &mut HashSet<String>) -> bool {
+    let inner = ty.innermost();
+    match inner {
+        TypeRef::Ref { name, .. } => models.insert(name.clone()),
+        TypeRef::Union { name } => unions.insert(name.clone()),
+        _ => false,
+    }
+}
+
+/// Materialise `api.json`'s `models` + `unions` arrays (Slice 8a Gap 2 + union
+/// authoring): the entities/DTOs the ops reference — seeded from op params/returns,
+/// then closed transitively over referenced models' LOWERED fields AND referenced
+/// unions' variants — flattened, in the emitter's candidate order (value structs
+/// first, then entities). The `unions` array carries the referenced unions, sorted
+/// by name, with each variant lowered to its op-surface type. A direct Rust port of
+/// the emitter's model closure, over the same lowered catalog, so it equals the
+/// TypeSpec path.
+pub(crate) fn build_models(
+    catalog: &Catalog,
+    interfaces: &[ApiInterface],
+) -> (Vec<ApiModel>, Vec<ApiUnion>) {
     // candidate models, emitter order: value structs first, then entities.
     let candidates: Vec<(&str, Option<&str>, &[Field])> = catalog
         .value_structs
@@ -283,39 +297,39 @@ pub(crate) fn build_models(catalog: &Catalog, interfaces: &[ApiInterface]) -> Ve
         .map(|(name, _, fields)| (*name, dto_fields(catalog, fields)))
         .collect();
 
-    // seed the referenced set from the ops' param/return model references.
+    // seed the referenced sets from the ops' param/return model/union references.
     let mut referenced: HashSet<String> = HashSet::new();
+    let mut referenced_unions: HashSet<String> = HashSet::new();
     for i in interfaces {
         for op in &i.ops {
             for p in &op.params {
-                if let Some(m) = api_model_ref(&p.ty) {
-                    referenced.insert(m.to_string());
-                }
+                seed_api_type(&p.ty, &mut referenced, &mut referenced_unions);
             }
-            if let Some(m) = api_model_ref(&op.returns) {
-                referenced.insert(m.to_string());
-            }
+            seed_api_type(&op.returns, &mut referenced, &mut referenced_unions);
         }
     }
 
-    // close transitively over referenced models' LOWERED fields (relation targets
-    // no longer join via embedding — they became FK scalars — so growth is through
-    // value-struct references, e.g. a DTO holding another DTO or a list of one).
+    // close transitively: models referenced by referenced models' LOWERED fields,
+    // and unions reached through those fields; then the referenced unions' variant
+    // bodies pull in their own models/unions (the emitter's twin-set fixpoint).
     let mut grew = true;
     while grew {
         grew = false;
         for name in referenced.clone() {
             for (_, ty, _) in lowered.get(name.as_str()).into_iter().flatten() {
-                if let Some(r) = model_ref_name(ty) {
-                    if referenced.insert(r.to_string()) {
-                        grew = true;
-                    }
+                grew |= add_type_ref(ty, &mut referenced, &mut referenced_unions);
+            }
+        }
+        for uname in referenced_unions.clone() {
+            if let Some(u) = catalog.union_def(&uname) {
+                for v in &u.variants {
+                    grew |= add_type_ref(&v.ty, &mut referenced, &mut referenced_unions);
                 }
             }
         }
     }
 
-    candidates
+    let models = candidates
         .iter()
         .filter(|(name, _, _)| referenced.contains(*name))
         .map(|(name, doc, _)| ApiModel {
@@ -332,5 +346,29 @@ pub(crate) fn build_models(catalog: &Catalog, interfaces: &[ApiInterface]) -> Ve
                 .collect(),
             bindings: Default::default(),
         })
-        .collect()
+        .collect();
+
+    // referenced unions, sorted by name (the emitter's `[...referencedUnions].sort()`).
+    let mut union_names: Vec<&String> = referenced_unions.iter().collect();
+    union_names.sort();
+    let unions = union_names
+        .into_iter()
+        .filter_map(|name| catalog.union_def(name))
+        .map(|u| ApiUnion {
+            name: u.name.clone(),
+            doc: u.doc.clone(),
+            tag_field: None,
+            variants: u
+                .variants
+                .iter()
+                .map(|v| ApiUnionVariant {
+                    tag: v.tag.clone(),
+                    ty: api_type_of_ref(&v.ty),
+                })
+                .collect(),
+            bindings: Default::default(),
+        })
+        .collect();
+
+    (models, unions)
 }

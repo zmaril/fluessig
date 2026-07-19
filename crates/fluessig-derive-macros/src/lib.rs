@@ -654,6 +654,34 @@ mod record;
 
 use field_meta::{DefaultLitMeta, DerivedMeta};
 
+mod union;
+
+/// Derive an `impl fluessig_derive::UnionType` carrying a `&'static
+/// UnionDescriptor` — disponent's `union EventPayload`. The union is a Rust `enum`
+/// whose single-field tuple variants carry each alternative's body type; the wire
+/// tag is the variant name lowerCamelCased (`ToolCall` → `toolCall`) or a
+/// per-variant `#[fluessig(tag = "…")]` override.
+///
+/// ```ignore
+/// #[derive(Union)]
+/// pub enum EventPayload {
+///     State(StateChange),        // tag "state"
+///     ToolCall(ToolCallInfo),    // tag "toolCall"
+/// }
+/// ```
+#[proc_macro_derive(Union, attributes(fluessig))]
+pub fn derive_union(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    let opts = match union::UnionOpts::from_derive_input(&input) {
+        Ok(o) => o,
+        Err(e) => return e.write_errors().into(),
+    };
+    match union::expand_union(opts) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Derive a `&'static RecordDescriptor` for a DTO / value struct (Slice 8a Gap 2).
 ///
 /// A record is flat data the op surface passes across — no identity, no key, no
@@ -846,11 +874,20 @@ fn field_kind(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
     if is_generic_named(ty, "DateTime") {
         return Ok(quote! { ::fluessig_derive::FieldKind::Named("utcDateTime") });
     }
-    // `Vec<u8>` is the bytes scalar (`Blob.content`).
+    // `Vec<u8>` is the bytes scalar (`Blob.content`); any other `Vec<T>` is a list
+    // column (`Dispatch.tags: string[]`), its element a scalar primitive or a bare
+    // named type resolved at lowering.
     if let Some(elem) = single_type_arg(ty, "Vec") {
         if is_named(elem, "u8") {
             return Ok(quote! { ::fluessig_derive::FieldKind::Named("bytes") });
         }
+        let elem_tokens = if let Ok(kind) = scalar_kind(elem) {
+            quote! { ::fluessig_derive::ListElem::Scalar(#kind) }
+        } else {
+            let name = bare_type_name(elem)?;
+            quote! { ::fluessig_derive::ListElem::Named(#name) }
+        };
+        return Ok(quote! { ::fluessig_derive::FieldKind::List(&#elem_tokens) });
     }
     if let Ok(kind) = scalar_kind(ty) {
         return Ok(quote! { ::fluessig_derive::FieldKind::Scalar(#kind) });
@@ -1057,6 +1094,9 @@ struct CatalogInput {
     /// The `enums: [RefKind, …]` roots — `#[derive(Enum)]` types lowered into the
     /// catalog's `enums` (Slice 8b).
     enums: Vec<Ident>,
+    /// The `unions: [EventPayload, …]` roots — `#[derive(Union)]` types lowered into
+    /// the catalog's `unions` (and `api.json`'s `unions` when referenced).
+    unions: Vec<Ident>,
     /// The `scalars: [Oid, …]` roots — `#[derive(Scalar)]` types lowered into the
     /// catalog's `scalars` (Slice 8b).
     scalars: Vec<Ident>,
@@ -1073,6 +1113,7 @@ impl Parse for CatalogInput {
         let mut edges = Vec::new();
         let mut records = Vec::new();
         let mut enums = Vec::new();
+        let mut unions = Vec::new();
         let mut scalars = Vec::new();
         let mut api = Vec::new();
 
@@ -1086,6 +1127,7 @@ impl Parse for CatalogInput {
                 "edges" => edges = parse_ident_list(input)?,
                 "records" => records = parse_ident_list(input)?,
                 "enums" => enums = parse_ident_list(input)?,
+                "unions" => unions = parse_ident_list(input)?,
                 "scalars" => scalars = parse_ident_list(input)?,
                 "api" => api = parse_ident_list(input)?,
                 other => {
@@ -1094,7 +1136,7 @@ impl Parse for CatalogInput {
                         format!(
                             "unknown catalog! field `{other}` — supported: \
                              name, version, entities, edges, records, enums, \
-                             scalars, api"
+                             unions, scalars, api"
                         ),
                     ))
                 }
@@ -1115,6 +1157,7 @@ impl Parse for CatalogInput {
             edges,
             records,
             enums,
+            unions,
             scalars,
             api,
         })
@@ -1166,6 +1209,7 @@ pub fn catalog(input: TokenStream) -> TokenStream {
         edges,
         records,
         enums,
+        unions,
         scalars,
         api,
     } = parse_macro_input!(input as CatalogInput);
@@ -1184,6 +1228,7 @@ pub fn catalog(input: TokenStream) -> TokenStream {
     let edge_descriptors = descriptors(&edges, quote!(Edge));
     let record_descriptors = descriptors(&records, quote!(Record));
     let enum_descriptors = descriptors(&enums, quote!(EnumType));
+    let union_descriptors = descriptors(&unions, quote!(UnionType));
     let scalar_descriptors = descriptors(&scalars, quote!(ScalarType));
     let api_descriptors = descriptors(&api, quote!(ApiExport));
 
@@ -1209,6 +1254,11 @@ pub fn catalog(input: TokenStream) -> TokenStream {
             pub const ENUMS: &[&'static ::fluessig_derive::EnumDescriptor] =
                 &[ #( #enum_descriptors ),* ];
 
+            /// The union descriptors listed in `catalog!`'s `unions:`, in
+            /// declaration order. Empty when none are given.
+            pub const UNIONS: &[&'static ::fluessig_derive::UnionDescriptor] =
+                &[ #( #union_descriptors ),* ];
+
             /// The scalar descriptors listed in `catalog!`'s `scalars:`, in
             /// declaration order (Slice 8b). Empty when none are given.
             pub const SCALARS: &[&'static ::fluessig_derive::ScalarDescriptor] =
@@ -1224,9 +1274,9 @@ pub fn catalog(input: TokenStream) -> TokenStream {
             /// The catalog version as declared in `catalog!`.
             pub const VERSION: &str = #version;
 
-            /// The declared enums + scalars, grouped for the typed builders (Slice 8b).
+            /// The declared enums + unions + scalars, grouped for the typed builders.
             fn decls() -> ::fluessig_derive::TypeDecls<'static> {
-                ::fluessig_derive::TypeDecls { enums: ENUMS, scalars: SCALARS }
+                ::fluessig_derive::TypeDecls { enums: ENUMS, unions: UNIONS, scalars: SCALARS }
             }
 
             /// Build the in-memory `fluessig::Catalog` IR from the descriptors

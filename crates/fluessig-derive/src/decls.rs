@@ -51,6 +51,45 @@ pub trait ScalarType {
     const DESCRIPTOR: &'static ScalarDescriptor;
 }
 
+/// A named **tagged union** (`#[derive(Union)]`) — a closed set of variants, each a
+/// wire tag carrying one body type. It lowers to the catalog's `unions` (and the
+/// op layer's `api.json` `unions` when an op transitively references it), and a
+/// field typed by the union lowers to `TypeRef::Union`. Carries disponent's
+/// `union EventPayload` (nine variants: state / message / toolCall / …). Surfaced
+/// by the disponent migration acid test — entl exercised no unions.
+pub trait UnionType {
+    /// The descriptor the derive expands to.
+    const DESCRIPTOR: &'static UnionDescriptor;
+}
+
+/// A whole union captured by `#[derive(Union)]`: its catalog name, doc, and
+/// variants. Lowers to `fluessig::ir::UnionDef` (catalog) and — when referenced —
+/// `fluessig::api::ApiUnion` (op layer).
+#[derive(Debug, Clone, Copy)]
+pub struct UnionDescriptor {
+    /// The union's catalog name (its `unions` entry name in `catalog.json`).
+    pub name: &'static str,
+    /// The union's `///` doc comment, if any.
+    pub doc: Option<&'static str>,
+    /// The variants, in declaration order.
+    pub variants: &'static [UnionVariantDescriptor],
+    /// The `.rs` source location of this union's declaration (Slice 6 spans).
+    pub span: SourceSpan,
+}
+
+/// One union variant: its wire tag (the discriminator — a Rust enum variant name
+/// lowerCamelCased, or a per-variant `#[fluessig(tag = "…")]` override) and the
+/// name of its single body type, resolved at lowering against the catalog's
+/// declared enums / scalars / value structs (exactly as an entity's `Named` field
+/// is — a variant body `StateChange` → a value-struct ref).
+#[derive(Debug, Clone, Copy)]
+pub struct UnionVariantDescriptor {
+    /// The variant's wire tag (`state`, `toolCall`, …).
+    pub tag: &'static str,
+    /// The variant's body type name (`StateChange`, `AgentMessage`, …).
+    pub ty: &'static str,
+}
+
 /// A whole scalar captured by `#[derive(Scalar)]`: its catalog name, physical
 /// carrier (`#[fluessig(extends = "bytes")]` → `Some("bytes")`), and doc.
 #[derive(Debug, Clone, Copy)]

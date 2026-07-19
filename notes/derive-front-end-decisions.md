@@ -204,3 +204,44 @@ The **first implementation slice** is Slice 1: it is small, it exercises the ent
 derive → descriptor → exporter → `fluessig-gen` path, and its load-clean-and-drive-`fluessig-gen`
 gate is the cheapest possible test of the core claim before any of the ergonomic surface is
 built.
+
+### Slice 8b addendum — the disponent acid test (`crates/disponent-schema-derive`)
+
+Porting `disponent.tsp` (the second acid test, after entl) surfaced authoring capabilities the
+entl port never exercised. The catalog contract, loader, and back ends were already union-aware
+(`ir::UnionDef` / `TypeRef::Union`, `api::ApiUnion`, `ApiOp::readonly` / `destructive`) — the
+front end was the only moving part, as ever:
+
+- **Union authoring (feature A).** `#[derive(Union)]` on a Rust `enum` of single-field tuple
+  variants (`State(StateChange)`) captures a `UnionDescriptor`; the wire tag is the variant name
+  lowerCamelCased (`ToolCall` → `toolCall`) or a per-variant `#[fluessig(tag = "…")]`. `catalog!`
+  grows a `unions: [...]` list; a union-typed field lowers to `TypeRef::Union` (twin
+  `<col>_kind` + `<col>` columns), and the model closure pulls a referenced union's variant
+  bodies into `api.json`'s `models` + `unions` (a port of the emitter's twin-set fixpoint).
+- **`@readonly` / `@destructive` op hints (features B + C).** `#[fluessig(readonly)]` /
+  `#[fluessig(destructive)]` are FLAGS on an exported op that compose with its kind (a
+  `@readonly @stream` op is both) — lowering to `api.json` `"readonly"` / `"destructive"` and,
+  downstream, the MCP `readOnlyHint` / `destructiveHint`.
+
+Four smaller front-end gaps the same port surfaced (each a lowering fix mirroring the TypeSpec
+emitter, all additive — entl stayed green):
+
+1. **Scalar refinement roots.** A semantic scalar refining a *refined* builtin (`Cents extends
+   int64`, and `int64` roots at `numeric`) records its ROOT carrier at a field TypeRef
+   (`numeric`), while the `scalars` DECLARATION array keeps the immediate `int64` — the emitter's
+   `while (root.baseScalar)` walk. entl's `Oid extends bytes` roots one hop, so it never showed.
+2. **Semantic-scalar / enum op params.** `#[fluessig::export]` can't tell `uid: SessionUid` (a
+   scalar) from a model at the token; the classification now happens at lowering against the
+   declared types (a declared scalar → the bare scalar name, an enum → `{enum}`), the catalog
+   cross-check the macro comment already deferred to.
+3. **`Id`-suffixed scalars.** A declared scalar ending in `Id` (`FanoutId` / `MessageId` /
+   `DispatchId`) collides with the `<Root>Id` poly-reference heuristic; a name that is a declared
+   named type but not a family root is disambiguated to a plain scalar column at lowering.
+4. **List columns + the `url` / `snake_case` stock surface.** `Vec<T>` (T ≠ u8) entity columns
+   (`Dispatch.tags: string[]`) lower to `TypeRef::List`; `url` joins the stock string scalars;
+   `rename_all = "snake_case"` joins the enum casing rules (disponent's wire values are its
+   snake_case member names).
+
+Gate: `crates/disponent-schema-derive/tests/parity.rs` — the derive-emitted catalog/api project
+to the SAME physical tables (columns + order + PK order), enums, scalars, unions, ops (every
+readonly/destructive flag), models, and api-unions as disponent's committed artifacts.

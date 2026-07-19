@@ -76,26 +76,37 @@ pub(crate) fn expand_enum(opts: EnumOpts) -> syn::Result<proc_macro2::TokenStrea
     })
 }
 
-/// Apply a `rename_all` casing rule to a PascalCase variant ident. The rules entl
-/// needs: `lowercase` (`Branch` → `branch`), `UPPERCASE`, and
-/// `SCREAMING_SNAKE_CASE` (`Open` → `OPEN`, `PullRequest` → `PULL_REQUEST`). `None`
-/// leaves the ident unchanged.
+/// Apply a `rename_all` casing rule to a PascalCase variant ident. The rules the
+/// fixtures need: `lowercase` (`Branch` → `branch`), `UPPERCASE`,
+/// `SCREAMING_SNAKE_CASE` (`Open` → `OPEN`, `PullRequest` → `PULL_REQUEST`), and
+/// `snake_case` (`ExeDev` → `exe_dev`, `ToolCall` → `tool_call` — disponent's enum
+/// wire values are its snake_case member names). `None` leaves the ident unchanged.
 pub(crate) fn apply_rename(ident: &str, rule: Option<&str>) -> String {
     match rule {
         Some("lowercase") => ident.to_lowercase(),
         Some("UPPERCASE") => ident.to_uppercase(),
-        Some("SCREAMING_SNAKE_CASE") => {
-            let mut out = String::new();
-            for (i, c) in ident.chars().enumerate() {
-                if c.is_ascii_uppercase() && i != 0 {
-                    out.push('_');
-                }
-                out.push(c.to_ascii_uppercase());
-            }
-            out
-        }
+        Some("SCREAMING_SNAKE_CASE") => screaming_snake(ident, true),
+        Some("snake_case") => screaming_snake(ident, false),
         _ => ident.to_string(),
     }
+}
+
+/// PascalCase → snake_case, optionally SCREAMING: insert `_` before each interior
+/// uppercase boundary, then case each character. `PullRequest` → `pull_request`
+/// (or `PULL_REQUEST` when `scream`).
+fn screaming_snake(ident: &str, scream: bool) -> String {
+    let mut out = String::new();
+    for (i, c) in ident.chars().enumerate() {
+        if c.is_ascii_uppercase() && i != 0 {
+            out.push('_');
+        }
+        out.push(if scream {
+            c.to_ascii_uppercase()
+        } else {
+            c.to_ascii_lowercase()
+        });
+    }
+    out
 }
 
 // ─────────────────────────── #[derive(Scalar)] ───────────────────────────

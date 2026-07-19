@@ -86,23 +86,29 @@ pub use fluessig;
 // in different namespaces (macro vs type), exactly like `serde::Serialize` — so
 // a single `use fluessig_derive::{Entity, Edge};` brings in both halves.
 pub use fluessig_derive_macros::{
-    catalog, export, AbstractRoot, Edge, Entity, Enum, Record, Scalar,
+    catalog, export, AbstractRoot, Edge, Entity, Enum, Record, Scalar, Union,
 };
 
 use fluessig::api::{ApiDoc, ApiInterface, ApiOp, ApiParam, ApiType, Shape};
 use fluessig::ir::{
     camel, Cardinality, Catalog, Entity as IrEntity, Field, RelKind, Relation, Scalar, Struct,
-    TypeRef, Versions,
+    TypeRef, UnionDef, UnionVariant, Versions,
 };
 
 mod decls;
 pub use decls::{
     DefaultLit, DerivedDesc, EnumDescriptor, EnumType, EnumVariantDescriptor, ScalarDescriptor,
-    ScalarType,
+    ScalarType, UnionDescriptor, UnionType, UnionVariantDescriptor,
 };
 
 mod records;
 pub use records::{RecordDescriptor, RecordFieldDescriptor, RecordTypeDesc};
+
+mod ops;
+pub use ops::{
+    build_api, build_api_typed, to_api_json, to_api_json_typed, ApiExport, ApiTypeDesc,
+    InterfaceDescriptor, OpDescriptor, OpKind, ParamDescriptor,
+};
 
 /// A type that describes a stored entity as pure `&'static` data. Implemented by
 /// `#[derive(Entity)]`.
@@ -335,6 +341,24 @@ pub enum FieldKind {
     /// another value struct. Resolved at lowering against the catalog's declared
     /// enums / scalars ([`RefResolver::resolve_named`]).
     Named(&'static str),
+    /// A **list** column — `Vec<T>` where `T` is a scalar/named type (and `T != u8`,
+    /// which is the `bytes` scalar). Lowers to `TypeRef::List` (a jsonb/json/text
+    /// column). Surfaced by the disponent acid test (`Dispatch.tags: string[]`);
+    /// entl had no list-typed stored columns.
+    List(&'static ListElem),
+}
+
+/// One list column's element type (the `T` of a `Vec<T>` entity field) — a scalar
+/// primitive or a bare named type resolved at lowering, mirroring the non-list
+/// [`FieldKind`] element kinds.
+#[derive(Debug, Clone, Copy)]
+pub enum ListElem {
+    /// A scalar primitive element (`Vec<i64>`).
+    Scalar(ScalarKind),
+    /// A bare named element — a declared enum / semantic scalar / value struct
+    /// (`Vec<String>` arrives as `Named("String")`? no: `String` is a primitive, so
+    /// it arrives as [`ListElem::Scalar`]; this carries e.g. `Vec<SessionUid>`).
+    Named(&'static str),
 }
 
 /// A polymorphic reference site (Slice 4): the generated family key-enum named at
@@ -537,6 +561,9 @@ struct RefResolver {
     /// Declared semantic scalars → their `base`, so a `Named` typed by a scalar
     /// resolves to `TypeRef::Scalar { name, base }` (Slice 8b).
     scalar_bases: HashMap<&'static str, Option<&'static str>>,
+    /// Declared union names, so a [`FieldKind::Named`] typed by a union resolves to
+    /// `TypeRef::Union` (disponent `Event.payload: EventPayload`).
+    union_names: std::collections::HashSet<&'static str>,
 }
 
 impl RefResolver {
@@ -544,6 +571,7 @@ impl RefResolver {
         entities: &[&'static EntityDescriptor],
         enums: &[&'static EnumDescriptor],
         scalars: &[&'static ScalarDescriptor],
+        unions: &[&'static UnionDescriptor],
     ) -> Self {
         RefResolver {
             by_name: entities.iter().map(|e| (e.name, *e)).collect(),
@@ -553,26 +581,35 @@ impl RefResolver {
                 .collect(),
             enum_names: enums.iter().map(|e| e.name).collect(),
             scalar_bases: scalars.iter().map(|s| (s.name, s.base)).collect(),
+            union_names: unions.iter().map(|u| u.name).collect(),
         }
     }
 
     /// Resolve a [`FieldKind::Named`] type name to a [`TypeRef`] (Slice 8b): a
-    /// declared enum → `Enum`; a declared semantic scalar → `Scalar { name, base }`
-    /// with the declared carrier; a **stock** scalar (`Json` → `string`,
-    /// `utcDateTime` / `bytes` — roots with no base) → `Scalar`; anything else → a
-    /// value-struct reference (`Ref { entity: false }`), so a record referencing
-    /// another record still closes. Mirrors what the TypeSpec front end records for
-    /// the equivalent named type.
+    /// declared enum → `Enum`; a declared union → `Union`; a declared semantic
+    /// scalar → `Scalar { name, base }` with the carrier resolved to its ROOT
+    /// builtin (a scalar refining a refined builtin, `Cents extends int64`, roots
+    /// at `numeric` — the emitter's `while root.baseScalar` walk); a **stock**
+    /// scalar (`Json` / `url` → `string`, `utcDateTime` / `bytes` — roots with no
+    /// base) → `Scalar`; anything else → a value-struct reference
+    /// (`Ref { entity: false }`), so a record referencing another record still
+    /// closes. Mirrors what the TypeSpec front end records for the equivalent named
+    /// type.
     fn resolve_named(&self, name: &str) -> TypeRef {
         if self.enum_names.contains(name) {
             return TypeRef::Enum {
                 name: name.to_string(),
             };
         }
+        if self.union_names.contains(name) {
+            return TypeRef::Union {
+                name: name.to_string(),
+            };
+        }
         if let Some(base) = self.scalar_bases.get(name) {
             return TypeRef::Scalar {
                 name: name.to_string(),
-                base: base.map(str::to_string),
+                base: base.map(root_scalar_base),
             };
         }
         if let Some(base) = stock_scalar_base(name) {
@@ -585,6 +622,45 @@ impl RefResolver {
             name: name.to_string(),
             entity: false,
         }
+    }
+
+    /// Classify a bare op-surface type name the `#[fluessig::export]` macro emitted
+    /// as `Model(name)` (it can't tell scalars/enums/unions from models by the
+    /// token alone): a declared enum → `{ enum }`, a declared union → `{ union }`, a
+    /// declared or stock semantic scalar → the bare scalar name, anything else → a
+    /// `{ model }` ref. The op-surface twin of [`resolve_named`].
+    fn api_named(&self, name: &str) -> ApiType {
+        if self.enum_names.contains(name) {
+            return ApiType::Enum {
+                r#enum: name.to_string(),
+            };
+        }
+        if self.union_names.contains(name) {
+            return ApiType::Union {
+                union: name.to_string(),
+            };
+        }
+        if self.scalar_bases.contains_key(name) || stock_scalar_base(name).is_some() {
+            return ApiType::Scalar(name.to_string());
+        }
+        ApiType::Model {
+            model: name.to_string(),
+        }
+    }
+
+    /// Whether `name` is a registered polymorphic family key-enum (`<Root>Id`).
+    fn is_family_root(&self, name: &str) -> bool {
+        self.by_id_enum.contains_key(name)
+    }
+
+    /// Whether `name` is a declared enum / union / semantic scalar or a stock scalar
+    /// — i.e. a [`resolve_named`]-classifiable named type (as opposed to an unknown
+    /// name, which stays a genuine — possibly dangling — reference).
+    fn is_declared_named(&self, name: &str) -> bool {
+        self.enum_names.contains(name)
+            || self.union_names.contains(name)
+            || self.scalar_bases.contains_key(name)
+            || stock_scalar_base(name).is_some()
     }
 
     /// Resolve a polymorphic reference to `(target family, tag column, fk
@@ -703,10 +779,30 @@ impl RefResolver {
 /// primitive [`ScalarKind`]s from the macro.
 fn stock_scalar_base(name: &str) -> Option<Option<&'static str>> {
     match name {
-        "Json" => Some(Some("string")),
+        "Json" | "url" => Some(Some("string")),
         "utcDateTime" | "offsetDateTime" | "bytes" => Some(None),
         _ => None,
     }
+}
+
+/// The ROOT physical carrier a declared scalar's `extends` base resolves to — the
+/// derive twin of the emitter's `while (root.baseScalar) root = root.baseScalar`
+/// walk. A semantic scalar that refines a **refined** numeric builtin
+/// (`Cents extends int64`, and `int64` itself roots at `numeric`) must record the
+/// root `numeric` at a field TypeRef, not the immediate `int64` — the immediate
+/// base only survives in the catalog's `scalars` DECLARATION array (which keeps
+/// what the author wrote). The numeric-family builtins (`int*` / `uint*` /
+/// `float*` / `safeint` / `decimal`) all root at `numeric`; every other base
+/// (`string`, `bytes`, a root name) is already its own root. Surfaced by the
+/// disponent acid test (entl's `Oid extends bytes` roots at `bytes`, so it never
+/// exercised a multi-hop chain).
+fn root_scalar_base(base: &str) -> String {
+    match base {
+        "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
+        | "safeint" | "float32" | "float64" | "float" | "decimal" | "numeric" => "numeric",
+        other => other,
+    }
+    .to_string()
 }
 
 /// Lower one scalar/reference descriptor to an [`fluessig::ir::Field`], resolving
@@ -743,25 +839,49 @@ fn lower_field(f: &FieldDescriptor, resolver: &RefResolver) -> Field {
             (ty, Some(rel))
         }
         FieldKind::PolyReference(pr) => {
-            let (to, type_column, fk) = resolver.poly_reference(&pr);
-            let ty = TypeRef::Ref {
-                name: to.clone(),
-                entity: true,
-            };
-            let rel = Relation {
-                to,
-                cardinality: Cardinality::One,
-                kind: RelKind::Association,
-                properties: None,
-                table: None,
-                fk_columns: Some(fk),
-                type_column,
-                source_columns: None,
-                source_type_column: None,
-            };
-            (ty, Some(rel))
+            // The `<Root>Id` heuristic fires on any type name ending in `Id`, but a
+            // DECLARED scalar can end in `Id` too (disponent's `FanoutId` /
+            // `MessageId` / `DispatchId`). The macro can't tell them apart at the
+            // token, so disambiguate here: a name that is NOT a known family root
+            // but IS a declared/stock named type is a plain scalar/enum/union column,
+            // not a polymorphic reference. A name that is neither stays a poly ref,
+            // so a genuinely dangling family still fails honestly at the loader.
+            if !resolver.is_family_root(pr.id_enum) && resolver.is_declared_named(pr.id_enum) {
+                (resolver.resolve_named(pr.id_enum), None)
+            } else {
+                let (to, type_column, fk) = resolver.poly_reference(&pr);
+                let ty = TypeRef::Ref {
+                    name: to.clone(),
+                    entity: true,
+                };
+                let rel = Relation {
+                    to,
+                    cardinality: Cardinality::One,
+                    kind: RelKind::Association,
+                    properties: None,
+                    table: None,
+                    fk_columns: Some(fk),
+                    type_column,
+                    source_columns: None,
+                    source_type_column: None,
+                };
+                (ty, Some(rel))
+            }
         }
         FieldKind::Named(name) => (resolver.resolve_named(name), None),
+        FieldKind::List(elem) => {
+            let of = match elem {
+                ListElem::Scalar(kind) => {
+                    let (name, base) = kind.catalog();
+                    TypeRef::Scalar {
+                        name: name.to_string(),
+                        base: base.map(str::to_string),
+                    }
+                }
+                ListElem::Named(name) => resolver.resolve_named(name),
+            };
+            (TypeRef::List { of: Box::new(of) }, None)
+        }
         FieldKind::Flatten(_) => unreachable!("flatten fields are expanded before lowering"),
     };
     Field {
@@ -935,6 +1055,10 @@ pub struct TypeDecls<'a> {
     pub enums: &'a [&'static EnumDescriptor],
     /// The `#[derive(Scalar)]` descriptors — lowered to the catalog's `scalars`.
     pub scalars: &'a [&'static ScalarDescriptor],
+    /// The `#[derive(Union)]` descriptors — lowered to the catalog's `unions`, and
+    /// feeding the [`RefResolver`] so a union-typed field resolves to
+    /// `TypeRef::Union`.
+    pub unions: &'a [&'static UnionDescriptor],
 }
 
 /// Collect entity + edge descriptors into the in-memory [`fluessig::ir::Catalog`]
@@ -989,7 +1113,7 @@ pub fn build_catalog_typed(
     records: &[&'static RecordDescriptor],
     decls: TypeDecls,
 ) -> Catalog {
-    let resolver = RefResolver::new(entities, decls.enums, decls.scalars);
+    let resolver = RefResolver::new(entities, decls.enums, decls.scalars, decls.unions);
     let mut ir_entities: Vec<IrEntity> = entities
         .iter()
         .map(|d| lower_entity(d, &resolver))
@@ -1019,13 +1143,37 @@ pub fn build_catalog_typed(
                 base: s.base.map(str::to_string),
             })
             .collect(),
-        unions: Vec::new(),
+        unions: decls
+            .unions
+            .iter()
+            .map(|u| lower_union(u, &resolver))
+            .collect(),
         enums: decls.enums.iter().map(|e| lower_enum(e)).collect(),
         entities: ir_entities,
         relation_properties,
         value_structs: records
             .iter()
             .map(|r| records::lower_record(r, &resolver))
+            .collect(),
+    }
+}
+
+/// Lower a [`UnionDescriptor`] to the catalog's [`fluessig::ir::UnionDef`]: each
+/// variant's wire `tag` plus its body type, resolved against the sibling
+/// descriptors exactly as an entity's `Named` field is (a variant body `StateChange`
+/// → `Ref { entity: false }`, a scalar body → its scalar). Matches the TypeSpec
+/// emitter's `{ tag: v.name, type: typeRef(v.type) }`.
+fn lower_union(u: &UnionDescriptor, resolver: &RefResolver) -> UnionDef {
+    UnionDef {
+        name: u.name.to_string(),
+        doc: u.doc.map(str::to_string),
+        variants: u
+            .variants
+            .iter()
+            .map(|v| UnionVariant {
+                tag: v.tag.to_string(),
+                ty: resolver.resolve_named(v.ty),
+            })
             .collect(),
     }
 }
@@ -1099,269 +1247,6 @@ pub fn to_catalog_json_typed(
 ) -> String {
     let catalog = build_catalog_typed(name, version, entities, edges, records, decls);
     let mut json = serde_json::to_string_pretty(&catalog).expect("catalog serializes");
-    json.push('\n');
-    json
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Slice 5 — the op surface (`api.json`)
-//
-// `derive-front-end.md` §2.7: **the impl that actually runs IS the interface**.
-// `#[fluessig::export]` on an `impl` block captures each method's shape (name,
-// params, return, op kind) into an [`InterfaceDescriptor`] — pure `&'static`
-// data, exactly like [`EntityDescriptor`] — and `catalog!`'s `api:` root list
-// lowers those descriptors into the same `api.json` the loader + bindgen already
-// consume, so declaration/implementation drift is impossible.
-// ═════════════════════════════════════════════════════════════════════════════
-
-/// A type (or unit-struct "namespace") whose `#[fluessig::export] impl` block
-/// was captured into an op interface. `#[fluessig::export]` expands to an
-/// `impl ApiExport for Self` carrying the `&'static InterfaceDescriptor`, so
-/// `catalog!`'s `api:` list can reach it as `<T as ApiExport>::DESCRIPTOR` —
-/// the op-surface twin of [`Entity`]/[`Edge`].
-pub trait ApiExport {
-    /// The descriptor the `#[fluessig::export]` macro expands to.
-    const DESCRIPTOR: &'static InterfaceDescriptor;
-}
-
-/// One op interface — the `#[fluessig::export] impl <Name>` block: its name (the
-/// `Self` type), the impl block's `///` doc, and the ops it exposes, in
-/// declaration order. Lowers to one `api.json` `ApiInterface`.
-#[derive(Debug, Clone, Copy)]
-pub struct InterfaceDescriptor {
-    /// The interface name — the `Self` type of the exported impl (`"Entl"`).
-    pub name: &'static str,
-    /// The impl block's `///` doc comment, if any.
-    pub doc: Option<&'static str>,
-    /// The captured ops, in declaration order.
-    pub ops: &'static [OpDescriptor],
-    /// The `.rs` source location of the exported `impl` block (Slice 6).
-    pub span: SourceSpan,
-}
-
-/// One captured method: its Rust (snake_case) name, doc, op kind, params, and
-/// return type. The name/param names are camelCased at lowering to match the
-/// `api.json` op-surface convention (the TypeSpec `interface` path spells them
-/// lowerCamel too).
-#[derive(Debug, Clone, Copy)]
-pub struct OpDescriptor {
-    /// The Rust method name (snake_case); camelCased at lowering.
-    pub name: &'static str,
-    /// The method's `///` doc comment, if any.
-    pub doc: Option<&'static str>,
-    /// The op kind — `ctor` / plain unary / `stream` / `manual`.
-    pub kind: OpKind,
-    /// The method params (receiver excluded), in declaration order.
-    pub params: &'static [ParamDescriptor],
-    /// The return type as an op-surface type. A `ctor` is always `void`; a
-    /// `stream` carries its iterator's `Item` type (the per-batch type); a
-    /// `Result<T>` wrapper is transparent (unwrapped to `T`).
-    pub returns: ApiTypeDesc,
-    /// The `.rs` source location of this method's declaration (Slice 6).
-    pub span: SourceSpan,
-}
-
-/// One op param: its Rust (snake_case) name (camelCased at lowering), its
-/// op-surface type, and whether it is optional (an `Option<T>` param lowers to
-/// `optional: true` carrying the *unwrapped* `T` — params use `optional`,
-/// returns use `nullable`, mirroring the TypeSpec op path).
-#[derive(Debug, Clone, Copy)]
-pub struct ParamDescriptor {
-    /// The Rust param name (snake_case); camelCased at lowering.
-    pub name: &'static str,
-    /// The param's op-surface type.
-    pub ty: ApiTypeDesc,
-    /// `Option<T>` param ⇒ `true`.
-    pub optional: bool,
-    /// The `.rs` source location of this param's declaration (Slice 6).
-    pub span: SourceSpan,
-}
-
-/// The four op kinds (`derive-front-end.md` §2.7). Mirrors [`fluessig::api::Shape`];
-/// kept as its own front-end enum so the descriptor layer doesn't depend on the
-/// loader's serde types at the capture site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpKind {
-    /// `#[fluessig(ctor)]` — a constructor. Returns `void` on the op surface.
-    Ctor,
-    /// An untagged method — a plain unary op (the default).
-    Unary,
-    /// `#[fluessig(stream)]` — returns an iterator/stream; bindgen maps it to a
-    /// JS async iterator / Python generator / Ruby Enumerator.
-    Stream,
-    /// `#[fluessig(manual)]` — recorded in `api.json` but hand-written per
-    /// binding (not auto-bound).
-    Manual,
-}
-
-/// An op-surface type as pure `&'static` data — the front-end twin of
-/// [`fluessig::api::ApiType`], recursive through `&'static` so it lives in a
-/// `const`. Lowered to `ApiType` by [`lower_api_type`].
-#[derive(Debug, Clone, Copy)]
-pub enum ApiTypeDesc {
-    /// A scalar name (`"string"`, `"int64"`, `"boolean"`, `"bytes"`, `"void"`, …).
-    Scalar(&'static str),
-    /// A model/DTO or entity reference (`{ "model": name }`).
-    Model(&'static str),
-    /// An enum reference (`{ "enum": name }`).
-    Enum(&'static str),
-    /// A list of the inner type (`{ "list": inner }`).
-    List(&'static ApiTypeDesc),
-    /// A nullable inner type (`{ "nullable": inner }`) — an `Option<T>` return.
-    Nullable(&'static ApiTypeDesc),
-}
-
-/// Lower an [`ApiTypeDesc`] to the loader's [`fluessig::api::ApiType`].
-fn lower_api_type(t: &ApiTypeDesc) -> ApiType {
-    match t {
-        ApiTypeDesc::Scalar(s) => ApiType::Scalar((*s).to_string()),
-        ApiTypeDesc::Model(m) => ApiType::Model {
-            model: (*m).to_string(),
-        },
-        ApiTypeDesc::Enum(e) => ApiType::Enum {
-            r#enum: (*e).to_string(),
-        },
-        ApiTypeDesc::List(inner) => ApiType::List {
-            list: Box::new(lower_api_type(inner)),
-        },
-        ApiTypeDesc::Nullable(inner) => ApiType::Nullable {
-            nullable: Box::new(lower_api_type(inner)),
-        },
-    }
-}
-
-/// Lower one captured op to an [`fluessig::api::ApiOp`]. The name + param names
-/// camelCase to the op-surface convention; `readonly`/`destructive`/`stream_error`
-/// stay at their (unset) defaults — those op annotations are not part of Slice 5.
-fn lower_op(op: &OpDescriptor) -> ApiOp {
-    ApiOp {
-        name: camel(op.name),
-        doc: op.doc.map(str::to_string),
-        shape: match op.kind {
-            OpKind::Ctor => Shape::Ctor,
-            OpKind::Unary => Shape::Unary,
-            OpKind::Stream => Shape::Stream,
-            OpKind::Manual => Shape::Manual,
-        },
-        readonly: false,
-        destructive: false,
-        stream_error: None,
-        params: op
-            .params
-            .iter()
-            .map(|p| ApiParam {
-                name: camel(p.name),
-                ty: lower_api_type(&p.ty),
-                optional: p.optional.then_some(true),
-            })
-            .collect(),
-        returns: lower_api_type(&op.returns),
-        bindings: Default::default(),
-    }
-}
-
-/// Collect op-interface descriptors into the in-memory [`fluessig::api::ApiDoc`]
-/// — the same op-layer IR the loader validates and bindgen projects. `name`
-/// becomes the api `source`; `version` stamps the emitter field (as the catalog
-/// path does).
-///
-/// Slice 8a Gap 2 materialises the **`models`** array: every entity/DTO an op
-/// references — directly, or transitively through a referenced DTO's fields — is
-/// flattened into a `models` entry exactly as the TypeSpec op path does (a to-one
-/// relation becomes its FK field(s), a polymorphic one prepends the discriminator,
-/// to-many relations are dropped; see [`build_models`]). The `entities`, `edges`,
-/// and `records` are the same catalog roots [`build_catalog_full`] takes, so the
-/// op layer and the model layer are lowered from one consistent catalog.
-pub fn build_api(
-    name: &str,
-    version: &str,
-    entities: &[&'static EntityDescriptor],
-    edges: &[&'static EdgeDescriptor],
-    records: &[&'static RecordDescriptor],
-    interfaces: &[&'static InterfaceDescriptor],
-) -> ApiDoc {
-    build_api_typed(
-        name,
-        version,
-        entities,
-        edges,
-        records,
-        interfaces,
-        TypeDecls::default(),
-    )
-}
-
-/// Collect op-interface descriptors into the [`fluessig::api::ApiDoc`], with the
-/// declared enums/scalars threaded through so an op/model field typed by an enum
-/// lowers to `{ enum }` and one typed by a semantic scalar to its scalar name
-/// (Slice 8b). The plain [`build_api`] delegates here with empty decls.
-#[allow(clippy::too_many_arguments)]
-pub fn build_api_typed(
-    name: &str,
-    version: &str,
-    entities: &[&'static EntityDescriptor],
-    edges: &[&'static EdgeDescriptor],
-    records: &[&'static RecordDescriptor],
-    interfaces: &[&'static InterfaceDescriptor],
-    decls: TypeDecls,
-) -> ApiDoc {
-    let catalog = build_catalog_typed(name, version, entities, edges, records, decls);
-    let api_interfaces: Vec<ApiInterface> = interfaces
-        .iter()
-        .map(|i| ApiInterface {
-            name: i.name.to_string(),
-            doc: i.doc.map(str::to_string),
-            ops: i.ops.iter().map(lower_op).collect(),
-        })
-        .collect();
-    ApiDoc {
-        fluessig: Versions {
-            format: fluessig::FORMAT_VERSION,
-            emitter: Some(format!("fluessig-derive/{version}")),
-            compiler: None,
-        },
-        source: Some(name.to_string()),
-        models: records::build_models(&catalog, &api_interfaces),
-        unions: Vec::new(),
-        interfaces: api_interfaces,
-    }
-}
-
-/// Render `api.json` — pretty-printed with a trailing newline, matching the
-/// TypeSpec emitter's `JSON.stringify(…, null, 2) + "\n"` and the catalog
-/// printer's convention.
-pub fn to_api_json(
-    name: &str,
-    version: &str,
-    entities: &[&'static EntityDescriptor],
-    edges: &[&'static EdgeDescriptor],
-    records: &[&'static RecordDescriptor],
-    interfaces: &[&'static InterfaceDescriptor],
-) -> String {
-    to_api_json_typed(
-        name,
-        version,
-        entities,
-        edges,
-        records,
-        interfaces,
-        TypeDecls::default(),
-    )
-}
-
-/// Render `api.json` for a catalog with declared enums/scalars (Slice 8b).
-#[allow(clippy::too_many_arguments)]
-pub fn to_api_json_typed(
-    name: &str,
-    version: &str,
-    entities: &[&'static EntityDescriptor],
-    edges: &[&'static EdgeDescriptor],
-    records: &[&'static RecordDescriptor],
-    interfaces: &[&'static InterfaceDescriptor],
-    decls: TypeDecls,
-) -> String {
-    let api = build_api_typed(name, version, entities, edges, records, interfaces, decls);
-    let mut json = serde_json::to_string_pretty(&api).expect("api serializes");
     json.push('\n');
     json
 }

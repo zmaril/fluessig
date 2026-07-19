@@ -50,15 +50,20 @@ pub(crate) fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStr
 fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let name = f.sig.ident.to_string();
     let doc = option_str(doc_string(&f.attrs).as_deref());
-    let (kind_tokens, kind) = method_kind(&f.attrs)?;
+    let meta = method_meta(&f.attrs)?;
+    let kind_tokens = meta.kind.tokens();
+    let readonly = meta.readonly;
+    let destructive = meta.destructive;
     let params = param_descriptors(&f.sig)?;
-    let returns = return_descriptor(kind, &f.sig)?;
+    let returns = return_descriptor(meta.kind, &f.sig)?;
     let span = span_tokens(f.sig.ident.span());
     Ok(quote! {
         ::fluessig_derive::OpDescriptor {
             name: #name,
             doc: #doc,
             kind: #kind_tokens,
+            readonly: #readonly,
+            destructive: #destructive,
             params: &[ #( #params ),* ],
             returns: #returns,
             span: #span,
@@ -66,32 +71,67 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
     })
 }
 
-/// The op kind of a method: the first `#[fluessig(ctor|stream|manual)]` tag, else
-/// plain unary. Returns the `OpKind` tokens and the parsed kind (the return
-/// lowering needs the kind — a `ctor` is `void`, a `stream` unwraps its `Item`).
-fn method_kind(attrs: &[Attribute]) -> syn::Result<(proc_macro2::TokenStream, OpKindChoice)> {
+/// The op-shaping tags on a method: its kind (`ctor` / plain unary / `stream` /
+/// `manual`) plus the `readonly` / `destructive` FLAGS that compose with it (a
+/// readonly op is still unary/stream; a destructive op likewise). Tags may ride one
+/// `#[fluessig(a, b)]` or several `#[fluessig(a)] #[fluessig(b)]` — so
+/// `@readonly @stream` (disponent's `events` / `driverPlan`) is expressible either
+/// way. At most one KIND; the flags default off.
+struct MethodMeta {
+    kind: OpKindChoice,
+    readonly: bool,
+    destructive: bool,
+}
+
+fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
+    let mut kind: Option<OpKindChoice> = None;
+    let mut readonly = false;
+    let mut destructive = false;
     for a in attrs {
-        if a.path().is_ident("fluessig") {
-            let id: Ident = a.parse_args()?;
-            let choice = match id.to_string().as_str() {
-                "ctor" => OpKindChoice::Ctor,
-                "stream" => OpKindChoice::Stream,
-                "manual" => OpKindChoice::Manual,
+        if !a.path().is_ident("fluessig") {
+            continue;
+        }
+        // one attr may carry several comma-separated tags: `#[fluessig(readonly, stream)]`.
+        let tags = a.parse_args_with(
+            syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated,
+        )?;
+        for id in tags {
+            match id.to_string().as_str() {
+                "readonly" => readonly = true,
+                "destructive" => destructive = true,
+                kind_tag @ ("ctor" | "stream" | "manual") => {
+                    if kind.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            &id,
+                            "an exported method has at most one op kind \
+                             (ctor / stream / manual)",
+                        ));
+                    }
+                    kind = Some(match kind_tag {
+                        "ctor" => OpKindChoice::Ctor,
+                        "stream" => OpKindChoice::Stream,
+                        _ => OpKindChoice::Manual,
+                    });
+                }
                 other => {
                     return Err(syn::Error::new_spanned(
                         &id,
                         format!(
-                            "unknown op kind `{other}` — an exported method is tagged \
-                             #[fluessig(ctor)], #[fluessig(stream)], #[fluessig(manual)], \
-                             or left untagged (a plain unary op)"
+                            "unknown op tag `{other}` — an exported method is tagged with an \
+                             op kind (#[fluessig(ctor)] / #[fluessig(stream)] / \
+                             #[fluessig(manual)], or untagged for a plain unary op) and/or the \
+                             flags #[fluessig(readonly)] / #[fluessig(destructive)]"
                         ),
                     ))
                 }
-            };
-            return Ok((choice.tokens(), choice));
+            }
         }
     }
-    Ok((OpKindChoice::Unary.tokens(), OpKindChoice::Unary))
+    Ok(MethodMeta {
+        kind: kind.unwrap_or(OpKindChoice::Unary),
+        readonly,
+        destructive,
+    })
 }
 
 /// The parsed op kind — a macro-local mirror of `fluessig_derive::OpKind`, so the

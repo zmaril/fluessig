@@ -1,0 +1,16 @@
+[package]
+name = "disponent-schema-derive"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "THE DISPONENT ACID TEST: disponent's full schema (the tagged EventPayload union, the observe-only/destructive MCP op hints, the env_capabilities edge) authored with the fluessig Rust derive front end, proving parity with the TypeSpec-authored disponent.tsp — the union / @readonly / @destructive front-end features this PR adds."
+repository = "https://github.com/zmaril/fluessig"
+publish = false
+
+[dependencies]
+fluessig-derive = { path = "../fluessig-derive" }
+
+[dev-dependencies]
+fluessig = { path = "../.." }
+fluessig-derive = { path = "../fluessig-derive" }
+serde_json = "1"

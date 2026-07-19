@@ -252,3 +252,35 @@ emitter, all additive — entl stayed green):
 Gate: `crates/disponent-schema-derive/tests/parity.rs` — the derive-emitted catalog/api project
 to the SAME physical tables (columns + order + PK order), enums, scalars, unions, ops (every
 readonly/destructive flag), models, and api-unions as disponent's committed artifacts.
+
+### Node-backend addendum — synchronous / infallible unary ops + op export-name pins
+
+The next acid test after entl/disponent is **atilla** (the pi napi surface): ~157 symbols that
+are almost entirely fluessig-generatable, except its ops are deliberately **synchronous and
+infallible** under **exact JS names** (`atillaNativeVersion(): string`, `#[napi(js_name = …)]`),
+which the node backend could not express — it wrapped every unary op in `AsyncTask` → `Promise<T>`
+over a `Result` seam and applied name pins only to DTO fields. Two OPT-IN front-end features close
+that gap (both proven in `crates/derive-demo/src/native.rs` + `tests/api_gate.rs`; the async
+default is unchanged, so entl/disponent stayed green):
+
+- **`#[fluessig(sync)]` — synchronous / infallible unary ops.** A FLAG (composing only with a
+  plain unary op; the macro rejects it on ctor/stream/manual) that lowers to `api.json`
+  `"sync": true`. The node backend then emits a plain `#[napi] pub fn name(..) -> T` — no
+  `AsyncTask`, no `Promise`, no per-op `Task` struct. Fallibility is read off the Rust return
+  type: a bare `T` return is **infallible** (`"infallible": true`) — the node fn is `-> T` with a
+  direct core call (no `.map_err`) and the SHARED core-trait method drops its `anyhow::Result`
+  wrapper (`fn name(..) -> T`); a `Result<T>` return keeps the error seam (`-> napi::Result<T>`,
+  Err → JS throw). The core-trait change lives in the shared `emit_core_traits_with`
+  (`src/bindgen/mod.rs`); the node emission in `src/bindgen/node.rs`. The other backends
+  (python/ruby/php) don't yet apply `sync` — atilla is node-only, so this is the honest first
+  step, not a whole-surface rollout.
+- **`#[fluessig(name = "…")]` — op export-name pins.** The op-level twin of the DTO-field
+  `SymbolBinding`/`pinned_name` mechanism: an explicit export name, lowered onto `ApiOp.bindings`
+  (every language slug) so a backend reproduces the exact spelling rather than re-deriving it from
+  a casing rule. The node backend applies it as `#[napi(js_name = "…")]` on the function/method
+  (mirroring the DTO-field path); an unpinned op keeps its default napi camelCase, byte-identical.
+
+Together these generate atilla's `#[napi(js_name = "atillaNativeVersion")] pub fn …() -> String`
+verbatim (modulo the core-seam body). The remaining atilla tail (a later slice): binary
+`Uint8Array`/`Buffer` arg spelling + result-envelope shaping; the AgentBridge callback bridge
+stays hand-written.

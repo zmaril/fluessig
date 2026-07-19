@@ -95,6 +95,21 @@ pub struct ApiOp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     pub shape: Shape,
+    /// `#[fluessig(sync)]` — a synchronous unary op. The node backend emits a
+    /// plain `#[napi] fn -> T` instead of the default `AsyncTask` → `Promise<T>`.
+    /// Only meaningful on [`Shape::Unary`]; opt-in, so an unset op keeps the
+    /// historical async projection byte-for-byte. Absent (⇒ `false`) in every
+    /// pre-sync fixture.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sync: bool,
+    /// The op's Rust return type is a bare `T` (not `Result<T>`), so a `sync` op
+    /// carries NO error channel: the node backend emits `-> T` (no
+    /// `napi::Result`, no `.map_err`) and the shared core-trait method is
+    /// `fn name(..) -> T`. Only ever `true` alongside `sync`; an async op always
+    /// crosses through the `Result` seam (a rejected `Promise`), so this is
+    /// meaningless off `sync` and defaults `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub infallible: bool,
     /// `@readonly` — flows into the MCP `readOnlyHint` annotation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub readonly: bool,

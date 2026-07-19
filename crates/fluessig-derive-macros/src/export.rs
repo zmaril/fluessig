@@ -52,6 +52,12 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
     let doc = option_str(doc_string(&f.attrs).as_deref());
     let meta = method_meta(&f.attrs)?;
     let kind_tokens = meta.kind.tokens();
+    let sync = meta.sync;
+    // Fallibility is read off the Rust return type: a `Result<T>` return is
+    // fallible (keeps the error seam), a bare `T` is infallible. Only consulted
+    // for a `sync` op (async ops always cross the `Result` seam).
+    let fallible = returns_result(&f.sig);
+    let name_pin = option_str(meta.name_pin.as_deref());
     let readonly = meta.readonly;
     let destructive = meta.destructive;
     let params = param_descriptors(&f.sig)?;
@@ -62,6 +68,9 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
             name: #name,
             doc: #doc,
             kind: #kind_tokens,
+            sync: #sync,
+            fallible: #fallible,
+            name_pin: #name_pin,
             readonly: #readonly,
             destructive: #destructive,
             params: &[ #( #params ),* ],
@@ -69,6 +78,21 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
             span: #span,
         }
     })
+}
+
+/// Whether a method's declared return type is a `Result<…>` (fallible) — the
+/// sync path uses this to decide between an infallible `-> T` node seam and a
+/// throwing `-> napi::Result<T>` one. A bare `T` (or no return) is infallible.
+fn returns_result(sig: &syn::Signature) -> bool {
+    let ReturnType::Type(_, ty) = &sig.output else {
+        return false;
+    };
+    let Type::Path(tp) = &**ty else { return false };
+    tp.path
+        .segments
+        .last()
+        .map(|s| s.ident == "Result")
+        .unwrap_or(false)
 }
 
 /// The op-shaping tags on a method: its kind (`ctor` / plain unary / `stream` /
@@ -79,58 +103,119 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
 /// way. At most one KIND; the flags default off.
 struct MethodMeta {
     kind: OpKindChoice,
+    /// `#[fluessig(sync)]` — a synchronous unary op (node emits a plain `#[napi]
+    /// fn`, not an `AsyncTask`). Legal only on a plain unary op.
+    sync: bool,
     readonly: bool,
     destructive: bool,
+    /// `#[fluessig(name = "…")]` — an explicit op export-name pin.
+    name_pin: Option<String>,
 }
 
 fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
     let mut kind: Option<OpKindChoice> = None;
+    let mut sync = false;
+    let mut sync_span: Option<proc_macro2::Span> = None;
     let mut readonly = false;
     let mut destructive = false;
+    let mut name_pin: Option<String> = None;
     for a in attrs {
         if !a.path().is_ident("fluessig") {
             continue;
         }
-        // one attr may carry several comma-separated tags: `#[fluessig(readonly, stream)]`.
-        let tags = a.parse_args_with(
-            syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated,
+        // One attr may carry several comma-separated tags: bare flags
+        // (`#[fluessig(readonly, stream)]`) and/or the name-value pin
+        // (`#[fluessig(name = "…")]`), so parse the general `Meta` grammar.
+        let metas = a.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
         )?;
-        for id in tags {
-            match id.to_string().as_str() {
-                "readonly" => readonly = true,
-                "destructive" => destructive = true,
-                kind_tag @ ("ctor" | "stream" | "manual") => {
-                    if kind.is_some() {
+        for m in metas {
+            match m {
+                syn::Meta::Path(p) => {
+                    let id = p.get_ident().ok_or_else(|| {
+                        syn::Error::new_spanned(&p, "expected a bare op tag (e.g. `sync`)")
+                    })?;
+                    match id.to_string().as_str() {
+                        "sync" => {
+                            sync = true;
+                            sync_span = Some(id.span());
+                        }
+                        "readonly" => readonly = true,
+                        "destructive" => destructive = true,
+                        kind_tag @ ("ctor" | "stream" | "manual") => {
+                            if kind.is_some() {
+                                return Err(syn::Error::new_spanned(
+                                    id,
+                                    "an exported method has at most one op kind \
+                                     (ctor / stream / manual)",
+                                ));
+                            }
+                            kind = Some(match kind_tag {
+                                "ctor" => OpKindChoice::Ctor,
+                                "stream" => OpKindChoice::Stream,
+                                _ => OpKindChoice::Manual,
+                            });
+                        }
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                id,
+                                format!(
+                                    "unknown op tag `{other}` — an exported method is tagged with \
+                                     an op kind (#[fluessig(ctor)] / #[fluessig(stream)] / \
+                                     #[fluessig(manual)], or untagged for a plain unary op), the \
+                                     flags #[fluessig(sync)] / #[fluessig(readonly)] / \
+                                     #[fluessig(destructive)], and/or the export-name pin \
+                                     #[fluessig(name = \"…\")]"
+                                ),
+                            ))
+                        }
+                    }
+                }
+                syn::Meta::NameValue(nv) => {
+                    if !nv.path.is_ident("name") {
                         return Err(syn::Error::new_spanned(
-                            &id,
-                            "an exported method has at most one op kind \
-                             (ctor / stream / manual)",
+                            &nv.path,
+                            "unknown op name-value tag — the only one is \
+                             #[fluessig(name = \"…\")] (the export-name pin)",
                         ));
                     }
-                    kind = Some(match kind_tag {
-                        "ctor" => OpKindChoice::Ctor,
-                        "stream" => OpKindChoice::Stream,
-                        _ => OpKindChoice::Manual,
-                    });
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = &nv.value
+                    else {
+                        return Err(syn::Error::new_spanned(
+                            &nv.value,
+                            "#[fluessig(name = \"…\")] expects a string literal",
+                        ));
+                    };
+                    name_pin = Some(s.value());
                 }
-                other => {
+                syn::Meta::List(l) => {
                     return Err(syn::Error::new_spanned(
-                        &id,
-                        format!(
-                            "unknown op tag `{other}` — an exported method is tagged with an \
-                             op kind (#[fluessig(ctor)] / #[fluessig(stream)] / \
-                             #[fluessig(manual)], or untagged for a plain unary op) and/or the \
-                             flags #[fluessig(readonly)] / #[fluessig(destructive)]"
-                        ),
+                        l,
+                        "unexpected nested list in an op tag",
                     ))
                 }
             }
         }
     }
+    // `sync` composes only with a plain unary op — a ctor/stream/manual has no
+    // async-Promise seam to collapse, so pairing them is a clear authoring error.
+    if sync && kind.is_some() {
+        let span = sync_span.unwrap_or_else(proc_macro2::Span::call_site);
+        return Err(syn::Error::new(
+            span,
+            "#[fluessig(sync)] applies only to a plain unary op (not a \
+             ctor / stream / manual)",
+        ));
+    }
     Ok(MethodMeta {
         kind: kind.unwrap_or(OpKindChoice::Unary),
+        sync,
         readonly,
         destructive,
+        name_pin,
     })
 }
 

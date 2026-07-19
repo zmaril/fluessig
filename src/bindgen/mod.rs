@@ -432,6 +432,12 @@ pub(super) fn emit_core_traits_with(
                 Shape::Stream => {
                     format!("fn {name}(&self, {ps}) -> anyhow::Result<Box<dyn PollStream<{ret}>>>")
                 }
+                // An infallible (`#[fluessig(sync)]` + bare-`T` return) unary op
+                // drops the `Result` seam entirely — the core method IS the value.
+                // `infallible` is only ever set on a unary op, so this rides the
+                // same `has_ctor` receiver split as the fallible unary arms below.
+                _ if has_ctor && op.infallible => format!("fn {name}(&self, {ps}) -> {ret}"),
+                _ if op.infallible => format!("fn {name}({ps}) -> {ret}"),
                 _ if has_ctor => format!("fn {name}(&self, {ps}) -> anyhow::Result<{ret}>"),
                 _ => format!("fn {name}({ps}) -> anyhow::Result<{ret}>"),
             };

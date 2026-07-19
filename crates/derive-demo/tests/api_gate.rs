@@ -240,3 +240,103 @@ fn bindgen_projects_the_op_surface() {
         "python should bind the stream op"
     );
 }
+
+/// The two node-backend features this PR adds, against the `native` demo schema
+/// (kept apart from the four-kind `Db`/`GitHelpers` demo so the sync/pinned
+/// concept doesn't leak into the multi-backend pedagogy):
+///
+///   * Feature A — `#[fluessig(sync)]`: a synchronous unary op, emitted as a
+///     plain `#[napi] fn` with NO `AsyncTask`/`Promise`. Infallible (bare-`T`
+///     core) returns the value directly (no `Result` seam, and the shared core
+///     trait method is `fn … -> T`); fallible (`Result<T>` core) emits
+///     `-> napi::Result<T>` (Err → JS throw).
+///   * Feature B — `#[fluessig(name = "…")]`: an op export-name pin, emitted as
+///     `#[napi(js_name = "…")]` on the function.
+///
+/// Both are OPT-IN: the untagged `slow_count` op stays the historical async
+/// `AsyncTask` → `Promise<number>`.
+#[test]
+fn native_api_carries_sync_and_pin_flags() {
+    let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json())
+        .expect("native api.json must load clean");
+    let iface = api.interfaces.iter().find(|i| i.name == "Native").unwrap();
+    let op = |n: &str| iface.ops.iter().find(|o| o.name == n).unwrap();
+
+    // sync + infallible + name-pinned: the atilla `atillaNativeVersion` shape.
+    let nv = op("nativeVersion");
+    assert_eq!(nv.shape, Shape::Unary);
+    assert!(nv.sync, "nativeVersion is #[fluessig(sync)]");
+    assert!(nv.infallible, "a bare-String return is infallible");
+    assert!(matches!(&nv.returns, ApiType::Scalar(s) if s == "string"));
+    assert_eq!(
+        nv.bindings.get("node").and_then(|b| b.name.as_deref()),
+        Some("atillaNativeVersion"),
+        "the op export-name pin lands under the node binding"
+    );
+
+    // sync but FALLIBLE (Result<T> return): sync set, infallible NOT set.
+    let cr = op("checkedRoot");
+    assert!(cr.sync, "checkedRoot is #[fluessig(sync)]");
+    assert!(!cr.infallible, "a Result<T> return keeps the error seam");
+
+    // opt-in: the untagged op is neither sync nor pinned (default async).
+    let sc = op("slowCount");
+    assert!(
+        !sc.sync && !sc.infallible,
+        "slowCount stays the async default"
+    );
+    assert!(sc.bindings.is_empty(), "an unpinned op has no bindings");
+}
+
+/// The node backend emits the synchronous/infallible + `js_name` shapes, and the
+/// default async op is untouched — the concrete generated-code proof for both
+/// features. Compare `native_version`'s emission to atilla's hand-written
+/// `crates/atilla-napi/src/lib.rs` export (byte-comparable modulo the core-seam
+/// body): `#[napi(js_name = "atillaNativeVersion")] pub fn …() -> String`.
+#[test]
+fn node_emits_sync_and_pinned_shapes() {
+    let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json()).unwrap();
+    let enums: Vec<EnumDesc> = Vec::new();
+    let node = node_binding(&api, &enums, None);
+
+    // Feature A + B together: sync + infallible + pinned → a plain `#[napi] fn`
+    // returning `String`, under the pinned js_name, with no Promise/AsyncTask/Result.
+    assert!(
+        node.contains(
+            "#[napi(js_name = \"atillaNativeVersion\")]\npub fn native_version() -> String {"
+        ),
+        "sync+infallible+pinned op must emit a plain `#[napi(js_name=…)] fn -> String`\n{node}"
+    );
+    // the infallible core seam is a direct value passthrough — no `.map_err`, no Result.
+    assert!(
+        node.contains("pub fn native_version() -> String {\n    <crate::core_impl::NativeImpl as NativeCore>::native_version()\n}"),
+        "infallible sync op must call the core directly with no Result seam"
+    );
+    // the shared core trait drops the Result wrapper for the infallible op.
+    assert!(
+        node.contains("fn native_version() -> String;"),
+        "the infallible op's core-trait method must be `fn … -> String`"
+    );
+
+    // Feature A, fallible variant: sync but `Result<T>` → `napi::Result`, still no AsyncTask.
+    assert!(
+        node.contains("#[napi]\npub fn checked_root(path: String) -> Result<String> {"),
+        "sync+fallible op must emit `-> Result<String>` (throws), no AsyncTask"
+    );
+
+    // Opt-in / no regression: the untagged op keeps the async projection verbatim.
+    assert!(
+        node.contains("#[napi(ts_return_type = \"Promise<number>\")]\npub fn slow_count(path: String) -> AsyncTask<SlowCountTask> {"),
+        "the untagged op must stay the default async `Promise<number>`"
+    );
+
+    // A sync op produces NO per-op Task struct (only the async `slow_count` does).
+    assert!(
+        !node.contains("struct NativeVersionTask") && !node.contains("struct CheckedRootTask"),
+        "a sync op must not generate an off-thread Task"
+    );
+    assert!(
+        node.contains("pub struct SlowCountTask"),
+        "the async op still generates its Task"
+    );
+}

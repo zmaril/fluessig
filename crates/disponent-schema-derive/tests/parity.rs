@@ -41,12 +41,16 @@ use fluessig::{load_catalog, FORMAT_VERSION};
 
 use disponent_schema_derive::fluessig_catalog;
 
-/// The committed disponent artifact path (the checked-out sibling repo).
+/// The committed disponent artifact, resolved from a STATIC SNAPSHOT vendored
+/// into this crate (`tests/fixtures/{catalog,api}.json`). These are a frozen copy
+/// of disponent's TypeSpec-emitted `schema/{catalog,api}.json`, vendored here so
+/// the parity gate is self-contained in fluessig CI (which only checks out
+/// fluessig — the disponent sibling repo is NOT present). Unlike the entl gate,
+/// whose fixtures fluessig's own codegen regenerates, these are an EXTERNAL
+/// snapshot: if disponent's schema changes, these files MUST be refreshed by hand
+/// from `disponent/schema/{catalog,api}.json`.
 fn disponent(file: &str) -> String {
-    format!(
-        "{}/../../../disponent/schema/{file}",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    format!("{}/tests/fixtures/{file}", env!("CARGO_MANIFEST_DIR"))
 }
 
 /// One physical table reduced to its comparable shape: a name-keyed column map

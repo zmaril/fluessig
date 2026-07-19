@@ -1,0 +1,1145 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "0.0.0",
+    "compiler": "1.14.0"
+  },
+  "source": "disponent.tsp",
+  "models": [
+    {
+      "name": "StateChange",
+      "doc": null,
+      "fields": [
+        {
+          "name": "from",
+          "type": {
+            "enum": "SessionState"
+          },
+          "nullable": false
+        },
+        {
+          "name": "to",
+          "type": {
+            "enum": "SessionState"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "AgentMessage",
+      "doc": null,
+      "fields": [
+        {
+          "name": "role",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "text",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "ToolCallInfo",
+      "doc": null,
+      "fields": [
+        {
+          "name": "tool",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "input",
+          "type": "Json",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "ToolResultInfo",
+      "doc": null,
+      "fields": [
+        {
+          "name": "tool",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "ok",
+          "type": "boolean",
+          "nullable": false
+        },
+        {
+          "name": "output",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "LogLine",
+      "doc": null,
+      "fields": [
+        {
+          "name": "line",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "UsageDelta",
+      "doc": null,
+      "fields": [
+        {
+          "name": "modelId",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "inputTokens",
+          "type": "int64",
+          "nullable": true
+        },
+        {
+          "name": "outputTokens",
+          "type": "int64",
+          "nullable": true
+        },
+        {
+          "name": "costCents",
+          "type": "Cents",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "ArtifactRef",
+      "doc": null,
+      "fields": [
+        {
+          "name": "artifactIdx",
+          "type": "int64",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "RawObservation",
+      "doc": null,
+      "fields": [
+        {
+          "name": "source",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "data",
+          "type": "Json",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "MailRef",
+      "doc": "Pointer + the fields a reader needs to triage a `mail` event without\nfetching the Message: direction (sender/recipient), the fan-out it belongs\nto, and its topic (so a reader can group by topic for latest-wins).",
+      "fields": [
+        {
+          "name": "messageId",
+          "type": "MessageId",
+          "nullable": false
+        },
+        {
+          "name": "sender",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "fanoutId",
+          "type": "FanoutId",
+          "nullable": false
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "OpenOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "configPath",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "sink",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "DispatchSpec",
+      "doc": null,
+      "fields": [
+        {
+          "name": "brief",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "env",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "agent",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "repo",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "gitRef",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "isolation",
+          "type": {
+            "enum": "IsolationKind"
+          },
+          "nullable": true
+        },
+        {
+          "name": "fetchRemote",
+          "type": "boolean",
+          "nullable": true
+        },
+        {
+          "name": "template",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "setup",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "timeoutSecs",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "maxBudget",
+          "type": "Cents",
+          "nullable": true
+        },
+        {
+          "name": "unchecked",
+          "type": "boolean",
+          "nullable": true
+        },
+        {
+          "name": "tags",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "labels",
+          "type": "Json",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "SessionFilter",
+      "doc": null,
+      "fields": [
+        {
+          "name": "env",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "state",
+          "type": {
+            "enum": "SessionState"
+          },
+          "nullable": true
+        },
+        {
+          "name": "dispatchId",
+          "type": "DispatchId",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "WorkspaceLink",
+      "doc": "An editor link into a session's working directory.",
+      "fields": [
+        {
+          "name": "sessionUid",
+          "type": "SessionUid",
+          "nullable": false
+        },
+        {
+          "name": "available",
+          "type": "boolean",
+          "nullable": false
+        },
+        {
+          "name": "url",
+          "type": "url",
+          "nullable": true
+        },
+        {
+          "name": "detail",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "EventOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "sessionUid",
+          "type": "SessionUid",
+          "nullable": true
+        },
+        {
+          "name": "afterIdx",
+          "type": "int64",
+          "nullable": true
+        },
+        {
+          "name": "kinds",
+          "type": {
+            "list": {
+              "enum": "EventKind"
+            }
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "SendTarget",
+      "doc": "Where a Manager-sent message goes. A worker never fills this: the\nworker-role server defaults recipient = its Manager, anchored to the bound\nsession (deferred to the MCP layer). A Manager sets exactly one destination.",
+      "fields": [
+        {
+          "name": "tags",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "sessions",
+          "type": {
+            "list": "SessionUid"
+          },
+          "nullable": true
+        },
+        {
+          "name": "user",
+          "type": "SessionUid",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "MessagesFilter",
+      "doc": "Filter for the `messages` read. Absent fields don't constrain.",
+      "fields": [
+        {
+          "name": "fanoutId",
+          "type": "FanoutId",
+          "nullable": true
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": true
+        },
+        {
+          "name": "sessionUid",
+          "type": "SessionUid",
+          "nullable": true
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "latestPerTopic",
+          "type": "boolean",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "ReconcileReport",
+      "doc": null,
+      "fields": [
+        {
+          "name": "adopted",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "confirmed",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "lost",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "tornDown",
+          "type": "int32",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "McpOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "transport",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "role",
+          "type": {
+            "enum": "McpRole"
+          },
+          "nullable": true
+        },
+        {
+          "name": "maxDepth",
+          "type": "int32",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "DriverPlanOptions",
+      "doc": null,
+      "fields": [
+        {
+          "name": "dialect",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "tables",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Statement",
+      "doc": null,
+      "fields": [
+        {
+          "name": "sql",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "params",
+          "type": "Json",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "EnvCapability",
+      "doc": "What an environment can do: one row per (env, capability) the catalog\nadvertises. Mirrors the env_capabilities edge as a flat, returnable value\nstruct (the closed CapabilityKind vocabulary, plus open detail).",
+      "fields": [
+        {
+          "name": "envSlug",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "capability",
+          "type": {
+            "enum": "CapabilityKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "detail",
+          "type": "Json",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Environment",
+      "doc": "Somewhere work can run. Config supplies these; the shipped catalog fills offerings + capabilities.",
+      "fields": [
+        {
+          "name": "slug",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "kind",
+          "type": {
+            "enum": "EnvKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "displayName",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "endpoint",
+          "type": "url",
+          "nullable": true
+        },
+        {
+          "name": "lastProbedAt",
+          "type": "utcDateTime",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Offering",
+      "doc": "env × agent × model availability (from the shipped catalog + config).",
+      "fields": [
+        {
+          "name": "envSlug",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "agentName",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "modelId",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "isDefault",
+          "type": "boolean",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "Session",
+      "doc": "One attempt at a dispatch, mirroring one env-side resource.",
+      "fields": [
+        {
+          "name": "uid",
+          "type": "SessionUid",
+          "nullable": false
+        },
+        {
+          "name": "dispatchId",
+          "type": "DispatchId",
+          "nullable": false
+        },
+        {
+          "name": "state",
+          "type": {
+            "enum": "SessionState"
+          },
+          "nullable": false
+        },
+        {
+          "name": "envHandle",
+          "type": "Json",
+          "nullable": true
+        },
+        {
+          "name": "url",
+          "type": "url",
+          "nullable": true
+        },
+        {
+          "name": "resumedFrom",
+          "type": "SessionUid",
+          "nullable": true
+        },
+        {
+          "name": "startedAt",
+          "type": "utcDateTime",
+          "nullable": true
+        },
+        {
+          "name": "endedAt",
+          "type": "utcDateTime",
+          "nullable": true
+        },
+        {
+          "name": "exitReason",
+          "type": {
+            "enum": "ExitReason"
+          },
+          "nullable": true
+        },
+        {
+          "name": "exitDetail",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "reapedAt",
+          "type": "utcDateTime",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Event",
+      "doc": "One observation on a session's timeline (containment rides the key: the\nsession FK + the position, like Artifact/Usage — to-manys are queries).",
+      "fields": [
+        {
+          "name": "sessionUid",
+          "type": "SessionUid",
+          "nullable": false
+        },
+        {
+          "name": "idx",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "ts",
+          "type": "utcDateTime",
+          "nullable": false
+        },
+        {
+          "name": "kind",
+          "type": {
+            "enum": "EventKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "fidelity",
+          "type": {
+            "enum": "Fidelity"
+          },
+          "nullable": false
+        },
+        {
+          "name": "payload",
+          "type": {
+            "union": "EventPayload"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "Message",
+      "doc": "One message dropped in one inbox — the manager↔worker communication\nprimitive (notes/manager-worker-comms.md). The Manager mints these addressed\nto a worker or the user; a worker mints them addressed (implicitly) to its\nManager. Disponent owns these rows — no environment backs them, so reconcile\nskips them and durability is the SQLite mirror (design §11).",
+      "fields": [
+        {
+          "name": "id",
+          "type": "MessageId",
+          "nullable": false
+        },
+        {
+          "name": "createdAt",
+          "type": "utcDateTime",
+          "nullable": false
+        },
+        {
+          "name": "sender",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "sessionUid",
+          "type": "SessionUid",
+          "nullable": false
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "inReplyTo",
+          "type": "MessageId",
+          "nullable": true
+        },
+        {
+          "name": "fanoutId",
+          "type": "FanoutId",
+          "nullable": false
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "ackedAt",
+          "type": "utcDateTime",
+          "nullable": true
+        }
+      ]
+    }
+  ],
+  "unions": [
+    {
+      "name": "EventPayload",
+      "doc": "One observation's body — the union's variant tag is the wire discriminator.",
+      "variants": [
+        {
+          "tag": "state",
+          "type": {
+            "model": "StateChange"
+          }
+        },
+        {
+          "tag": "message",
+          "type": {
+            "model": "AgentMessage"
+          }
+        },
+        {
+          "tag": "toolCall",
+          "type": {
+            "model": "ToolCallInfo"
+          }
+        },
+        {
+          "tag": "toolResult",
+          "type": {
+            "model": "ToolResultInfo"
+          }
+        },
+        {
+          "tag": "log",
+          "type": {
+            "model": "LogLine"
+          }
+        },
+        {
+          "tag": "usage",
+          "type": {
+            "model": "UsageDelta"
+          }
+        },
+        {
+          "tag": "artifact",
+          "type": {
+            "model": "ArtifactRef"
+          }
+        },
+        {
+          "tag": "raw",
+          "type": {
+            "model": "RawObservation"
+          }
+        },
+        {
+          "tag": "mail",
+          "type": {
+            "model": "MailRef"
+          }
+        }
+      ]
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "Disponent",
+      "doc": null,
+      "ops": [
+        {
+          "name": "open",
+          "doc": null,
+          "shape": "ctor",
+          "params": [
+            {
+              "name": "options",
+              "type": {
+                "model": "OpenOptions"
+              },
+              "optional": true
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "environments",
+          "doc": null,
+          "shape": "unary",
+          "readonly": true,
+          "params": [],
+          "returns": {
+            "list": {
+              "model": "Environment"
+            }
+          }
+        },
+        {
+          "name": "refresh",
+          "doc": null,
+          "shape": "unary",
+          "params": [
+            {
+              "name": "envSlug",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": {
+            "list": {
+              "model": "Environment"
+            }
+          }
+        },
+        {
+          "name": "offerings",
+          "doc": "The offerings table: every env × agent × model the catalog knows, each\nflagged `isDefault` when it's the pick for a dispatch that names only the\nenvironment. Lets a consumer enumerate what can run where without reaching\nfor the raw driver plan.",
+          "shape": "unary",
+          "readonly": true,
+          "params": [],
+          "returns": {
+            "list": {
+              "model": "Offering"
+            }
+          }
+        },
+        {
+          "name": "capabilities",
+          "doc": "Per-env capabilities: what each environment can do, one row per\n(env, capability) the catalog advertises. Lets a consumer grade backends\nby what they support without reaching for the raw driver plan.",
+          "shape": "unary",
+          "readonly": true,
+          "params": [],
+          "returns": {
+            "list": {
+              "model": "EnvCapability"
+            }
+          }
+        },
+        {
+          "name": "dispatch",
+          "doc": null,
+          "shape": "unary",
+          "params": [
+            {
+              "name": "spec",
+              "type": {
+                "model": "DispatchSpec"
+              }
+            }
+          ],
+          "returns": {
+            "model": "Session"
+          }
+        },
+        {
+          "name": "session",
+          "doc": null,
+          "shape": "unary",
+          "readonly": true,
+          "params": [
+            {
+              "name": "uid",
+              "type": "SessionUid"
+            }
+          ],
+          "returns": {
+            "nullable": {
+              "model": "Session"
+            }
+          }
+        },
+        {
+          "name": "sessions",
+          "doc": null,
+          "shape": "unary",
+          "readonly": true,
+          "params": [
+            {
+              "name": "filter",
+              "type": {
+                "model": "SessionFilter"
+              },
+              "optional": true
+            }
+          ],
+          "returns": {
+            "list": {
+              "model": "Session"
+            }
+          }
+        },
+        {
+          "name": "workspaceLink",
+          "doc": "Return an editor link (VS Code deep link) into the session's working directory, when the backend can honestly provide one.",
+          "shape": "unary",
+          "readonly": true,
+          "params": [
+            {
+              "name": "sessionUid",
+              "type": "SessionUid"
+            }
+          ],
+          "returns": {
+            "model": "WorkspaceLink"
+          }
+        },
+        {
+          "name": "events",
+          "doc": null,
+          "shape": "stream",
+          "readonly": true,
+          "params": [
+            {
+              "name": "options",
+              "type": {
+                "model": "EventOptions"
+              },
+              "optional": true
+            }
+          ],
+          "returns": {
+            "model": "Event"
+          }
+        },
+        {
+          "name": "send",
+          "doc": "The one messaging primitive (notes/manager-worker-comms.md §6). A Manager\n`to` names a tagged worker subset (fan-out) or the user; recipients resolve\nat send time to a concrete list (a snapshot, never kept live). One Message\nis minted per matched session, all sharing a freshly minted `fanoutId`;\n`topic` (optional) is the supersession key for latest-wins (§7). Returns the\nMessages minted. Delivery is the reader's `events` pull; a message to a\nconcrete live worker is also delivered best-effort to its prompt on an\ninteract-capable env (the legacy `send` behavior, now one backend delivery).\nWorker self-send (recipient forced to the Manager) is a worker-role MCP\nconcern, deferred — the core send is the Manager surface.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "body",
+              "type": "string"
+            },
+            {
+              "name": "to",
+              "type": {
+                "model": "SendTarget"
+              },
+              "optional": true
+            },
+            {
+              "name": "inReplyTo",
+              "type": "MessageId",
+              "optional": true
+            },
+            {
+              "name": "topic",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": {
+            "list": {
+              "model": "Message"
+            }
+          }
+        },
+        {
+          "name": "ack",
+          "doc": "Acknowledge a message you received (received/handled): stamps `ackedAt`,\nwhich the Manager observes across a `fanoutId` to see \"N of M acted\" (§7).\nIdempotent.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "messageId",
+              "type": "MessageId"
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "messages",
+          "doc": "Read Messages, filtered. The Manager's fan-out ack-progress view\n(`{fanoutId}`) and a recipient's inbox (`{recipient, sessionUid}`, optionally\n`latestPerTopic` for the read-side latest-wins collapse, §7).",
+          "shape": "unary",
+          "readonly": true,
+          "params": [
+            {
+              "name": "filter",
+              "type": {
+                "model": "MessagesFilter"
+              },
+              "optional": true
+            }
+          ],
+          "returns": {
+            "list": {
+              "model": "Message"
+            }
+          }
+        },
+        {
+          "name": "cancel",
+          "doc": null,
+          "shape": "unary",
+          "destructive": true,
+          "params": [
+            {
+              "name": "sessionUid",
+              "type": "SessionUid"
+            }
+          ],
+          "returns": {
+            "model": "Session"
+          }
+        },
+        {
+          "name": "resume",
+          "doc": null,
+          "shape": "unary",
+          "params": [
+            {
+              "name": "sessionUid",
+              "type": "SessionUid"
+            }
+          ],
+          "returns": {
+            "model": "Session"
+          }
+        },
+        {
+          "name": "reap",
+          "doc": null,
+          "shape": "unary",
+          "destructive": true,
+          "params": [
+            {
+              "name": "sessionUid",
+              "type": "SessionUid"
+            }
+          ],
+          "returns": {
+            "model": "Session"
+          }
+        },
+        {
+          "name": "reconcile",
+          "doc": null,
+          "shape": "unary",
+          "params": [],
+          "returns": {
+            "model": "ReconcileReport"
+          }
+        },
+        {
+          "name": "driverPlan",
+          "doc": null,
+          "shape": "stream",
+          "readonly": true,
+          "params": [
+            {
+              "name": "options",
+              "type": {
+                "model": "DriverPlanOptions"
+              },
+              "optional": true
+            }
+          ],
+          "returns": {
+            "model": "Statement"
+          }
+        },
+        {
+          "name": "wait",
+          "doc": "Blocking wait — hand-written per binding (event-loop/GVL specifics).",
+          "shape": "manual",
+          "params": [
+            {
+              "name": "sessionUid",
+              "type": "SessionUid"
+            },
+            {
+              "name": "timeoutSecs",
+              "type": "int32"
+            }
+          ],
+          "returns": {
+            "model": "Session"
+          }
+        },
+        {
+          "name": "serveMcp",
+          "doc": "Long-running MCP server over this instance — hand-written per binding.",
+          "shape": "manual",
+          "params": [
+            {
+              "name": "options",
+              "type": {
+                "model": "McpOptions"
+              },
+              "optional": true
+            }
+          ],
+          "returns": "void"
+        }
+      ]
+    }
+  ]
+}

@@ -14,8 +14,8 @@
 
 use fluessig::api::load_api;
 use fluessig::bindgen::{
-    node_binding, php_binding, python_binding, ruby_binding, EnumDesc, EnumVariant, ExternalImport,
-    RUNTIME_STREAM_IMPORT,
+    cpp_binding, node_binding, php_binding, python_binding, ruby_binding, EnumDesc, EnumVariant,
+    ExternalImport, RUNTIME_STREAM_IMPORT,
 };
 
 /// The fixture the goldens were captured from: a stream op (so `Poll`/`PollStream`
@@ -97,6 +97,12 @@ fn php_single_file_is_byte_identical() {
     assert_eq!(php_binding(&api, &enums(), None), golden("php"));
 }
 
+#[test]
+fn cpp_single_file_is_byte_identical() {
+    let api = load_api(API).unwrap();
+    assert_eq!(cpp_binding(&api, &enums(), None), golden("cpp"));
+}
+
 // ── the folded line actually flows through, verbatim ─────────────────────────
 
 #[test]
@@ -108,6 +114,7 @@ fn every_backend_prelude_carries_the_folded_runtime_line() {
         python_binding(&api, &enums(), None),
         ruby_binding(&api, &enums(), None),
         php_binding(&api, &enums(), None),
+        cpp_binding(&api, &enums(), None),
     ] {
         assert!(
             out.contains(&line),

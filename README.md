@@ -14,8 +14,8 @@ A fluessig **catalog** is the single source of truth for a data model: its
 entities, their fields and keys, the relations between them, and the docs. From
 that one catalog fluessig generates DDL (per-dialect `CREATE TABLE` for DuckDB,
 Postgres, SQLite), ORM surfaces (SQLAlchemy models, TypeScript table types),
-language bindings (Rust / Node / Python / Ruby read planes), and even a
-per-language README.
+language bindings (Rust / Node / Python / Ruby read planes, plus PHP and Java
+JNI surfaces), and even a per-language README.
 
 The pipeline has two stages: a **front end** lowers your schema to
 `catalog.json` (plus `api.json`), and **`fluessig-gen`** — the Rust engine at

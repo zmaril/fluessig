@@ -1,0 +1,18 @@
+[package]
+name = "java-demo-schema"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "A compact fluessig schema authored with the derive front end, exercising every op shape (ctor / sync-infallible / sync-fallible / async / stream) for the Java (JNI) round-trip harness. Emits catalog.json + api.json."
+
+[dependencies]
+fluessig-derive = { path = "../fluessig-derive" }
+
+[[bin]]
+name = "emit-catalog"
+path = "src/bin/emit-catalog.rs"
+
+[[bin]]
+name = "emit-api"
+path = "src/bin/emit-api.rs"

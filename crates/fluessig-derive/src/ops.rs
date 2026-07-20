@@ -218,7 +218,7 @@ fn lower_op(op: &OpDescriptor, resolver: &RefResolver) -> ApiOp {
 fn op_name_bindings(name_pin: Option<&str>) -> std::collections::BTreeMap<String, SymbolBinding> {
     let mut out = std::collections::BTreeMap::new();
     if let Some(name) = name_pin {
-        for lang in ["node", "python", "ruby", "php", "mcp"] {
+        for lang in ["node", "python", "ruby", "php", "java", "mcp"] {
             out.insert(
                 lang.to_string(),
                 SymbolBinding {

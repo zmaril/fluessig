@@ -14,7 +14,8 @@ use std::collections::BTreeSet;
 
 use fluessig::api::{load_api, ApiType, Shape};
 use fluessig::bindgen::{
-    node_binding, php_binding, python_binding, ruby_binding, wasm_binding, EnumDesc,
+    java_binding, java_sources, node_binding, php_binding, python_binding, ruby_binding,
+    wasm_binding, EnumDesc,
 };
 use fluessig::load_catalog;
 
@@ -272,6 +273,38 @@ fn bindgen_projects_the_op_surface() {
         wasm.contains("// @manual: watch"),
         "wasm should record `watch` as @manual, not auto-bind it"
     );
+
+    // ── java (JNI): the stream op becomes a poll cursor, the ctor a native
+    // handle, the manual op is recorded (in the Java class) but not auto-bound ──
+    let java = java_binding(&api, &enums, None);
+    // the stateful `Db` interface's ctor `open` → a native init handle.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Db_init<'local>"),
+        "java ctor → a native init handle fn"
+    );
+    // the stream op → a poll-cursor extern fn over the shared PollStream.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_PullRequests_poll<'local>")
+            && java.contains("PollStream<PullRequest>"),
+        "java stream op → a poll cursor over PollStream<PullRequest>"
+    );
+    // an async unary op → a blocking `native<Pascal>` JNI extern fn (the Java
+    // class wraps it in a CompletableFuture).
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Db_nativePullRequestCount<'local>"),
+        "java async unary op should bind as a blocking native extern fn"
+    );
+    // the manual op is recorded in the Java class surface, not auto-bound.
+    let sources = java_sources(&api, &enums);
+    let db_java = sources
+        .iter()
+        .find(|(p, _)| p == "fluessig/Db.java")
+        .map(|(_, s)| s.clone())
+        .expect("Db.java emitted");
+    assert!(
+        db_java.contains("// @manual: Db.watch"),
+        "java should record `watch` as @manual, not auto-bind it:\n{db_java}"
+    );
 }
 
 /// The sync-by-default authoring surface this PR lands, against the `native`
@@ -433,6 +466,52 @@ fn python_php_ruby_emit_sync_infallible_and_pinned_shapes() {
     assert!(
         ruby.contains("fn checked_root(path: String) -> Result<String, Error> {"),
         "ruby fallible op keeps the Result seam\n{ruby}"
+    );
+
+    // ── java (JNI): the SAME sync-default + infallible + name-pin grid across
+    // both artifacts — the Rust glue and the Java class ──
+    let java = java_binding(&api, &enums, None);
+    // sync + infallible + pinned: the JNI extern fn is named by the pin
+    // (`atillaNativeVersion`), routes the core DIRECTLY (no throw seam), and the
+    // core-trait method drops its Result wrapper.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Native_atillaNativeVersion<'local>"),
+        "java infallible+pinned op is named by the pin\n{java}"
+    );
+    assert!(
+        java.contains("<crate::core_impl::NativeImpl as NativeCore>::native_version()"),
+        "java infallible op calls the core directly\n{java}"
+    );
+    assert!(
+        java.contains("fn native_version() -> String;"),
+        "java infallible op's core-trait method drops Result → `-> String`\n{java}"
+    );
+    // sync + fallible: keeps the throw seam.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Native_checkedRoot<'local>")
+            && java.contains("fn checked_root(path: String) -> anyhow::Result<String>;"),
+        "java fallible op keeps the anyhow::Result core seam + throws\n{java}"
+    );
+    // #[fluessig(async)]: the native stays a blocking symbol, wrapped Java-side.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Native_nativeSlowCount<'local>"),
+        "java async op keeps a blocking native symbol\n{java}"
+    );
+    let native_java = java_sources(&api, &enums)
+        .into_iter()
+        .find(|(p, _)| p == "fluessig/Native.java")
+        .map(|(_, s)| s)
+        .expect("Native.java emitted");
+    // stateless class: the sync ops are public static natives (pinned name); the
+    // async op is a static CompletableFuture wrapper over the private native.
+    assert!(
+        native_java.contains("public static native String atillaNativeVersion();"),
+        "java stateless sync op → a public static native under the pin\n{native_java}"
+    );
+    assert!(
+        native_java.contains("public static CompletableFuture<Long> slowCount(String path)")
+            && native_java.contains("private static native long nativeSlowCount(String path);"),
+        "java async op → a static CompletableFuture wrapper over a private blocking native\n{native_java}"
     );
 }
 

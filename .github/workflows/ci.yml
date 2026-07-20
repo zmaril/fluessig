@@ -18,6 +18,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       cpp: ${{ steps.filter.outputs.cpp }}
+      java: ${{ steps.filter.outputs.java }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -44,6 +45,14 @@ jobs:
               - 'crates/fluessig-runtime/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            # The Java (JNI) round-trip leg runs only when the Java backend, its
+            # demo crates, or the harness itself change.
+            java:
+              - 'src/bindgen/java.rs'
+              - 'crates/java-demo/**'
+              - 'crates/java-demo-schema/**'
+              - 'tests/java_catalog.rs'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -92,3 +101,28 @@ jobs:
           CC: ${{ matrix.toolchain.cc }}
           CXX: ${{ matrix.toolchain.cxx }}
         run: crates/cpp-demo/run.sh
+
+  # ── Java (JNI) backend round-trip ────────────────────────────────────────────
+  # Additive, independent leg: builds the fluessig-generated JNI glue into a real
+  # cdylib, compiles the generated `.java` with javac, and runs it under the JVM,
+  # asserting the sync / infallible / async / stream output. NOT in the branch
+  # ruleset's required-checks list, so it does not block merges — a maintainer can
+  # promote it there later if they want it gating. Kept in its own job block so a
+  # rebase alongside sibling wasm / C++ CI legs can keep-both.
+  java-roundtrip:
+    name: java JNI round-trip
+    needs: changes
+    if: needs.changes.outputs.java == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The runners lack a JDK; the container that authored this leg ships javac
+      # 21, but CI needs it provisioned explicitly.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: bash crates/java-demo/run.sh

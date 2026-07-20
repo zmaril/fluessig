@@ -754,7 +754,7 @@ pub fn node_binding_with_options(
         for op in i
             .ops
             .iter()
-            .filter(|o| o.shape == Shape::Unary && o.resolved_async(api.default_async))
+            .filter(|o| o.shape == Shape::Unary && o.is_async)
         {
             let task = format!("{}Task", pascal(&op.name));
             let name = snake(&op.name);
@@ -831,7 +831,7 @@ pub fn node_binding_with_options(
                     Shape::Unary => {
                         let pin = pinned_name(&op.bindings, LANG);
                         let pin = pin.as_deref();
-                        if !op.resolved_async(api.default_async) {
+                        if !op.is_async {
                             // DEFAULT: a synchronous method — no `AsyncTask`, no
                             // `Promise`. Infallible (bare-`T` core) passes the value
                             // straight through; fallible (`Result<T>` core) throws.
@@ -943,7 +943,7 @@ pub fn node_binding_with_options(
                 }
                 let pin = pinned_name(&op.bindings, LANG);
                 let pin = pin.as_deref();
-                if !op.resolved_async(api.default_async) {
+                if !op.is_async {
                     // DEFAULT: a synchronous free function — a direct call into
                     // the core trait, no `AsyncTask`/`Promise`. Infallible returns
                     // the value; fallible throws on `Err`.

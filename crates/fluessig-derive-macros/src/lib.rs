@@ -1103,11 +1103,6 @@ struct CatalogInput {
     /// The `api: [Entl, …]` op roots — types whose `#[fluessig::export] impl`
     /// blocks are lowered into `api.json` alongside the entity catalog (Slice 5).
     api: Vec<Ident>,
-    /// The `default_async: true` catalog-level async DEFAULT. Synchronous ops are
-    /// the GLOBAL default (`false`); `true` makes every op in this catalog async
-    /// unless it opts out per-op (`#[fluessig(sync)]`). The low-churn lever for an
-    /// async-first catalog (entl / disponent) — one line, no per-op migration.
-    default_async: bool,
 }
 
 impl Parse for CatalogInput {
@@ -1121,7 +1116,6 @@ impl Parse for CatalogInput {
         let mut unions = Vec::new();
         let mut scalars = Vec::new();
         let mut api = Vec::new();
-        let mut default_async = false;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -1136,14 +1130,13 @@ impl Parse for CatalogInput {
                 "unions" => unions = parse_ident_list(input)?,
                 "scalars" => scalars = parse_ident_list(input)?,
                 "api" => api = parse_ident_list(input)?,
-                "default_async" => default_async = input.parse::<syn::LitBool>()?.value,
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
                             "unknown catalog! field `{other}` — supported: \
                              name, version, entities, edges, records, enums, \
-                             unions, scalars, api, default_async"
+                             unions, scalars, api"
                         ),
                     ))
                 }
@@ -1167,7 +1160,6 @@ impl Parse for CatalogInput {
             unions,
             scalars,
             api,
-            default_async,
         })
     }
 }
@@ -1220,7 +1212,6 @@ pub fn catalog(input: TokenStream) -> TokenStream {
         unions,
         scalars,
         api,
-        default_async,
     } = parse_macro_input!(input as CatalogInput);
 
     // The generated `fluessig_catalog` module nests one level below the
@@ -1282,10 +1273,6 @@ pub fn catalog(input: TokenStream) -> TokenStream {
             pub const NAME: &str = #name;
             /// The catalog version as declared in `catalog!`.
             pub const VERSION: &str = #version;
-            /// The catalog-level async DEFAULT (`default_async:` in `catalog!`;
-            /// `false` unless set). `true` makes every op async unless it opts out
-            /// per-op — the low-churn lever for an async-first catalog.
-            pub const DEFAULT_ASYNC: bool = #default_async;
 
             /// The declared enums + unions + scalars, grouped for the typed builders.
             fn decls() -> ::fluessig_derive::TypeDecls<'static> {
@@ -1308,13 +1295,13 @@ pub fn catalog(input: TokenStream) -> TokenStream {
             /// with the `models` materialised from the entities/records the ops
             /// reference (Slice 8a Gap 2).
             pub fn api() -> ::fluessig_derive::fluessig::api::ApiDoc {
-                ::fluessig_derive::build_api_typed(NAME, VERSION, ENTITIES, EDGES, RECORDS, API, DEFAULT_ASYNC, decls())
+                ::fluessig_derive::build_api_typed(NAME, VERSION, ENTITIES, EDGES, RECORDS, API, decls())
             }
 
             /// Render the `api.json` text the loader + bindgen consume (Slice 5 +
             /// the Slice 8a Gap 2 `models` layer).
             pub fn api_to_json() -> ::std::string::String {
-                ::fluessig_derive::to_api_json_typed(NAME, VERSION, ENTITIES, EDGES, RECORDS, API, DEFAULT_ASYNC, decls())
+                ::fluessig_derive::to_api_json_typed(NAME, VERSION, ENTITIES, EDGES, RECORDS, API, decls())
             }
         }
     }

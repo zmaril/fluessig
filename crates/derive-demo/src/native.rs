@@ -68,7 +68,8 @@ impl Native {
 
 // The exporter half: the marker entity + the `api:` op root. `api_to_json()`
 // prints this schema's `api.json` (the op surface every backend gate reads).
-// No `default_async`, so the catalog default is the GLOBAL default — synchronous.
+// Synchronous is the GLOBAL default; only `slow_count` opts in with
+// `#[fluessig(async)]`.
 catalog! {
     name: "native_demo",
     version: "0.1.0",

@@ -245,36 +245,27 @@ fn bindgen_projects_the_op_surface() {
 /// demo schema (kept apart from the four-kind `Db`/`GitHelpers` demo so the
 /// sync/async/pin concept doesn't leak into that pedagogy):
 ///
-///   * a DEFAULT op is SYNCHRONOUS — no `async` field in `api.json` (the op
-///     inherits the catalog's `default_async`, which is the global default
-///     `false`). Infallible when the Rust return is a bare `T` (no `Result` seam;
-///     the shared core-trait method is `fn … -> T`), fallible when it is a
-///     `Result<T>`.
-///   * `#[fluessig(async)]` is the OPT-OUT: `is_async == Some(true)` → the
-///     historical async projection.
+///   * a DEFAULT op is SYNCHRONOUS — no `async` field in `api.json` (synchronous
+///     is the GLOBAL default; there is no catalog-level lever). Infallible when
+///     the Rust return is a bare `T` (no `Result` seam; the shared core-trait
+///     method is `fn … -> T`), fallible when it is a `Result<T>`.
+///   * `#[fluessig(async)]` is the OPT-IN: `is_async == true` → the async
+///     projection. It is the ONE place async-ness is decided, everywhere.
 ///   * `#[fluessig(name = "…")]` pins the export name across every backend.
 #[test]
 fn native_api_carries_sync_default_and_pin_flags() {
     let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json())
         .expect("native api.json must load clean");
-    assert!(
-        !api.default_async,
-        "the native demo has no `default_async`, so the global sync default holds"
-    );
     let iface = api.interfaces.iter().find(|i| i.name == "Native").unwrap();
     let op = |n: &str| iface.ops.iter().find(|o| o.name == n).unwrap();
 
-    // DEFAULT sync (no `async` override) + infallible + name-pinned: the atilla
+    // DEFAULT sync (no `async` marker) + infallible + name-pinned: the atilla
     // `atillaNativeVersion` shape.
     let nv = op("nativeVersion");
     assert_eq!(nv.shape, Shape::Unary);
-    assert_eq!(
-        nv.is_async, None,
-        "a default op carries no `async` override"
-    );
     assert!(
-        !nv.resolved_async(api.default_async),
-        "nativeVersion resolves synchronous"
+        !nv.is_async,
+        "a default op is synchronous (no `async` marker)"
     );
     assert!(nv.infallible, "a bare-String return is infallible");
     assert!(matches!(&nv.returns, ApiType::Scalar(s) if s == "string"));
@@ -286,20 +277,16 @@ fn native_api_carries_sync_default_and_pin_flags() {
         );
     }
 
-    // DEFAULT sync but FALLIBLE (Result<T> return): no override, infallible NOT set.
+    // DEFAULT sync but FALLIBLE (Result<T> return): no marker, infallible NOT set.
     let cr = op("checkedRoot");
-    assert_eq!(cr.is_async, None, "checkedRoot is a default (sync) op");
-    assert!(
-        !cr.resolved_async(api.default_async),
-        "checkedRoot resolves synchronous"
-    );
+    assert!(!cr.is_async, "checkedRoot is a default (sync) op");
     assert!(!cr.infallible, "a Result<T> return keeps the error seam");
 
-    // opt-OUT: `#[fluessig(async)]` forces async; never infallible; unpinned.
+    // opt-IN: `#[fluessig(async)]` marks async; never infallible; unpinned.
     let sc = op("slowCount");
-    assert_eq!(sc.is_async, Some(true), "slowCount is #[fluessig(async)]");
+    assert!(sc.is_async, "slowCount is #[fluessig(async)]");
     assert!(
-        sc.resolved_async(api.default_async) && !sc.infallible,
+        !sc.infallible,
         "slowCount resolves async (never infallible)"
     );
     assert!(sc.bindings.is_empty(), "an unpinned op has no bindings");

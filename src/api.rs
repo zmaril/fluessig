@@ -21,17 +21,6 @@ pub struct ApiDoc {
     /// per-language docs and (for MCP) the generated `oneOf` schemas.
     #[serde(default)]
     pub unions: Vec<ApiUnion>,
-    /// The catalog-level async DEFAULT (format 1+). Synchronous ops are the
-    /// GLOBAL default across every backend — an op with no per-op `async`
-    /// override generates a plain, value-returning binding. `default_async: true`
-    /// flips that for THIS catalog: every op is async (the historical
-    /// `AsyncTask`/`Promise`/coroutine projection) unless it opts out per-op. It
-    /// is the low-churn lever that holds async-first catalogs (entl / disponent)
-    /// byte-identical without migrating a single op — the per-op `async` overrides
-    /// stay absent, so only this one top-level flag appears. Absent (⇒ `false`) in
-    /// a sync-default catalog.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub default_async: bool,
     pub interfaces: Vec<ApiInterface>,
 }
 
@@ -106,17 +95,16 @@ pub struct ApiOp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     pub shape: Shape,
-    /// The per-op async OVERRIDE, relative to the catalog's [`ApiDoc::default_async`].
-    /// `None` (⇒ the field is ABSENT) means "inherit the catalog default"; `Some(true)`
-    /// (`#[fluessig(async)]`) forces the async projection, `Some(false)`
-    /// (`#[fluessig(sync)]`) forces the synchronous one. Synchronous is the global
-    /// default (`default_async: false`), so a plain op in a sync-default catalog carries
-    /// no field at all; an async-first catalog (`default_async: true`) likewise leaves
-    /// its ops fieldless — that inheritance is what keeps entl / disponent byte-identical.
-    /// Only meaningful on [`Shape::Unary`] (streams are always async-iterable, ctors are
-    /// synchronous constructors). Resolve with [`ApiOp::resolved_async`].
-    #[serde(rename = "async", default, skip_serializing_if = "Option::is_none")]
-    pub is_async: Option<bool>,
+    /// The op's ASYNC marker — the ONE place async-ness is decided, meaning the
+    /// same thing everywhere. Synchronous is the GLOBAL default across every
+    /// backend: an op with no `#[fluessig(async)]` marker (`is_async = false`,
+    /// the field ABSENT) generates a plain, value-returning binding.
+    /// `#[fluessig(async)]` (⇒ `"async": true`) opts an op INTO the async
+    /// projection (the historical `AsyncTask`/`Promise`/coroutine shape).
+    /// Serialized ONLY when `true`. Only meaningful on [`Shape::Unary`] (streams
+    /// are always async-iterable, ctors are synchronous constructors).
+    #[serde(rename = "async", default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_async: bool,
     /// The op's Rust return type is a bare `T` (not `Result<T>`), so a SYNCHRONOUS op
     /// carries NO error channel: node emits `-> T` (no `napi::Result`, no `.map_err`),
     /// python drops its `PyResult`/raise, php its `PhpResult`, ruby its `Result<_, Error>`,
@@ -149,18 +137,6 @@ pub struct ApiOp {
     /// [`SymbolBinding`]). Empty ⇒ every backend's default rule.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: BTreeMap<String, SymbolBinding>,
-}
-
-impl ApiOp {
-    /// Whether this op projects ASYNCHRONOUSLY, resolving the per-op override
-    /// against the catalog's [`ApiDoc::default_async`]: an explicit
-    /// `#[fluessig(async)]` / `#[fluessig(sync)]` (`is_async = Some(_)`) wins,
-    /// otherwise the op inherits `default_async`. Backends consult this on a
-    /// [`Shape::Unary`] op to choose the async (`AsyncTask`/`Promise`/coroutine)
-    /// or the plain synchronous projection.
-    pub fn resolved_async(&self, default_async: bool) -> bool {
-        self.is_async.unwrap_or(default_async)
-    }
 }
 
 /// The JS shape of a stream op's terminal error event (event-mode only, i.e. when

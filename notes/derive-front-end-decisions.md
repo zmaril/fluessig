@@ -262,20 +262,23 @@ except its ops are deliberately **synchronous and infallible** under **exact exp
 backend — the node backend wrapped every unary op in `AsyncTask` → `Promise<T>` over a `Result`
 seam, and name pins applied only to DTO fields. So the model was **inverted**: synchronous is now
 the GLOBAL DEFAULT, `#[fluessig(async)]` is the opt-out, and op export-name pins apply across every
-backend. Proven in `crates/derive-demo/src/native.rs` + `tests/api_gate.rs`; entl/disponent stay
-byte-identical via the `default_async` lever (below), NOT migrated.
+backend. Proven in `crates/derive-demo/src/native.rs` + `tests/api_gate.rs`. Async-ness is decided
+in exactly ONE place — the per-op `#[fluessig(async)]` label — meaning the same thing on every
+backend; there is no catalog-level default. entl/disponent stay byte-identical because their
+IO-bound ops carry `#[fluessig(async)]` per-op (below), NOT because of any catalog lever.
 
 - **Synchronous by default; `#[fluessig(async)]` opts out.** A plain unary op with no marker
   generates a **synchronous** binding in every backend — node a plain `#[napi] pub fn name(..)`
   (no `AsyncTask`, no `Promise`, no per-op `Task`), python/php/ruby a plain method (they were
   already synchronous). `#[fluessig(async)]` on a unary op is the opt-out: it restores the
-  historical async projection (node `AsyncTask` → `Promise<T>`). In `api.json` the OPT-OUT is
-  serialized — `"async": true` appears only on an op that overrides the catalog default; a default
-  op has no `async` field. `#[fluessig(sync)]` is retained as the explicit force-sync override
-  (useful inside a `default_async` catalog). Both `sync`/`async` compose only with a plain unary op
+  historical async projection (node `AsyncTask` → `Promise<T>`). In `api.json` async is
+  serialized — `"async": true` appears only on an op that opts in; a synchronous (default) op has
+  no `async` field. `#[fluessig(sync)]` is retained as a (now redundant) explicit force-sync marker
+  — it resolves identically to no marker. Both `sync`/`async` compose only with a plain unary op
   (the macro rejects them on ctor/stream/manual — a ctor is always a synchronous constructor, a
-  stream always async-iterable). The per-op override lives on `OpDescriptor.is_async: Option<bool>`
-  (`None` = inherit) and `ApiOp.is_async`; resolve with `ApiOp::resolved_async(default_async)`.
+  stream always async-iterable). The marker lives on `OpDescriptor.is_async: Option<bool>` (macro
+  authoring level: `Some(true)`/`Some(false)`/`None`) and lowers to `ApiOp.is_async: bool` (the IR:
+  `Some(false)` and `None` both become `false`); backends read `ApiOp.is_async` directly.
 - **Infallibility is inferred from the Rust return type.** A **synchronous** op whose Rust return
   is a bare `T` (not `Result<T>`) is **infallible** (`"infallible": true`) — node emits `-> T` with
   a direct core call (no `.map_err`), python drops its `PyResult`/raise, php its `PhpResult`, ruby
@@ -286,13 +289,16 @@ byte-identical via the `default_async` lever (below), NOT migrated.
   op (no params, non-list) — the atilla `atillaNativeVersion()` shape; a param'd / list-returning
   infallible op keeps the `Result<_, Error>` seam (the CORE call drops its `.map_err`, the
   marshaling can still raise).
-- **`default_async` — the per-catalog opt-out that holds async-first catalogs byte-identical.**
-  `catalog! { …, default_async: true }` (serialized as the top-level `"defaultAsync": true`) means
-  "every op in this catalog is async unless it opts out per-op." It is the low-churn lever: the
-  entl / disponent parity catalogs and the four-kind `Db`/`GitHelpers` demo carry `default_async:
-  true` (ONE line each), so every op inherits async, no per-op `async` field appears, and their
-  committed `api.json` / goldens stay byte-identical — no op-by-op migration. The owner will
-  rewrite the entl / disponent derives to the sync default later; until then this holds them green.
+- **No catalog-level async default — async is a per-op label, uniform everywhere.** There is no
+  `default_async` catalog lever: async-ness is decided in exactly ONE place, the per-op
+  `#[fluessig(async)]` label, meaning the same thing on every backend. The IO-bound ops in the
+  entl / disponent parity catalogs and the four-kind `Db`/`GitHelpers` demo therefore carry a
+  per-op `#[fluessig(async)]` (entl's ops hit DuckDB; disponent's drive tmux/subprocesses — genuinely
+  IO-bound, so async is the correct label), which keeps their async projection and committed
+  goldens byte-identical. The entl/disponent parity gate compares op surfaces with an async-agnostic
+  reducer (`api_lines`: `Interface.op [shape](params) -> ret`), so the labels don't affect parity.
+  The owner will rewrite the real entl / disponent derives later; the vendored parity copies carry
+  the labels so their intent is honest.
 - **`#[fluessig(name = "…")]` — op export-name pins, every backend.** The op-level twin of the
   DTO-field `SymbolBinding`/`pinned_name` mechanism: an explicit export name lowered onto
   `ApiOp.bindings` (every language slug) so each backend reproduces the exact spelling — node

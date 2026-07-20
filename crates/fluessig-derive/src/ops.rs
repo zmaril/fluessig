@@ -53,11 +53,12 @@ pub struct OpDescriptor {
     pub doc: Option<&'static str>,
     /// The op kind — `ctor` / plain unary / `stream` / `manual`.
     pub kind: OpKind,
-    /// The per-op async OVERRIDE — `Some(true)` = `#[fluessig(async)]` (force the
-    /// async projection), `Some(false)` = `#[fluessig(sync)]` (force synchronous),
-    /// `None` = inherit the catalog's `default_async`. Synchronous is the global
-    /// default, so an untagged op is `None`. A FLAG composing with `Unary` only;
-    /// the macro rejects it on any other kind.
+    /// The per-op async marker — `Some(true)` = `#[fluessig(async)]` (opt into the
+    /// async projection), `Some(false)` = `#[fluessig(sync)]` (the redundant
+    /// explicit-synchronous marker), `None` = the global default (synchronous).
+    /// Lowered to [`fluessig::api::ApiOp::is_async`] (a bare `bool`; `Some(false)`
+    /// and `None` both resolve to `false`). A FLAG composing with `Unary` only; the
+    /// macro rejects it on any other kind.
     pub is_async: Option<bool>,
     /// Whether the method's Rust return type is `Result<T>` (fallible) vs a bare
     /// `T` (infallible). Composed with the resolved async-ness at lowering into
@@ -168,25 +169,26 @@ fn lower_api_type(t: &ApiTypeDesc, resolver: &RefResolver) -> ApiType {
 /// op attributes); `stream_error` stays unset (a node-backend concern, not part of
 /// the derive authoring surface). Op param/return types are resolved against the
 /// catalog via `resolver` (a semantic-scalar param lands as a scalar, not a model).
-fn lower_op(op: &OpDescriptor, resolver: &RefResolver, default_async: bool) -> ApiOp {
+fn lower_op(op: &OpDescriptor, resolver: &RefResolver) -> ApiOp {
     let shape = match op.kind {
         OpKind::Ctor => Shape::Ctor,
         OpKind::Unary => Shape::Unary,
         OpKind::Stream => Shape::Stream,
         OpKind::Manual => Shape::Manual,
     };
-    // The op's resolved async-ness: the per-op override (`#[fluessig(async)]` /
-    // `#[fluessig(sync)]`) else the catalog `default_async`. `infallible` (a bare
-    // `T` return on a SYNCHRONOUS unary op) drops the `Result` seam from the
-    // per-backend emission AND the shared core trait — so it is only ever set on a
-    // synchronous unary op; an async op always crosses the seam.
-    let resolved_async = op.is_async.unwrap_or(default_async);
-    let infallible = matches!(op.kind, OpKind::Unary) && !resolved_async && !op.fallible;
+    // The op's async-ness is the ONE per-op marker: `#[fluessig(async)]` opts an
+    // op into the async projection; everything else is synchronous (the global
+    // default). `infallible` (a bare `T` return on a SYNCHRONOUS unary op) drops
+    // the `Result` seam from the per-backend emission AND the shared core trait —
+    // so it is only ever set on a synchronous unary op; an async op always crosses
+    // the seam.
+    let is_async = op.is_async.unwrap_or(false);
+    let infallible = matches!(op.kind, OpKind::Unary) && !is_async && !op.fallible;
     ApiOp {
         name: camel(op.name),
         doc: op.doc.map(str::to_string),
         shape,
-        is_async: op.is_async,
+        is_async,
         infallible,
         readonly: op.readonly,
         destructive: op.destructive,
@@ -248,7 +250,6 @@ pub fn build_api(
     edges: &[&'static EdgeDescriptor],
     records: &[&'static RecordDescriptor],
     interfaces: &[&'static InterfaceDescriptor],
-    default_async: bool,
 ) -> ApiDoc {
     build_api_typed(
         name,
@@ -257,7 +258,6 @@ pub fn build_api(
         edges,
         records,
         interfaces,
-        default_async,
         TypeDecls::default(),
     )
 }
@@ -274,7 +274,6 @@ pub fn build_api_typed(
     edges: &[&'static EdgeDescriptor],
     records: &[&'static RecordDescriptor],
     interfaces: &[&'static InterfaceDescriptor],
-    default_async: bool,
     decls: TypeDecls,
 ) -> ApiDoc {
     let catalog = build_catalog_typed(name, version, entities, edges, records, decls);
@@ -284,11 +283,7 @@ pub fn build_api_typed(
         .map(|i| ApiInterface {
             name: i.name.to_string(),
             doc: i.doc.map(str::to_string),
-            ops: i
-                .ops
-                .iter()
-                .map(|op| lower_op(op, &resolver, default_async))
-                .collect(),
+            ops: i.ops.iter().map(|op| lower_op(op, &resolver)).collect(),
         })
         .collect();
     let (models, unions) = records::build_models(&catalog, &api_interfaces);
@@ -299,7 +294,6 @@ pub fn build_api_typed(
             compiler: None,
         },
         source: Some(name.to_string()),
-        default_async,
         models,
         unions,
         interfaces: api_interfaces,
@@ -316,7 +310,6 @@ pub fn to_api_json(
     edges: &[&'static EdgeDescriptor],
     records: &[&'static RecordDescriptor],
     interfaces: &[&'static InterfaceDescriptor],
-    default_async: bool,
 ) -> String {
     to_api_json_typed(
         name,
@@ -325,7 +318,6 @@ pub fn to_api_json(
         edges,
         records,
         interfaces,
-        default_async,
         TypeDecls::default(),
     )
 }
@@ -339,19 +331,9 @@ pub fn to_api_json_typed(
     edges: &[&'static EdgeDescriptor],
     records: &[&'static RecordDescriptor],
     interfaces: &[&'static InterfaceDescriptor],
-    default_async: bool,
     decls: TypeDecls,
 ) -> String {
-    let api = build_api_typed(
-        name,
-        version,
-        entities,
-        edges,
-        records,
-        interfaces,
-        default_async,
-        decls,
-    );
+    let api = build_api_typed(name, version, entities, edges, records, interfaces, decls);
     let mut json = serde_json::to_string_pretty(&api).expect("api serializes");
     json.push('\n');
     json

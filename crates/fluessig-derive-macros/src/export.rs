@@ -52,9 +52,9 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
     let doc = option_str(doc_string(&f.attrs).as_deref());
     let meta = method_meta(&f.attrs)?;
     let kind_tokens = meta.kind.tokens();
-    // The per-op async OVERRIDE (`#[fluessig(async)]` ⇒ `Some(true)`,
-    // `#[fluessig(sync)]` ⇒ `Some(false)`, neither ⇒ `None` = inherit the
-    // catalog's `default_async`). Synchronous is the global default.
+    // The per-op async marker (`#[fluessig(async)]` ⇒ `Some(true)`,
+    // `#[fluessig(sync)]` ⇒ `Some(false)`, neither ⇒ `None`). Synchronous is the
+    // global default; `Some(false)` and `None` both lower to a sync binding.
     let is_async = match meta.is_async {
         Some(true) => quote! { ::core::option::Option::Some(true) },
         Some(false) => quote! { ::core::option::Option::Some(false) },
@@ -110,10 +110,11 @@ fn returns_result(sig: &syn::Signature) -> bool {
 /// way. At most one KIND; the flags default off.
 struct MethodMeta {
     kind: OpKindChoice,
-    /// The per-op async OVERRIDE — `Some(true)` = `#[fluessig(async)]` (force the
-    /// async projection), `Some(false)` = `#[fluessig(sync)]` (force synchronous),
-    /// `None` = inherit the catalog's `default_async`. Legal only on a plain unary
-    /// op. Synchronous is the global default, so an untagged op is `None`.
+    /// The per-op async marker — `Some(true)` = `#[fluessig(async)]` (opt into the
+    /// async projection), `Some(false)` = `#[fluessig(sync)]` (the redundant
+    /// explicit-synchronous marker), `None` = the global default. Legal only on a
+    /// plain unary op. Synchronous is the global default, so an untagged op is
+    /// `None`.
     is_async: Option<bool>,
     readonly: bool,
     destructive: bool,

@@ -257,7 +257,6 @@ pub fn fan_out(api: &ApiDoc, lang: &str, pattern: &str) -> Vec<(String, ApiDoc)>
             let sub = ApiDoc {
                 fluessig: api.fluessig.clone(),
                 source: api.source.clone(),
-                default_async: api.default_async,
                 models: api
                     .models
                     .iter()

@@ -488,7 +488,6 @@ pub fn fan_out_crate(
         let sub = ApiDoc {
             fluessig: api.fluessig.clone(),
             source: api.source.clone(),
-            default_async: api.default_async,
             models: common_models,
             unions: common_unions,
             interfaces: Vec::new(),

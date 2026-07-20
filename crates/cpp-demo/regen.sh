@@ -26,6 +26,7 @@ cargo run -q --bin fluessig-gen -- \
     --api "$HERE/api.json" \
     --cpp "$HERE/src/generated.rs" \
     --cpp-header "$HERE/cpp_demo.h" \
-    --cpp-hpp "$HERE/cpp_demo.hpp"
+    --cpp-hpp "$HERE/cpp_demo.hpp" \
+    --banner-note "straitjacket-allow-file:duplication — the generated per-op C ABI shims repeat a fixed marshalling shape by design."
 
 echo "== regenerated cpp-demo artifacts =="

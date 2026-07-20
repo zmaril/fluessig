@@ -9,13 +9,11 @@
 //! export layer and the C++ wrapper, so every prototype here matches the
 //! `extern "C"` symbol it fronts.
 
-use std::collections::BTreeSet;
-
 use crate::api::{ApiDoc, ApiOp, Shape};
 
 use super::cpp::{
     c_enum_name, c_list_name, c_model_name, c_stream_name, c_value_type, classify, classify_param,
-    field_name, list_elem_token, op_symbol, Cross,
+    collect_list_elems, field_name, list_elem_token, op_symbol, Cross,
 };
 use super::*;
 
@@ -142,8 +140,9 @@ pub fn cpp_header(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -
 
     // ── list structs (for every list element type that appears) ──
     let list_elems = collect_list_elems(api);
-    for (token, inner_c) in &list_elems {
+    for (token, inner) in &list_elems {
         let name = c_list_name(token);
+        let inner_c = c_val(inner);
         let elem_ty = if inner_c == "char*" {
             "char**".to_string()
         } else {
@@ -271,34 +270,6 @@ fn model_owns_heap(api: &ApiDoc, m: &crate::api::ApiModel) -> bool {
                 | Cross::List(_)
         ) || (f.nullable && member_is_ptr(&c))
     })
-}
-
-/// Collect every list element `(token, inner_c_type)` used anywhere in the api.
-fn collect_list_elems(api: &ApiDoc) -> Vec<(String, String)> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    let mut visit = |c: &Cross, out: &mut Vec<(String, String)>| {
-        if let Cross::List(inner) = c {
-            let token = list_elem_token(inner);
-            if seen.insert(token.clone()) {
-                out.push((token, c_val(inner)));
-            }
-        }
-    };
-    for m in &api.models {
-        for f in &m.fields {
-            visit(&classify(api, &f.ty), &mut out);
-        }
-    }
-    for i in &api.interfaces {
-        for op in &i.ops {
-            visit(&classify(api, &op.returns), &mut out);
-            for p in &op.params {
-                visit(&classify_param(api, p), &mut out);
-            }
-        }
-    }
-    out
 }
 
 /// One op's C prototype line(s), branching on shape + the fallibility axis.

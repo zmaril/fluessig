@@ -9,7 +9,8 @@
 use crate::api::{ApiDoc, ApiOp, Shape};
 
 use super::cpp::{
-    c_model_name, c_stream_name, classify, classify_param, cpp_value_type, op_symbol, Cross,
+    c_enum_name, c_list_name, c_model_name, c_stream_name, classify, classify_param,
+    cpp_value_type, list_elem_token, op_symbol, Cross,
 };
 use super::*;
 
@@ -169,6 +170,7 @@ fn c_item_type(c: &Cross) -> String {
         Cross::Str | Cross::StrEnum | Cross::Union => "char*".into(),
         Cross::Bytes => "FlBytes".into(),
         Cross::Model(m) => c_model_name(m),
+        Cross::List(inner) => c_list_name(&list_elem_token(inner)),
         _ => "int32_t".into(),
     }
 }
@@ -197,10 +199,13 @@ fn emit_handle_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
     // constructor from the ctor op
     if let Some(ctor) = i.ops.iter().find(|o| o.shape == Shape::Ctor) {
         let params = cpp_params(api, ctor);
-        let args = cpp_call_args(api, ctor);
+        let (prep, args) = cpp_args_prep(api, ctor);
         let arg_sep = if args.is_empty() { "" } else { ", " };
         s.push_str(&format!("    explicit {iface}({params}) {{\n"));
         s.push_str("        char* err = nullptr;\n");
+        for line in &prep {
+            s.push_str(&format!("        {line}\n"));
+        }
         s.push_str(&format!(
             "        if (::{iface}_new({args}{arg_sep}&h_, &err)) {{ throw Error(err); }}\n"
         ));
@@ -270,13 +275,35 @@ fn cpp_params(api: &ApiDoc, op: &ApiOp) -> String {
         .join(", ")
 }
 
-/// The C call arguments (C++ values converted to C) for an op.
-fn cpp_call_args(api: &ApiDoc, op: &ApiOp) -> String {
-    op.params
-        .iter()
-        .map(|p| cpp_arg(&classify_param(api, p), &snake(&p.name)))
-        .collect::<Vec<_>>()
-        .join(", ")
+/// Whether a list element crosses on the string (`char*`) carrier.
+fn is_string_carrier(c: &Cross) -> bool {
+    matches!(c, Cross::Str | Cross::StrEnum | Cross::Union)
+}
+
+/// The prep statements + comma-joined C call arguments for an op's params. A
+/// `list<string>` param needs a `std::vector<const char*>` staging temp
+/// (`.data()` on a `std::vector<std::string>` is `std::string*`, not `char**`),
+/// so it emits prep lines; every other param converts inline. The prep lines
+/// carry NO indentation — the caller prefixes each with its method indent.
+fn cpp_args_prep(api: &ApiDoc, op: &ApiOp) -> (Vec<String>, String) {
+    let mut prep = Vec::new();
+    let mut args = Vec::new();
+    for p in &op.params {
+        let c = classify_param(api, p);
+        let name = snake(&p.name);
+        match &c {
+            Cross::List(inner) if is_string_carrier(inner) => {
+                prep.push(format!("std::vector<const char*> {name}_c;"));
+                prep.push(format!("{name}_c.reserve({name}.size());"));
+                prep.push(format!(
+                    "for (const auto& s : {name}) {{ {name}_c.push_back(s.c_str()); }}"
+                ));
+                args.push(format!("{name}_c.data(), {name}_c.size()"));
+            }
+            _ => args.push(cpp_arg(&c, &name)),
+        }
+    }
+    (prep, args.join(", "))
 }
 
 /// A unary method — throws `Error` on failure (fallible) or returns directly
@@ -286,7 +313,7 @@ fn emit_unary_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> Str
     let ret = classify(api, &op.returns);
     let rty = cpp_ty(&ret);
     let params = cpp_params(api, op);
-    let args = cpp_call_args(api, op);
+    let (prep, args) = cpp_args_prep(api, op);
     let recv = if member {
         "h_".to_string()
     } else {
@@ -309,17 +336,61 @@ fn emit_unary_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> Str
             s.push_str(&format!("{kw}/// {line}\n"));
         }
     }
+    // The prep lines (list-of-string staging temps) prefixed with the body indent.
+    let prep_block = |s: &mut String| {
+        for line in &prep {
+            s.push_str(&format!("{kw}    {line}\n"));
+        }
+    };
 
     if op.infallible {
-        // TODO(#69): infallible op — value returned directly, no err channel.
+        // Infallible op — value returned directly, no err channel. Scalars come
+        // back by value; a compound (string / list / bytes / model) rides a
+        // single out-param.
         match &ret {
             Cross::Void => {
                 s.push_str(&format!("{kw}void {name}({params}) {{\n"));
+                prep_block(&mut s);
                 s.push_str(&format!("{kw}    ::{sym}({lead});\n{kw}}}\n"));
             }
-            _ => {
+            Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool | Cross::Enum(_) => {
                 s.push_str(&format!("{kw}{rty} {name}({params}) {{\n"));
+                prep_block(&mut s);
                 s.push_str(&format!("{kw}    return ::{sym}({lead});\n{kw}}}\n"));
+            }
+            Cross::Str | Cross::StrEnum | Cross::Union => {
+                s.push_str(&format!("{kw}std::string {name}({params}) {{\n"));
+                prep_block(&mut s);
+                s.push_str(&format!("{kw}    char* out = ::{sym}({lead});\n"));
+                s.push_str(&format!(
+                    "{kw}    std::string r(out ? out : \"\");\n{kw}    fl_string_free(out);\n{kw}    return r;\n{kw}}}\n"
+                ));
+            }
+            Cross::List(inner) => {
+                let out_c = c_item_type(&ret);
+                s.push_str(&format!("{kw}{rty} {name}({params}) {{\n"));
+                prep_block(&mut s);
+                s.push_str(&format!("{kw}    {out_c} out{{}};\n"));
+                s.push_str(&format!("{kw}    ::{sym}({lead}{sep}&out);\n"));
+                s.push_str(&list_out_to_cpp(inner, "out", kw));
+                s.push_str(&format!("{kw}}}\n"));
+            }
+            Cross::Bytes => {
+                s.push_str(&format!("{kw}{rty} {name}({params}) {{\n"));
+                prep_block(&mut s);
+                s.push_str(&format!("{kw}    FlBytes out{{}};\n"));
+                s.push_str(&format!("{kw}    ::{sym}({lead}{sep}&out);\n"));
+                s.push_str(&bytes_out_to_cpp("out", kw));
+                s.push_str(&format!("{kw}}}\n"));
+            }
+            _ => {
+                // model: the C struct is returned by value via a single out-param.
+                let out_c = c_item_type(&ret);
+                s.push_str(&format!("{kw}{rty} {name}({params}) {{\n"));
+                prep_block(&mut s);
+                s.push_str(&format!("{kw}    {out_c} out{{}};\n"));
+                s.push_str(&format!("{kw}    ::{sym}({lead}{sep}&out);\n"));
+                s.push_str(&format!("{kw}    return out;\n{kw}}}\n"));
             }
         }
         return s;
@@ -329,6 +400,7 @@ fn emit_unary_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> Str
         Cross::Void => {
             s.push_str(&format!("{kw}void {name}({params}) {{\n"));
             s.push_str(&format!("{kw}    char* err = nullptr;\n"));
+            prep_block(&mut s);
             s.push_str(&format!(
                 "{kw}    if (::{sym}({lead}{sep}&err)) {{ throw Error(err); }}\n{kw}}}\n"
             ));
@@ -338,12 +410,38 @@ fn emit_unary_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> Str
             s.push_str(&format!(
                 "{kw}    char* out = nullptr;\n{kw}    char* err = nullptr;\n"
             ));
+            prep_block(&mut s);
             s.push_str(&format!(
                 "{kw}    if (::{sym}({lead}{sep}&out, &err)) {{ throw Error(err); }}\n"
             ));
             s.push_str(&format!(
                 "{kw}    std::string r(out ? out : \"\");\n{kw}    fl_string_free(out);\n{kw}    return r;\n{kw}}}\n"
             ));
+        }
+        Cross::List(inner) => {
+            let out_c = c_item_type(&ret);
+            s.push_str(&format!("{kw}{rty} {name}({params}) {{\n"));
+            s.push_str(&format!(
+                "{kw}    {out_c} out{{}};\n{kw}    char* err = nullptr;\n"
+            ));
+            prep_block(&mut s);
+            s.push_str(&format!(
+                "{kw}    if (::{sym}({lead}{sep}&out, &err)) {{ throw Error(err); }}\n"
+            ));
+            s.push_str(&list_out_to_cpp(inner, "out", kw));
+            s.push_str(&format!("{kw}}}\n"));
+        }
+        Cross::Bytes => {
+            s.push_str(&format!("{kw}{rty} {name}({params}) {{\n"));
+            s.push_str(&format!(
+                "{kw}    FlBytes out{{}};\n{kw}    char* err = nullptr;\n"
+            ));
+            prep_block(&mut s);
+            s.push_str(&format!(
+                "{kw}    if (::{sym}({lead}{sep}&out, &err)) {{ throw Error(err); }}\n"
+            ));
+            s.push_str(&bytes_out_to_cpp("out", kw));
+            s.push_str(&format!("{kw}}}\n"));
         }
         Cross::Nullable(inner) => {
             let inner_cpp = cpp_ty(inner);
@@ -352,6 +450,7 @@ fn emit_unary_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> Str
                 "{kw}std::optional<{inner_cpp}> {name}({params}) {{\n"
             ));
             s.push_str(&format!("{kw}    bool has = false;\n{kw}    {out_c} out{{}};\n{kw}    char* err = nullptr;\n"));
+            prep_block(&mut s);
             s.push_str(&format!(
                 "{kw}    if (::{sym}({lead}{sep}&has, &out, &err)) {{ throw Error(err); }}\n"
             ));
@@ -359,12 +458,13 @@ fn emit_unary_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> Str
             s.push_str(&format!("{kw}    return out;\n{kw}}}\n"));
         }
         _ => {
-            // scalar / enum / model / bytes / list: single out-param.
+            // scalar / enum / model: single out-param returned by value.
             let out_c = c_item_type(&ret);
             s.push_str(&format!("{kw}{rty} {name}({params}) {{\n"));
             s.push_str(&format!(
                 "{kw}    {out_c} out{{}};\n{kw}    char* err = nullptr;\n"
             ));
+            prep_block(&mut s);
             s.push_str(&format!(
                 "{kw}    if (::{sym}({lead}{sep}&out, &err)) {{ throw Error(err); }}\n"
             ));
@@ -374,12 +474,43 @@ fn emit_unary_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> Str
     s
 }
 
+/// The C++ statements converting a C list out-param (a `Fl<T>List` bound as
+/// `out_var`) into the returned `std::vector<…> r`, freeing the C buffer. Covers
+/// the flat element kinds the demo + tests exercise; a `list<model>` element is a
+/// documented gap (its per-element free isn't woven in here).
+fn list_out_to_cpp(inner: &Cross, out_var: &str, kw: &str) -> String {
+    let token = list_elem_token(inner);
+    let free = format!("fl_{}_list_free", snake(&token));
+    let elem_cpp = cpp_ty(inner);
+    let read = match inner {
+        Cross::Str | Cross::StrEnum | Cross::Union => {
+            format!("r.emplace_back({out_var}.data[i] ? {out_var}.data[i] : \"\");")
+        }
+        Cross::Enum(e) => format!(
+            "r.push_back(static_cast<{}>({out_var}.data[i]));",
+            c_enum_name(e)
+        ),
+        _ => format!("r.push_back({out_var}.data[i]);"),
+    };
+    format!(
+        "{kw}    std::vector<{elem_cpp}> r;\n{kw}    r.reserve({out_var}.len);\n{kw}    for (size_t i = 0; i < {out_var}.len; ++i) {{ {read} }}\n{kw}    ::{free}(&{out_var});\n{kw}    return r;\n"
+    )
+}
+
+/// The C++ statements copying a C `FlBytes` out-param (`out_var`) into the
+/// returned `std::vector<uint8_t> r`, freeing the C buffer.
+fn bytes_out_to_cpp(out_var: &str, kw: &str) -> String {
+    format!(
+        "{kw}    std::vector<uint8_t> r({out_var}.data, {out_var}.data + {out_var}.len);\n{kw}    fl_bytes_free(&{out_var});\n{kw}    return r;\n"
+    )
+}
+
 /// A stream method returning a `…Cursor`.
 fn emit_stream_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> String {
     let sym = op_symbol(iface, op);
     let cur = c_stream_name(iface, op);
     let params = cpp_params(api, op);
-    let args = cpp_call_args(api, op);
+    let (prep, args) = cpp_args_prep(api, op);
     let recv = if member {
         "h_".to_string()
     } else {
@@ -406,6 +537,9 @@ fn emit_stream_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> St
     s.push_str(&format!(
         "{kw}    ::{cur}* out = nullptr;\n{kw}    char* err = nullptr;\n"
     ));
+    for line in &prep {
+        s.push_str(&format!("{kw}    {line}\n"));
+    }
     s.push_str(&format!(
         "{kw}    if (::{sym}({lead}{sep}&out, &err)) {{ throw Error(err); }}\n"
     ));

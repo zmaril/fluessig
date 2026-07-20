@@ -150,6 +150,139 @@ pub(super) fn list_elem_token(c: &Cross) -> String {
     }
 }
 
+/// Collect every distinct list element crossing used anywhere in the api, keyed
+/// by its list-name token (`String`, `Int32`, `FooModel`, …), in first-seen
+/// order. The single source of truth for which `Fl<T>List` structs, helpers, and
+/// free functions the three artifacts must agree on. Only top-level list
+/// elements are visited (nested `list<list<T>>` is a documented gap — matching
+/// the flat token the C header emits).
+pub(super) fn collect_list_elems(api: &ApiDoc) -> Vec<(String, Cross)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out: Vec<(String, Cross)> = Vec::new();
+    let mut visit = |c: &Cross, out: &mut Vec<(String, Cross)>| {
+        if let Cross::List(inner) = c {
+            let token = list_elem_token(inner);
+            if seen.insert(token.clone()) {
+                out.push((token, (**inner).clone()));
+            }
+        }
+    };
+    for m in &api.models {
+        for f in &m.fields {
+            visit(&classify(api, &f.ty), &mut out);
+        }
+    }
+    for i in &api.interfaces {
+        for op in &i.ops {
+            visit(&classify(api, &op.returns), &mut out);
+            for p in &op.params {
+                visit(&classify_param(api, p), &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// The core-facing Rust element type for a list element crossing (`Vec<Elem>`).
+fn list_elem_rust(elem: &Cross) -> String {
+    match elem {
+        Cross::I32 => "i32".into(),
+        Cross::I64 => "i64".into(),
+        Cross::F64 => "f64".into(),
+        Cross::Bool => "bool".into(),
+        Cross::Str | Cross::StrEnum | Cross::Union => "String".into(),
+        Cross::Bytes => "Bytes".into(),
+        Cross::Enum(e) => e.clone(),
+        Cross::Model(m) => m.clone(),
+        // nested list / nullable elements aren't marshalled (documented gap)
+        _ => "String".into(),
+    }
+}
+
+/// Read one list element from a `p: *const <elem_c>` into its Rust value.
+fn list_in_elem(elem: &Cross) -> String {
+    match elem {
+        Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => "*p".into(),
+        Cross::Str | Cross::StrEnum | Cross::Union => "fl_str_in(*p)".into(),
+        Cross::Enum(e) => format!("{e}::from_c(*p)"),
+        Cross::Model(m) => format!("{}_from_c(&*p)", snake(m)),
+        Cross::Bytes => "fl_bytes_in((*p).data, (*p).len)".into(),
+        _ => "fl_str_in(*p)".into(),
+    }
+}
+
+/// Move one Rust list element `x: <elem_rust>` into its owned C value `<elem_c>`.
+fn list_out_elem(elem: &Cross) -> String {
+    match elem {
+        Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => "x".into(),
+        Cross::Str | Cross::StrEnum | Cross::Union => "fl_str_out(x)".into(),
+        Cross::Enum(_) => "x as i32".into(),
+        Cross::Model(m) => format!("{}_to_c(x)", snake(m)),
+        Cross::Bytes => "fl_bytes_out(x)".into(),
+        _ => "fl_str_out(x)".into(),
+    }
+}
+
+/// Free one owned C list element bound as `e: <elem_c>`; `None` when the element
+/// owns no heap (plain scalars / enums cross by value).
+fn list_free_elem(elem: &Cross) -> Option<String> {
+    match elem {
+        Cross::Str | Cross::StrEnum | Cross::Union => Some("fl_string_free(e);".into()),
+        Cross::Bytes => Some("{ let mut e = e; fl_bytes_free(&mut e); }".into()),
+        Cross::Model(m) => Some(format!(
+            "{{ let mut e = e; fl_{}_free(&mut e); }}",
+            snake(m)
+        )),
+        _ => None,
+    }
+}
+
+/// The `#[repr(C)] Fl<T>List` struct + its in/out/free helpers, for every list
+/// element the api uses. Emitted only when the api has at least one list, so a
+/// list-free schema stays byte-identical to the pre-list generator.
+fn emit_rust_list_support(elems: &[(String, Cross)]) -> String {
+    let mut s = String::new();
+    for (token, elem) in elems {
+        let list_ty = c_list_name(token);
+        let elem_c = rust_c_member_type(elem);
+        let elem_rust = list_elem_rust(elem);
+        let sn = snake(token);
+        s.push_str(&format!(
+            "/// The `list<{elem_rust}>` carrier across the C ABI (free with `fl_{sn}_list_free`).\n"
+        ));
+        s.push_str("#[repr(C)]\n");
+        s.push_str(&format!(
+            "pub struct {list_ty} {{\n    pub data: *mut {elem_c},\n    pub len: usize,\n}}\n\n"
+        ));
+        // An empty-list Default so the nullable-list write paths have a zero value.
+        s.push_str(&format!(
+            "impl Default for {list_ty} {{\n    fn default() -> Self {{\n        {list_ty} {{ data: std::ptr::null_mut(), len: 0 }}\n    }}\n}}\n\n"
+        ));
+        // in: const <elem_c>* + len → Vec<elem_rust>
+        s.push_str(&format!(
+            "unsafe fn {sn}_list_in(ptr: *const {elem_c}, len: usize) -> Vec<{elem_rust}> {{\n    if ptr.is_null() {{\n        return Vec::new();\n    }}\n    (0..len)\n        .map(|i| {{\n            let p = ptr.add(i);\n            {}\n        }})\n        .collect()\n}}\n\n",
+            list_in_elem(elem)
+        ));
+        // out: Vec<elem_rust> → owned Fl<T>List
+        s.push_str(&format!(
+            "fn {sn}_list_out(v: Vec<{elem_rust}>) -> {list_ty} {{\n    let mut items: Vec<{elem_c}> = v.into_iter().map(|x| {}).collect();\n    items.shrink_to_fit();\n    let len = items.len();\n    let data = items.as_mut_ptr();\n    std::mem::forget(items);\n    {list_ty} {{ data, len }}\n}}\n\n",
+            list_out_elem(elem)
+        ));
+        // free
+        s.push_str(&format!(
+            "#[no_mangle]\npub unsafe extern \"C\" fn fl_{sn}_list_free(p: *mut {list_ty}) {{\n    if p.is_null() {{\n        return;\n    }}\n    let p = &mut *p;\n    if !p.data.is_null() {{\n        let items = Vec::from_raw_parts(p.data, p.len, p.len);\n"
+        ));
+        match list_free_elem(elem) {
+            Some(free) => s.push_str(&format!(
+                "        for e in items {{\n            {free}\n        }}\n"
+            )),
+            None => s.push_str("        drop(items);\n"),
+        }
+        s.push_str("        p.data = std::ptr::null_mut();\n        p.len = 0;\n    }\n}\n");
+    }
+    s
+}
+
 // ── the C-side type mappers (consumed by cpp_header) ─────────────────────────
 
 /// The C by-value type for a scalar-ish crossing (struct members, stream item
@@ -329,6 +462,15 @@ pub fn cpp_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
         s.push_str(&emit_dto_conversions(api, m));
     }
 
+    // ── list carriers: the `Fl<T>List` structs + in/out/free helpers (emitted
+    // only when the api uses a list, so a list-free schema stays byte-identical
+    // to the pre-list generator) ──
+    let list_elems = collect_list_elems(api);
+    if !list_elems.is_empty() {
+        s.push('\n');
+        s.push_str(&emit_rust_list_support(&list_elems));
+    }
+
     // ── the shared core traits (one spine every backend drives) ──
     let mut ct: rust::Tokens = quote!();
     emit_core_traits(&mut ct, api);
@@ -343,7 +485,7 @@ pub fn cpp_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
 
     let src = api.source.as_deref().unwrap_or("the fluessig catalog");
     crate::rustfmt::format(format!(
-        "//! GENERATED by fluessig bindgen from {src} (C ABI export layer). Do not edit.\n{}#![allow(clippy::all)]\n#![allow(unused_imports)]\n\n{s}",
+        "//! GENERATED by fluessig bindgen from {src} (C ABI export layer). Do not edit.\n{}#![allow(clippy::all)]\n#![allow(dead_code)]\n#![allow(unused_imports)]\n\n{s}",
         note_line(banner_note)
     ))
 }
@@ -568,10 +710,9 @@ fn member_to_c(c: &Cross, name: &str, src: &str) -> String {
         }
         Cross::Bytes => format!("        {name}: fl_bytes_out({src}),\n"),
         Cross::Model(m) => format!("        {name}: {}_to_c({src}),\n", snake(m)),
-        Cross::List(_) => {
-            // list conversion is best-effort (no fixture exercises it); a real
-            // element loop would live in a generated helper.
-            format!("        {name}: Default::default(), // TODO: list<T> element marshalling\n")
+        Cross::List(inner) => {
+            let token = list_elem_token(inner);
+            format!("        {name}: {}_list_out({src}),\n", snake(&token))
         }
         Cross::Nullable(inner) => {
             if member_is_pointer(inner) {
@@ -609,8 +750,12 @@ fn member_from_c(c: &Cross, cname: &str, rname: &str) -> String {
         }
         Cross::Bytes => format!("        {rname}: fl_bytes_in(c.{cname}.data, c.{cname}.len),\n"),
         Cross::Model(m) => format!("        {rname}: {}_from_c(&c.{cname}),\n", snake(m)),
-        Cross::List(_) => {
-            format!("        {rname}: Default::default(), // TODO: list<T> element marshalling\n")
+        Cross::List(inner) => {
+            let token = list_elem_token(inner);
+            format!(
+                "        {rname}: {}_list_in(c.{cname}.data, c.{cname}.len),\n",
+                snake(&token)
+            )
         }
         Cross::Nullable(inner) => {
             if member_is_pointer(inner) {
@@ -641,6 +786,13 @@ fn member_free(c: &Cross, name: &str) -> Option<String> {
         }
         Cross::Bytes => Some(format!("    fl_bytes_free(&mut p.{name});\n")),
         Cross::Model(m) => Some(format!("    fl_{}_free(&mut p.{name});\n", snake(m))),
+        Cross::List(inner) => {
+            let token = list_elem_token(inner);
+            Some(format!(
+                "    fl_{}_list_free(&mut p.{name});\n",
+                snake(&token)
+            ))
+        }
         Cross::Nullable(inner) => {
             if member_is_pointer(inner) {
                 match inner.as_ref() {
@@ -700,11 +852,14 @@ fn rust_in_one(c: &Cross, name: &str, decls: &mut Vec<String>, conv: &mut Vec<St
             decls.push(format!("{name}: *const {}", c_model_name(m)));
             conv.push(format!("let {name} = {}_from_c(&*{name});", snake(m)));
         }
-        Cross::List(_) => {
-            decls.push(format!("{name}_ptr: *const std::ffi::c_void"));
+        Cross::List(inner) => {
+            let token = list_elem_token(inner);
+            let elem_c = rust_c_member_type(inner);
+            decls.push(format!("{name}_ptr: *const {elem_c}"));
             decls.push(format!("{name}_len: usize"));
             conv.push(format!(
-                "let {name} = Vec::new(); // TODO: list<T> element marshalling ({name}_ptr,{name}_len)"
+                "let {name} = {}_list_in({name}_ptr, {name}_len);",
+                snake(&token)
             ));
         }
         Cross::Nullable(inner) => {
@@ -769,13 +924,13 @@ fn rust_out(c: &Cross) -> (Vec<String>, String) {
             vec![format!("out: *mut {}", c_model_name(m))],
             format!("*out = {}_to_c(v);", snake(m)),
         ),
-        Cross::List(inner) => (
-            vec![format!(
-                "out: *mut {}",
-                c_list_name(&list_elem_token(inner))
-            )],
-            "*out = Default::default(); // TODO: list<T> element marshalling".into(),
-        ),
+        Cross::List(inner) => {
+            let token = list_elem_token(inner);
+            (
+                vec![format!("out: *mut {}", c_list_name(&token))],
+                format!("*out = {}_list_out(v);", snake(&token)),
+            )
+        }
         Cross::Nullable(inner) => {
             let (inner_decls, inner_write) = rust_out(inner);
             let mut decls = vec!["has_out: *mut bool".to_string()];

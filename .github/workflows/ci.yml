@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      cpp: ${{ steps.filter.outputs.cpp }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -32,6 +33,17 @@ jobs:
               - 'catalog.json'
               - 'api.json'
               - 'schema_docs.json'
+              - '.github/workflows/ci.yml'
+            cpp:
+              - 'src/bindgen/cpp.rs'
+              - 'src/bindgen/cpp_header.rs'
+              - 'src/bindgen/cpp_hpp.rs'
+              - 'src/bindgen/mod.rs'
+              - 'src/bin/fluessig-gen.rs'
+              - 'crates/cpp-demo/**'
+              - 'crates/fluessig-runtime/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -50,3 +62,33 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # The compile+run gate for the C/C++ bindgen backend: build the cpp-demo
+  # cdylib, then compile & run the C and C++ consumers against the committed
+  # headers under BOTH gcc/g++ and clang/clang++. This is the only check that
+  # actually compiles the generated `extern "C"` layer AND exercises it end to
+  # end (a real put/get/keys/error round-trip through the C ABI).
+  cpp:
+    name: C/C++ consumer round-trip
+    needs: changes
+    # Always run on push/schedule; on PRs, only when cpp-relevant files changed.
+    if: needs.changes.outputs.cpp == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+          - { cc: gcc, cxx: g++ }
+          - { cc: clang, cxx: clang++ }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install C/C++ compilers
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang
+      - name: C/C++ consumer round-trip (${{ matrix.toolchain.cc }} / ${{ matrix.toolchain.cxx }})
+        env:
+          CC: ${{ matrix.toolchain.cc }}
+          CXX: ${{ matrix.toolchain.cxx }}
+        run: crates/cpp-demo/run.sh

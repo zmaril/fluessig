@@ -72,6 +72,8 @@ fn main() {
     let python_union_tag = flag("--python-union-tag");
     let ruby_union_mode = flag("--ruby-union-mode");
     let ruby_union_tag = flag("--ruby-union-tag");
+    let wasm_union_mode = flag("--wasm-union-mode");
+    let wasm_union_tag = flag("--wasm-union-tag");
     let python = flag("--python");
     let ruby = flag("--ruby");
     let php = flag("--php");
@@ -79,6 +81,7 @@ fn main() {
     let cpp = flag("--cpp");
     let cpp_header = flag("--cpp-header");
     let cpp_hpp = flag("--cpp-hpp");
+    let wasm = flag("--wasm");
     let mcp = flag("--mcp");
     // Opt-in package/module fan-out: a patterned path like
     // `out/{package}/{module}.rs`. When the api schema carries `(package,
@@ -89,6 +92,7 @@ fn main() {
     let python_out = flag("--python-out");
     let ruby_out = flag("--ruby-out");
     let php_out = flag("--php-out");
+    let wasm_out = flag("--wasm-out");
     let mcp_out = flag("--mcp-out");
     // The generated ROOT module that ties a language's fanned group files into
     // one crate (the `#[path]` mod-tree + `pub use` re-exports + Python
@@ -98,6 +102,7 @@ fn main() {
     let python_mod_out = flag("--python-mod-out");
     let ruby_mod_out = flag("--ruby-mod-out");
     let php_mod_out = flag("--php-mod-out");
+    let wasm_mod_out = flag("--wasm-mod-out");
     let mcp_mod_out = flag("--mcp-mod-out");
     let py_models = flag("--py-models");
     let ts_tables = flag("--ts-tables");
@@ -149,11 +154,13 @@ fn main() {
         || cpp.is_some()
         || cpp_header.is_some()
         || cpp_hpp.is_some()
+        || wasm.is_some()
         || mcp.is_some()
         || node_out.is_some()
         || python_out.is_some()
         || ruby_out.is_some()
         || php_out.is_some()
+        || wasm_out.is_some()
         || mcp_out.is_some();
     if want_bindings {
         let Some(ap) = api_path.as_deref() else {
@@ -264,6 +271,19 @@ fn main() {
             // Plain C++ text — not Rust, so it is written as-is (no rustfmt).
             write(&p, fluessig::bindgen::cpp_hpp(&api, &enums, note));
         }
+        if let Some(p) = wasm {
+            let opts = fluessig::bindgen::WasmOptions {
+                union_projection: union_projection(
+                    wasm_union_mode.as_deref(),
+                    wasm_union_tag.as_deref(),
+                    "--wasm-union-mode",
+                ),
+            };
+            write(
+                &p,
+                fluessig::bindgen::wasm_binding_with_options(&api, &enums, note, opts),
+            );
+        }
         if let Some(m) = mcp {
             write(&m, fluessig::bindgen::mcp_module(&api, &enums, note));
         }
@@ -345,6 +365,9 @@ fn main() {
         });
         fan("php", php_out, php_mod_out, &|a, e| {
             fluessig::bindgen::php_binding(a, e, note)
+        });
+        fan("wasm", wasm_out, wasm_mod_out, &|a, e| {
+            fluessig::bindgen::wasm_binding(a, e, note)
         });
         fan("mcp", mcp_out, mcp_mod_out, &|a, e| {
             fluessig::bindgen::mcp_module(a, e, note)

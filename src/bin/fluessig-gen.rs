@@ -77,6 +77,10 @@ fn main() {
     let python = flag("--python");
     let ruby = flag("--ruby");
     let php = flag("--php");
+    // The C/C++ backend: three single-file artifacts (no fan-out).
+    let cpp = flag("--cpp");
+    let cpp_header = flag("--cpp-header");
+    let cpp_hpp = flag("--cpp-hpp");
     let wasm = flag("--wasm");
     let mcp = flag("--mcp");
     // Opt-in package/module fan-out: a patterned path like
@@ -147,6 +151,9 @@ fn main() {
         || python.is_some()
         || ruby.is_some()
         || php.is_some()
+        || cpp.is_some()
+        || cpp_header.is_some()
+        || cpp_hpp.is_some()
         || wasm.is_some()
         || mcp.is_some()
         || node_out.is_some()
@@ -157,7 +164,7 @@ fn main() {
         || mcp_out.is_some();
     if want_bindings {
         let Some(ap) = api_path.as_deref() else {
-            eprintln!("--node/--python/--ruby/--php/--mcp (and their --*-out fan-out) require --api <api.json>");
+            eprintln!("--node/--python/--ruby/--php/--cpp/--cpp-header/--cpp-hpp/--mcp (and their --*-out fan-out) require --api <api.json>");
             std::process::exit(2);
         };
         let api = fluessig::api::load_api_file(ap).unwrap_or_else(|e| {
@@ -251,6 +258,18 @@ fn main() {
         }
         if let Some(p) = php {
             write(&p, fluessig::bindgen::php_binding(&api, &enums, note));
+        }
+        // ── C/C++ backend (single-file only — no package/module fan-out) ──
+        if let Some(p) = cpp {
+            write(&p, fluessig::bindgen::cpp_binding(&api, &enums, note));
+        }
+        if let Some(p) = cpp_header {
+            // Plain C text — not Rust, so it is written as-is (no rustfmt).
+            write(&p, fluessig::bindgen::cpp_header(&api, &enums, note));
+        }
+        if let Some(p) = cpp_hpp {
+            // Plain C++ text — not Rust, so it is written as-is (no rustfmt).
+            write(&p, fluessig::bindgen::cpp_hpp(&api, &enums, note));
         }
         if let Some(p) = wasm {
             let opts = fluessig::bindgen::WasmOptions {

@@ -14,6 +14,9 @@
 //! engine. Generated code references `crate::core_impl::{GitImpl, EntlImpl}` by
 //! convention.
 
+mod cpp;
+mod cpp_header;
+mod cpp_hpp;
 mod fanout;
 mod mcp;
 mod node;
@@ -22,6 +25,7 @@ mod python;
 mod ruby;
 mod wasm;
 
+pub use cpp::{cpp_binding, cpp_header, cpp_hpp};
 pub use fanout::{
     common_path_for, external_refs, fan_out_crate, group_module_path, group_table, render_mod_tree,
     render_use_block, resolve_module_paths, ExternalImport, ExternalRef, FanOutSpec, FannedCrate,

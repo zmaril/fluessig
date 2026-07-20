@@ -1,0 +1,103 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "cpp_demo",
+  "models": [],
+  "unions": [],
+  "interfaces": [
+    {
+      "name": "Store",
+      "doc": "An in-memory key/value store. `put`/`get` are fallible (the error seam); the\nobservers (`keys`/`count`/`contains`/`remove_all`) are synchronous +\ninfallible (a bare `T` return, no `Result`).",
+      "ops": [
+        {
+          "name": "open",
+          "doc": "Open a store with room for `capacity` entries.",
+          "shape": "ctor",
+          "params": [
+            {
+              "name": "capacity",
+              "type": "int32"
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "put",
+          "doc": "Insert or replace `key` → `value`; returns the store's new size. Fails\nwhen the store is at capacity and `key` is new.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "key",
+              "type": "string"
+            },
+            {
+              "name": "value",
+              "type": "string"
+            }
+          ],
+          "returns": "int32"
+        },
+        {
+          "name": "get",
+          "doc": "Fetch the value for `key`. Fails (the reachable error path) when `key` is\nabsent.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "key",
+              "type": "string"
+            }
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "keys",
+          "doc": "Every key currently stored, in sorted order (infallible `list<string>`).",
+          "shape": "unary",
+          "infallible": true,
+          "params": [],
+          "returns": {
+            "list": "string"
+          }
+        },
+        {
+          "name": "removeAll",
+          "doc": "Remove every key in `keys`; returns how many were actually removed\n(infallible, `list<string>` IN + `int` out).",
+          "shape": "unary",
+          "infallible": true,
+          "params": [
+            {
+              "name": "keys",
+              "type": {
+                "list": "string"
+              }
+            }
+          ],
+          "returns": "int32"
+        },
+        {
+          "name": "count",
+          "doc": "The number of entries (infallible `int`).",
+          "shape": "unary",
+          "infallible": true,
+          "params": [],
+          "returns": "int32"
+        },
+        {
+          "name": "contains",
+          "doc": "Whether `key` is present (infallible `bool`).",
+          "shape": "unary",
+          "infallible": true,
+          "params": [
+            {
+              "name": "key",
+              "type": "string"
+            }
+          ],
+          "returns": "boolean"
+        }
+      ]
+    }
+  ]
+}

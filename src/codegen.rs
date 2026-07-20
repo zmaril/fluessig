@@ -2,6 +2,10 @@
 //! committed language artifacts, via **genco** (whitespace-aware quasi-quoting
 //! with automatic import management):
 //!
+//! straitjacket-allow-file:duplication — `django_models` deliberately parallels
+//! `python_models` (both lower the same physical projection into ORM model
+//! classes); the shared shape is the point, not a refactor target.
+//!
 //! - [`python_models`] → `entl.models` (SQLAlchemy, read-only guards included) —
 //!   replaces entl-python's hand-written `gen_models.py`.
 //! - [`ts_tables`] → `tables.gen.ts` (the typed `EntlTables` enum) and

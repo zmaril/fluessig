@@ -1,5 +1,9 @@
 # fluessig → Django/SQLite: runtime findings
 
+<!-- straitjacket-allow-file:duplication — the pasted runtime evidence restates
+     code-shaped patterns (FK-join traces, enum round-trips) by design; the
+     repetition is the proof, not a refactor target. -->
+
 **What this is.** A real, running proof that a **fluessig-authored schema drives a
 working Django app on SQLite**. A bespoke issue-tracker schema is authored in the
 fluessig Rust derives (`schema/src/lib.rs`), emitted to `catalog.json`, and from

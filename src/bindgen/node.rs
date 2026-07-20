@@ -244,6 +244,76 @@ fn sync_napi_attr(pin: Option<&str>) -> String {
     }
 }
 
+/// Which prelude items a surface's ops actually pull in — the gate that keeps a
+/// pure sync-infallible binding free of the napi-3-ONLY streaming/async symbols
+/// (`AsyncGenerator` / `AsyncTask`) so it compiles against `napi = "2"`. The
+/// prior code emitted the whole streaming/async prelude UNCONDITIONALLY, so a
+/// stream-less, ctor-less, sync-infallible surface failed with `unresolved
+/// import napi::bindgen_prelude::AsyncGenerator` (that symbol does not exist in
+/// napi 2). Each import is therefore gated on the op kinds that use it; a full
+/// (stream/async/ctor/fallible) surface still emits every item, so its bytes are
+/// unchanged.
+struct NodePrelude {
+    /// Any `stream` op → `AsyncGenerator` + `Future`/`Duration` + the shared
+    /// `Poll`/`PollStream` runtime import (all streaming-only, napi-3 for the
+    /// generator trait).
+    stream: bool,
+    /// `AsyncTask` + `napi::{Env, Task}` — an async unary op OR a stream (whose
+    /// retained `next()` cursor is itself an `AsyncTask`).
+    async_task: bool,
+    /// `Arc` — a handle (ctor) surface or a stream (both hold `Arc<…>`).
+    arc: bool,
+    /// `napi::bindgen_prelude::Result` + the `err` fn — any op/getter that throws
+    /// on `Err`: an async task, a stream, a ctor `new`, a sync-FALLIBLE op, or an
+    /// Arrow-payload IPC getter. `Result` and `err` are always co-present (every
+    /// throwing site both spells `Result<…>` and calls `.map_err(err)`), so one
+    /// flag gates both.
+    result: bool,
+}
+
+impl NodePrelude {
+    fn of(api: &ApiDoc) -> Self {
+        let stream = api
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Stream);
+        let async_unary = api
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Unary && o.is_async);
+        let ctor = api
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Ctor);
+        // a DEFAULT sync unary op that is NOT infallible keeps a `Result<T>` seam
+        // and throws → `Result` + `err`.
+        let sync_fallible = api
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Unary && !o.is_async && !o.infallible);
+        // an Arrow-payload DTO's IPC getter returns `Result<Bytes>` + `.map_err(err)`.
+        let arrow = api.models.iter().any(|m| arrow_field(m).is_some());
+        Self {
+            stream,
+            async_task: async_unary || stream,
+            arc: ctor || stream,
+            result: async_unary || stream || ctor || sync_fallible || arrow,
+        }
+    }
+
+    /// True when the surface emits the FULL historical prelude (every streaming/
+    /// async/fallible item). Only a REDUCED surface gets the belt-and-suspenders
+    /// `#![allow(unused_imports)]` banner line — this keeps a full surface's
+    /// committed golden byte-identical (it never carried that line).
+    fn is_full(&self) -> bool {
+        self.stream && self.async_task && self.arc && self.result
+    }
+}
+
 /// Generate the napi (Node) binding with default options: structured
 /// tagged-object union projection (`Either{N}`, tag field `"type"`) and no
 /// external `.d.ts`. A thin wrapper over [`node_binding_with_options`]; pass an
@@ -262,36 +332,71 @@ pub fn node_binding_with_options(
     banner_note: Option<&str>,
     opts: &NodeOptions,
 ) -> String {
+    // The CONDITIONAL streaming/async prelude. Each `use` is gated on the op
+    // kinds that use it ([`NodePrelude`]); a pure sync-infallible surface reduces
+    // to just `use napi_derive::napi;` (napi-2-compatible). A full surface still
+    // emits every item, and since rustfmt reorders the imports the emission order
+    // here is immaterial — the formatted bytes match the historical prelude.
+    let needs = NodePrelude::of(api);
     // Structured projection emits bare `Either{N}<…>` in DTO fields, op returns,
     // and `Task::Output`; napi's prelude glob is NOT imported, so the exact
     // arities used must be named here (a real napi compile fails E0425 otherwise).
-    // Envelope mode produces no `Either`, so the set is empty and the import line
-    // is byte-identical to before.
-    let either_import: String = either_arities(api, opts)
-        .iter()
-        .map(|&n| format!(", {}", either_name(n)))
-        .collect();
-    let prelude_import =
-        format!("use napi::bindgen_prelude::{{AsyncGenerator, AsyncTask, Result{either_import}}};");
-    // The shared streaming-contract import flows through the use-emitter
-    // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
-    // generated `use` line has one emission path; renders byte-identically.
-    let runtime_import = RUNTIME_STREAM_IMPORT.render();
+    // Envelope mode produces no `Either`, so the set is empty.
+    let either = either_arities(api, opts);
     let mut t: rust::Tokens = quote! {
         $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
-        use std::future::Future;
-        use std::sync::Arc;
-        use std::time::Duration;
-        $(&prelude_import)
-        use napi::{Env, Task};
-        use napi_derive::napi;
-        $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
-        $(&runtime_import)
-
-        fn err(e: impl std::fmt::Display) -> napi::Error {
-            napi::Error::from_reason(e.to_string())
-        }
     };
+    // `use napi::bindgen_prelude::{…}` — only the items actually used, in the
+    // historical order (AsyncGenerator, AsyncTask, Result, then Either arities).
+    // Omitted entirely for a pure sync-infallible surface (napi-3-free).
+    let mut bp: Vec<String> = Vec::new();
+    if needs.stream {
+        bp.push("AsyncGenerator".to_string());
+    }
+    if needs.async_task {
+        bp.push("AsyncTask".to_string());
+    }
+    if needs.result {
+        bp.push("Result".to_string());
+    }
+    bp.extend(either.iter().map(|&n| either_name(n)));
+    if !bp.is_empty() {
+        let line = format!("use napi::bindgen_prelude::{{{}}};", bp.join(", "));
+        quote_in! { t => $['\r'] $(&line) };
+    }
+    if needs.async_task {
+        // `Env`/`Task` back every `AsyncTask` (an async unary op or a stream's
+        // retained poll cursor).
+        quote_in! { t => $['\r'] use napi::{Env, Task}; };
+    }
+    // ALWAYS — the one napi-2-compatible import every surface needs.
+    quote_in! { t => $['\r'] use napi_derive::napi; };
+    if needs.stream {
+        quote_in! { t => $['\r'] use std::future::Future; };
+    }
+    if needs.arc {
+        quote_in! { t => $['\r'] use std::sync::Arc; };
+    }
+    if needs.stream {
+        // the shared streaming-contract import flows through the use-emitter
+        // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
+        // generated `use` line has one emission path; renders byte-identically.
+        let runtime_import = RUNTIME_STREAM_IMPORT.render();
+        quote_in! { t =>
+            $['\r'] use std::time::Duration;
+            $['\r'] $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
+            $['\r'] $(&runtime_import)
+        };
+    }
+    if needs.result {
+        // the shared `Err`→`napi::Error` mapper, called at every throwing site.
+        quote_in! { t =>
+            $['\n']
+            fn err(e: impl std::fmt::Display) -> napi::Error {
+                napi::Error::from_reason(e.to_string())
+            }
+        };
+    }
     if api_uses_bytes(api) {
         quote_in! { t =>
             $['\n']
@@ -999,9 +1104,23 @@ pub fn node_binding_with_options(
         ),
         None => String::new(),
     };
+    // Belt-and-suspenders against any residual unused-import warning on a REDUCED
+    // (non-full) surface, mirroring the php backend's banner. Emitted ONLY when
+    // the prelude was trimmed: a FULL surface never carried this line, so its
+    // committed golden stays byte-identical (gating it here is what keeps the
+    // async/stream `node.golden` unchanged). It sits BEFORE `#![allow(clippy::all)]`
+    // so that line stays the LAST prologue attribute — the fan-out import splice
+    // ([`splice_imports`]) inserts `use crate::…` right after it, which must land
+    // after every inner attribute or rustc rejects the module.
+    let unused = if needs.is_full() {
+        String::new()
+    } else {
+        "#![allow(unused_imports)]\n".to_string()
+    };
     crate::rustfmt::format(format!(
-        "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}{}#![allow(clippy::all)]\n\n{body}",
+        "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}{}{}#![allow(clippy::all)]\n\n{body}",
         note_line(banner_note),
-        ext_note
+        ext_note,
+        unused
     ))
 }

@@ -288,12 +288,32 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                             Ok(Self { core: Arc::new(<$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)?) })
                         }
                     },
-                    Shape::Unary => quote_in! { methods =>
-                        $['\r']
-                        pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&ret)> {
-                            self.core.$(&name)($(&names)).map_err(err)
+                    Shape::Unary => {
+                        // An op export-name pin lands as ext-php-rs `#[rename("…")]`
+                        // (un-pinned ⇒ no attr, byte-identical). PHP is ALREADY
+                        // synchronous (the async/sync default is a node-only
+                        // projection), so the only default-inversion effect here is
+                        // INFALLIBILITY: a bare-`T` core drops the `PhpResult`/throw
+                        // seam entirely.
+                        if let Some(nm) = pinned_name(&op.bindings, LANG) {
+                            quote_in! { methods => $['\r']$(format!("#[rename({nm:?})]")) };
                         }
-                    },
+                        if op.infallible {
+                            quote_in! { methods =>
+                                $['\r']
+                                pub fn $(&name)(&self$sep$(&ps)) -> $(&ret) {
+                                    self.core.$(&name)($(&names))
+                                }
+                            }
+                        } else {
+                            quote_in! { methods =>
+                                $['\r']
+                                pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&ret)> {
+                                    self.core.$(&name)($(&names)).map_err(err)
+                                }
+                            }
+                        }
+                    }
                     Shape::Stream => {
                         let class = pascal(&op.name);
                         quote_in! { methods =>
@@ -355,10 +375,24 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                     .collect::<Vec<_>>()
                     .join(", ");
                 let (ret, _) = ty(api, &op.returns);
-                quote_in! { methods =>
-                    $['\r']
-                    pub fn $(&name)($(&ps)) -> PhpResult<$(&ret)> {
-                        <$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)
+                // op export-name pin ⇒ `#[rename("…")]`; infallible ⇒ drop the
+                // `PhpResult`/throw seam (see the method arm above).
+                if let Some(nm) = pinned_name(&op.bindings, LANG) {
+                    quote_in! { methods => $['\r']$(format!("#[rename({nm:?})]")) };
+                }
+                if op.infallible {
+                    quote_in! { methods =>
+                        $['\r']
+                        pub fn $(&name)($(&ps)) -> $(&ret) {
+                            <$(&impl_path) as $(&trait_name)>::$(&name)($(&names))
+                        }
+                    }
+                } else {
+                    quote_in! { methods =>
+                        $['\r']
+                        pub fn $(&name)($(&ps)) -> PhpResult<$(&ret)> {
+                            <$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)
+                        }
                     }
                 }
             }

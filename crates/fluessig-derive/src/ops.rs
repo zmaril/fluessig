@@ -53,6 +53,23 @@ pub struct OpDescriptor {
     pub doc: Option<&'static str>,
     /// The op kind — `ctor` / plain unary / `stream` / `manual`.
     pub kind: OpKind,
+    /// The per-op async marker — `Some(true)` = `#[fluessig(async)]` (opt into the
+    /// async projection), `Some(false)` = `#[fluessig(sync)]` (the redundant
+    /// explicit-synchronous marker), `None` = the global default (synchronous).
+    /// Lowered to [`fluessig::api::ApiOp::is_async`] (a bare `bool`; `Some(false)`
+    /// and `None` both resolve to `false`). A FLAG composing with `Unary` only; the
+    /// macro rejects it on any other kind.
+    pub is_async: Option<bool>,
+    /// Whether the method's Rust return type is `Result<T>` (fallible) vs a bare
+    /// `T` (infallible). Composed with the resolved async-ness at lowering into
+    /// the op's `infallible` bit: a SYNCHRONOUS op returning a bare `T` gets an
+    /// infallible seam (`-> T`), one returning `Result<T>` keeps the throwing seam.
+    /// For an async op this is unused (every async op crosses the `Result` seam).
+    pub fallible: bool,
+    /// `#[fluessig(name = "…")]` — an explicit export-name pin for this op,
+    /// lowered onto `ApiOp.bindings` so the node backend emits
+    /// `#[napi(js_name = "…")]`. `None` ⇒ each backend's default casing.
+    pub name_pin: Option<&'static str>,
     /// `#[fluessig(readonly)]` — an observe-only op; lowers to `api.json`
     /// `"readonly": true` and the MCP `readOnlyHint`. A FLAG composing with `kind`
     /// (a readonly op is still unary/stream), not a kind of its own.
@@ -153,15 +170,26 @@ fn lower_api_type(t: &ApiTypeDesc, resolver: &RefResolver) -> ApiType {
 /// the derive authoring surface). Op param/return types are resolved against the
 /// catalog via `resolver` (a semantic-scalar param lands as a scalar, not a model).
 fn lower_op(op: &OpDescriptor, resolver: &RefResolver) -> ApiOp {
+    let shape = match op.kind {
+        OpKind::Ctor => Shape::Ctor,
+        OpKind::Unary => Shape::Unary,
+        OpKind::Stream => Shape::Stream,
+        OpKind::Manual => Shape::Manual,
+    };
+    // The op's async-ness is the ONE per-op marker: `#[fluessig(async)]` opts an
+    // op into the async projection; everything else is synchronous (the global
+    // default). `infallible` (a bare `T` return on a SYNCHRONOUS unary op) drops
+    // the `Result` seam from the per-backend emission AND the shared core trait —
+    // so it is only ever set on a synchronous unary op; an async op always crosses
+    // the seam.
+    let is_async = op.is_async.unwrap_or(false);
+    let infallible = matches!(op.kind, OpKind::Unary) && !is_async && !op.fallible;
     ApiOp {
         name: camel(op.name),
         doc: op.doc.map(str::to_string),
-        shape: match op.kind {
-            OpKind::Ctor => Shape::Ctor,
-            OpKind::Unary => Shape::Unary,
-            OpKind::Stream => Shape::Stream,
-            OpKind::Manual => Shape::Manual,
-        },
+        shape,
+        is_async,
+        infallible,
         readonly: op.readonly,
         destructive: op.destructive,
         stream_error: None,
@@ -175,8 +203,32 @@ fn lower_op(op: &OpDescriptor, resolver: &RefResolver) -> ApiOp {
             })
             .collect(),
         returns: lower_api_type(&op.returns, resolver),
-        bindings: Default::default(),
+        // An op-level `#[fluessig(name = "…")]` pins the exported symbol name
+        // across the surface; each backend applies it through its own rename
+        // (node ⇒ `#[napi(js_name = "…")]`). An unpinned op keeps an empty map,
+        // byte-identical to before this authoring path existed.
+        bindings: op_name_bindings(op.name_pin),
     }
+}
+
+/// The `bindings` map for an op's `#[fluessig(name = "…")]` pin: the exact
+/// export name under every backend's language slug (each backend reads its own
+/// key via [`crate::bindgen::pinned_name`]). `None` ⇒ an empty map (default
+/// casing everywhere).
+fn op_name_bindings(name_pin: Option<&str>) -> std::collections::BTreeMap<String, SymbolBinding> {
+    let mut out = std::collections::BTreeMap::new();
+    if let Some(name) = name_pin {
+        for lang in ["node", "python", "ruby", "php", "mcp"] {
+            out.insert(
+                lang.to_string(),
+                SymbolBinding {
+                    name: Some(name.to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    out
 }
 
 /// Collect op-interface descriptors into the in-memory [`fluessig::api::ApiDoc`]

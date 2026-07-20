@@ -1023,11 +1023,54 @@ pub fn ruby_binding_with_options(
                         }
                     }
                     Shape::Unary => {
+                        // An op export-name pin overrides the RUBY method name (the
+                        // `define_method` string); the Rust fn ident stays snake.
+                        // Un-pinned ⇒ `rb_name == name`, byte-identical. Ruby is
+                        // ALREADY synchronous (the async/sync default is a node-only
+                        // projection). INFALLIBILITY drops the `Result`/raise seam —
+                        // but only cleanly for a zero-marshaling op (no `scan_args`
+                        // prelude, non-list): Ruby arg conversion is itself fallible,
+                        // so a param'd / list-returning infallible op keeps the
+                        // `Result` seam (the CORE call drops its `.map_err`, the
+                        // marshaling can still raise) — the honest capability edge.
+                        let rb_name =
+                            pinned_name(&op.bindings, LANG).unwrap_or_else(|| name.clone());
                         registrations.push(format!(
-                            "class.define_method({name:?}, method!({}::{name}, {arity}))?;",
+                            "class.define_method({rb_name:?}, method!({}::{name}, {arity}))?;",
                             i.name
                         ));
-                        if rb_is_list_return(op) {
+                        if op.infallible {
+                            if rb_is_list_return(op) {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    fn $(&name)(&self, $(&fn_params)) -> Result<magnus::RArray, Error> {
+                                        $prelude
+                                        let out = self.core.$(&name)($(&args));
+                                        let ruby = Ruby::get().map_err(|e| rberr(e))?;
+                                        let ary = ruby.ary_new();
+                                        for v in out {
+                                            ary.push(v)?;
+                                        }
+                                        Ok(ary)
+                                    }
+                                }
+                            } else if prelude.trim().is_empty() {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    fn $(&name)(&self, $(&fn_params)) -> $(&ret) {
+                                        self.core.$(&name)($(&args))
+                                    }
+                                }
+                            } else {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    fn $(&name)(&self, $(&fn_params)) -> Result<$(&ret), Error> {
+                                        $prelude
+                                        Ok(self.core.$(&name)($(&args)))
+                                    }
+                                }
+                            }
+                        } else if rb_is_list_return(op) {
                             quote_in! { methods =>
                                 $['\r']
                                 fn $(&name)(&self, $(&fn_params)) -> Result<magnus::RArray, Error> {
@@ -1100,15 +1143,52 @@ pub fn ruby_binding_with_options(
                 let prelude = format!("{}{}", p.scan.unwrap_or_default(), p.prelude);
                 let args = p.args;
                 let (ret, _) = ruby_ty(api, opts, &op.returns);
+                // op export-name pin overrides the RUBY singleton-method name; the
+                // Rust fn symbol in `function!` stays snake (see the method arm).
+                let rb_name = pinned_name(&op.bindings, LANG).unwrap_or_else(|| name.clone());
                 registrations.push(format!(
-                    "class.define_singleton_method({name:?}, function!({name}, {arity}))?;"
+                    "class.define_singleton_method({rb_name:?}, function!({name}, {arity}))?;"
                 ));
                 if let Some(doc) = &op.doc {
                     for line in doc.lines() {
                         quote_in! { t => $['\r']$(format!("/// {line}")) };
                     }
                 }
-                if rb_is_list_return(op) {
+                if op.infallible {
+                    if rb_is_list_return(op) {
+                        quote_in! { t =>
+                            $['\r']
+                            fn $(&name)($(&fn_params)) -> Result<magnus::RArray, Error> {
+                                $prelude
+                                let out = <$(&impl_path) as $(&trait_name)>::$(&name)($(&args));
+                                let ruby = Ruby::get().map_err(|e| rberr(e))?;
+                                let ary = ruby.ary_new();
+                                for v in out {
+                                    ary.push(v)?;
+                                }
+                                Ok(ary)
+                            }
+                            $['\n']
+                        };
+                    } else if prelude.trim().is_empty() {
+                        quote_in! { t =>
+                            $['\r']
+                            fn $(&name)($(&fn_params)) -> $(&ret) {
+                                <$(&impl_path) as $(&trait_name)>::$(&name)($(&args))
+                            }
+                            $['\n']
+                        };
+                    } else {
+                        quote_in! { t =>
+                            $['\r']
+                            fn $(&name)($(&fn_params)) -> Result<$(&ret), Error> {
+                                $prelude
+                                Ok(<$(&impl_path) as $(&trait_name)>::$(&name)($(&args)))
+                            }
+                            $['\n']
+                        };
+                    }
+                } else if rb_is_list_return(op) {
                     quote_in! { t =>
                         $['\r']
                         fn $(&name)($(&fn_params)) -> Result<magnus::RArray, Error> {

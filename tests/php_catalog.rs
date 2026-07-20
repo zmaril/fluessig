@@ -41,6 +41,8 @@ fn m0_api() -> ApiDoc {
                     "The atilla engine version, as reported by the atilla-core facade.".into(),
                 ),
                 shape: Shape::Unary,
+                is_async: false,
+                infallible: false,
                 readonly: true,
                 destructive: false,
                 stream_error: None,

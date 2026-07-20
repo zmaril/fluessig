@@ -37,6 +37,11 @@ pub mod api;
 /// the resolver follows `extends` to spell the inherited composite FK columns.
 pub mod leaf_fk;
 
+/// Node-backend features (this PR): synchronous / infallible unary ops
+/// (`#[fluessig(sync)]`) and op export-name pins (`#[fluessig(name = "…")]`),
+/// proven against the node backend in `tests/api_gate.rs`.
+pub mod native;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

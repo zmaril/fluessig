@@ -9,7 +9,9 @@
 //! (`graph::{Repo, PullRequest}`):
 //!
 //! * `#[fluessig(ctor)]` — a constructor (`void` on the op surface);
-//! * a plain (untagged) unary method returning an entity / `Option<entity>`;
+//! * a unary method returning an entity / `Option<entity>` — `#[fluessig(async)]`
+//!   here, since these ops are IO-bound (the async `AsyncTask`/`Promise` shape);
+//!   a plain unary op with no marker is synchronous (see the `native` demo);
 //! * `#[fluessig(stream)]` — returns `impl Iterator<Item = entity>` (bindgen maps
 //!   it to a JS async iterator / Python generator / Ruby Enumerator);
 //! * `#[fluessig(manual)]` — recorded in `api.json` but hand-written per binding.
@@ -86,18 +88,21 @@ impl Db {
     }
 
     /// Look up one repo by id — `None` when absent.
+    #[fluessig(async)]
     pub fn repo(&self, id: &str) -> Option<Repo> {
         let _ = id;
         None
     }
 
     /// Count the pull requests in a repo.
+    #[fluessig(async)]
     pub fn pull_request_count(&self, repo_id: &str) -> i64 {
         let _ = repo_id;
         0
     }
 
     /// The repo ids known to the store.
+    #[fluessig(async)]
     pub fn repos(&self, limit: Option<i32>) -> Vec<String> {
         let _ = limit;
         Vec::new()
@@ -119,6 +124,7 @@ impl Db {
     }
 
     /// Load and report a stats DTO (a `#[derive(Record)]` return, Slice 8a Gap 2).
+    #[fluessig(async)]
     pub fn load(&self) -> LoadStats {
         LoadStats {
             commits: 0,
@@ -128,6 +134,7 @@ impl Db {
 
     /// Sink to a target described by a DTO param — `SinkOptions` (and, through it,
     /// `TableRename`) materialise into `api.json`'s `models`.
+    #[fluessig(async)]
     pub fn sink(&self, options: SinkOptions) -> i64 {
         let _ = options;
         0
@@ -145,12 +152,14 @@ pub struct GitHelpers;
 #[export]
 impl GitHelpers {
     /// Whether `name` is a branch in the repo at `repo_path`.
+    #[fluessig(async)]
     pub fn branch_exists(repo_path: &str, name: &str) -> bool {
         let _ = (repo_path, name);
         false
     }
 
     /// The current branch name at `repo_path`.
+    #[fluessig(async)]
     pub fn current_branch(repo_path: &str) -> String {
         let _ = repo_path;
         String::new()

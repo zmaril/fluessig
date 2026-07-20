@@ -218,6 +218,32 @@ fn ts_return_attr(
     format!("#[napi(ts_return_type = {:?})]", wrap(&ts))
 }
 
+/// Inject an op-level export-name pin (Feature B — `#[fluessig(name = "…")]`,
+/// read as `bindings["node"].name`) into a unary op's `#[napi(…)]` attribute as
+/// a `js_name`. `pin` `None` ⇒ `attr` is returned VERBATIM, so an unpinned op is
+/// byte-identical to before this authoring path existed. When the async
+/// `ts_return_type` hint is suppressed (an external-`.d.ts` union return, giving
+/// an empty `attr`) a pinned op still gets a lone `#[napi(js_name = "…")]`.
+fn with_js_name(attr: String, pin: Option<&str>) -> String {
+    let Some(js) = pin else { return attr };
+    let js = format!("js_name = {js:?}");
+    match attr.strip_prefix("#[napi(") {
+        Some(rest) => format!("#[napi({js}, {rest}"),
+        None => format!("#[napi({js})]"),
+    }
+}
+
+/// The `#[napi(…)]` attribute for a SYNCHRONOUS (`#[fluessig(sync)]`) unary op:
+/// `#[napi(js_name = "…")]` when name-pinned, else the bare `#[napi]`. A sync op
+/// carries no `ts_return_type` — its emitted return type IS the value (no
+/// `AsyncTask` wrapper for napi to see through).
+fn sync_napi_attr(pin: Option<&str>) -> String {
+    match pin {
+        Some(js) => format!("#[napi(js_name = {js:?})]"),
+        None => "#[napi]".to_string(),
+    }
+}
+
 /// Generate the napi (Node) binding with default options: structured
 /// tagged-object union projection (`Either{N}`, tag field `"type"`) and no
 /// external `.d.ts`. A thin wrapper over [`node_binding_with_options`]; pass an
@@ -722,8 +748,14 @@ pub fn node_binding_with_options(
             }
         }
 
-        // unary op tasks
-        for op in i.ops.iter().filter(|o| o.shape == Shape::Unary) {
+        // unary op tasks — a SYNCHRONOUS op (the default; `#[fluessig(async)]`
+        // opts back into async) needs NO off-thread Task (it is emitted as a plain
+        // `#[napi] fn`), so only the async unary ops generate one here.
+        for op in i
+            .ops
+            .iter()
+            .filter(|o| o.shape == Shape::Unary && o.is_async)
+        {
             let task = format!("{}Task", pascal(&op.name));
             let name = snake(&op.name);
             let (ret, _) = node_ty(api, opts, &op.returns);
@@ -797,14 +829,45 @@ pub fn node_binding_with_options(
                         }
                     },
                     Shape::Unary => {
-                        let task = format!("{}Task", pascal(&op.name));
-                        let attr =
-                            ts_return_attr(api, opts, &op.returns, |ts| format!("Promise<{ts}>"));
-                        quote_in! { methods =>
-                            $['\r']
-                            $attr
-                            pub fn $(&name)(&self, $(&ps)) -> AsyncTask<$(&task)> {
-                                AsyncTask::new($(&task) { core: self.core.clone(), $(&names) })
+                        let pin = pinned_name(&op.bindings, LANG);
+                        let pin = pin.as_deref();
+                        if !op.is_async {
+                            // DEFAULT: a synchronous method — no `AsyncTask`, no
+                            // `Promise`. Infallible (bare-`T` core) passes the value
+                            // straight through; fallible (`Result<T>` core) throws.
+                            let (ret, _) = node_ty(api, opts, &op.returns);
+                            let attr = sync_napi_attr(pin);
+                            if op.infallible {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    $attr
+                                    pub fn $(&name)(&self, $(&ps)) -> $(&ret) {
+                                        self.core.$(&name)($(&names))
+                                    }
+                                }
+                            } else {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    $attr
+                                    pub fn $(&name)(&self, $(&ps)) -> Result<$(&ret)> {
+                                        self.core.$(&name)($(&names)).map_err(err)
+                                    }
+                                }
+                            }
+                        } else {
+                            let task = format!("{}Task", pascal(&op.name));
+                            let attr = with_js_name(
+                                ts_return_attr(api, opts, &op.returns, |ts| {
+                                    format!("Promise<{ts}>")
+                                }),
+                                pin,
+                            );
+                            quote_in! { methods =>
+                                $['\r']
+                                $attr
+                                pub fn $(&name)(&self, $(&ps)) -> AsyncTask<$(&task)> {
+                                    AsyncTask::new($(&task) { core: self.core.clone(), $(&names) })
+                                }
                             }
                         }
                     }
@@ -863,8 +926,6 @@ pub fn node_binding_with_options(
                     quote_in! { t => $['\r']$(format!("// @manual: {}.{} — hand-written in lib.rs.", i.name, op.name)) };
                     continue;
                 }
-                let task = format!("{}Task", pascal(&op.name));
-                let attr = ts_return_attr(api, opts, &op.returns, |ts| format!("Promise<{ts}>"));
                 let params: Vec<String> = param_sig(api, op)
                     .iter()
                     .map(|(n, r)| format!("{n}: {r}"))
@@ -880,14 +941,49 @@ pub fn node_binding_with_options(
                         quote_in! { t => $['\r']$(format!("/// {line}")) };
                     }
                 }
-                quote_in! { t =>
-                    $['\r']
-                    $attr
-                    pub fn $(&name)($(&ps)) -> AsyncTask<$(&task)> {
-                        AsyncTask::new($(&task) { $(&names) })
+                let pin = pinned_name(&op.bindings, LANG);
+                let pin = pin.as_deref();
+                if !op.is_async {
+                    // DEFAULT: a synchronous free function — a direct call into
+                    // the core trait, no `AsyncTask`/`Promise`. Infallible returns
+                    // the value; fallible throws on `Err`.
+                    let (ret, _) = node_ty(api, opts, &op.returns);
+                    let attr = sync_napi_attr(pin);
+                    let call = format!("<{impl_path} as {trait_name}>::{name}({names})");
+                    if op.infallible {
+                        quote_in! { t =>
+                            $['\r']
+                            $attr
+                            pub fn $(&name)($(&ps)) -> $(&ret) {
+                                $(&call)
+                            }
+                            $['\n']
+                        };
+                    } else {
+                        quote_in! { t =>
+                            $['\r']
+                            $attr
+                            pub fn $(&name)($(&ps)) -> Result<$(&ret)> {
+                                $(&call).map_err(err)
+                            }
+                            $['\n']
+                        };
                     }
-                    $['\n']
-                };
+                } else {
+                    let task = format!("{}Task", pascal(&op.name));
+                    let attr = with_js_name(
+                        ts_return_attr(api, opts, &op.returns, |ts| format!("Promise<{ts}>")),
+                        pin,
+                    );
+                    quote_in! { t =>
+                        $['\r']
+                        $attr
+                        pub fn $(&name)($(&ps)) -> AsyncTask<$(&task)> {
+                            AsyncTask::new($(&task) { $(&names) })
+                        }
+                        $['\n']
+                    };
+                }
             }
         }
     }

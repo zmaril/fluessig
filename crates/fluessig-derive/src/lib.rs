@@ -89,7 +89,7 @@ pub use fluessig_derive_macros::{
     catalog, export, AbstractRoot, Edge, Entity, Enum, Record, Scalar, Union,
 };
 
-use fluessig::api::{ApiDoc, ApiInterface, ApiOp, ApiParam, ApiType, Shape};
+use fluessig::api::{ApiDoc, ApiInterface, ApiOp, ApiParam, ApiType, Shape, SymbolBinding};
 use fluessig::ir::{
     camel, Cardinality, Catalog, Entity as IrEntity, Field, RelKind, Relation, Scalar, Struct,
     TypeRef, UnionDef, UnionVariant, Versions,

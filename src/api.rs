@@ -95,6 +95,24 @@ pub struct ApiOp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     pub shape: Shape,
+    /// The op's ASYNC marker — the ONE place async-ness is decided, meaning the
+    /// same thing everywhere. Synchronous is the GLOBAL default across every
+    /// backend: an op with no `#[fluessig(async)]` marker (`is_async = false`,
+    /// the field ABSENT) generates a plain, value-returning binding.
+    /// `#[fluessig(async)]` (⇒ `"async": true`) opts an op INTO the async
+    /// projection (the historical `AsyncTask`/`Promise`/coroutine shape).
+    /// Serialized ONLY when `true`. Only meaningful on [`Shape::Unary`] (streams
+    /// are always async-iterable, ctors are synchronous constructors).
+    #[serde(rename = "async", default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_async: bool,
+    /// The op's Rust return type is a bare `T` (not `Result<T>`), so a SYNCHRONOUS op
+    /// carries NO error channel: node emits `-> T` (no `napi::Result`, no `.map_err`),
+    /// python drops its `PyResult`/raise, php its `PhpResult`, ruby its `Result<_, Error>`,
+    /// and the shared core-trait method is `fn name(..) -> T`. Only ever `true` when the op
+    /// resolves synchronous — an async op always crosses the `Result` seam (a rejected
+    /// `Promise`) — so it is meaningless on an async op and defaults `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub infallible: bool,
     /// `@readonly` — flows into the MCP `readOnlyHint` annotation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub readonly: bool,

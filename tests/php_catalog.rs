@@ -46,6 +46,7 @@ fn m0_api() -> ApiDoc {
                 readonly: true,
                 destructive: false,
                 stream_error: None,
+                result_error: None,
                 params: Vec::new(),
                 returns: ApiType::Scalar("string".into()),
                 bindings: Default::default(),

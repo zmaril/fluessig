@@ -306,6 +306,12 @@ pub(crate) fn build_models(
                 seed_api_type(&p.ty, &mut referenced, &mut referenced_unions);
             }
             seed_api_type(&op.returns, &mut referenced, &mut referenced_unions);
+            // A `#[fluessig(result)]` op's error RECORD is referenced by the op
+            // too (node materialises it as the envelope's `error` arm), so it must
+            // join `models` even though it appears in no param/return position.
+            if let Some(e) = &op.result_error {
+                referenced.insert(e.clone());
+            }
         }
     }
 

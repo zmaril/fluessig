@@ -13,7 +13,9 @@
 use std::collections::BTreeSet;
 
 use fluessig::api::{load_api, ApiType, Shape};
-use fluessig::bindgen::{node_binding, php_binding, python_binding, ruby_binding, EnumDesc};
+use fluessig::bindgen::{
+    node_binding, php_binding, python_binding, ruby_binding, wasm_binding, EnumDesc,
+};
 use fluessig::load_catalog;
 
 /// The Rust type name a (possibly nullable/list) op type ultimately references,
@@ -238,6 +240,37 @@ fn bindgen_projects_the_op_surface() {
     assert!(
         py.contains("fn pull_requests"),
         "python should bind the stream op"
+    );
+
+    // ── wasm: the `Db` interface (ctor) → a handle struct; streams are skipped
+    // honestly (no broken code); manual ops are recorded but not auto-bound; a
+    // plain unary op binds under a wasm-bindgen `js_name`. ──
+    let wasm = wasm_binding(&api, &enums, None);
+    // the wasm-bindgen surface exists
+    assert!(
+        wasm.contains("#[wasm_bindgen]"),
+        "wasm should emit a #[wasm_bindgen] surface"
+    );
+    // the ctor interface projects to a handle struct with a constructor
+    assert!(
+        wasm.contains("pub struct Db {") && wasm.contains("#[wasm_bindgen(constructor)]"),
+        "wasm ctor interface should become a handle struct with a constructor"
+    );
+    // a plain unary op binds under its lowerCamel js_name
+    assert!(
+        wasm.contains("js_name = \"pullRequestCount\"")
+            && wasm.contains("pub fn pull_request_count"),
+        "wasm should bind the unary op under a js_name"
+    );
+    // the stream op is skipped honestly, not emitted as broken code
+    assert!(
+        wasm.contains("// stream op `pullRequests` is not yet supported by the wasm backend"),
+        "wasm should skip the stream op with an honest note"
+    );
+    // the manual op is recorded but hand-written, not auto-bound
+    assert!(
+        wasm.contains("// @manual: watch"),
+        "wasm should record `watch` as @manual, not auto-bind it"
     );
 }
 

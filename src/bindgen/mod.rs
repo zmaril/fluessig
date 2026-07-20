@@ -20,6 +20,7 @@ mod node;
 mod php;
 mod python;
 mod ruby;
+mod wasm;
 
 pub use fanout::{
     common_path_for, external_refs, fan_out_crate, group_module_path, group_table, render_mod_tree,
@@ -31,6 +32,7 @@ pub use node::{node_binding, node_binding_with_options, NodeOptions};
 pub use php::php_binding;
 pub use python::{python_binding, python_binding_with_options, PythonOptions};
 pub use ruby::{ruby_binding, ruby_binding_with_options, RubyOptions};
+pub use wasm::{wasm_binding, wasm_binding_with_options, WasmOptions};
 
 use std::collections::BTreeMap;
 

@@ -31,6 +31,7 @@ fn m0_api() -> ApiDoc {
         },
         source: Some("atilla.tsp".into()),
         models: Vec::new(),
+        default_async: true,
         unions: Vec::new(),
         interfaces: vec![ApiInterface {
             name: "Atilla".into(),
@@ -41,7 +42,7 @@ fn m0_api() -> ApiDoc {
                     "The atilla engine version, as reported by the atilla-core facade.".into(),
                 ),
                 shape: Shape::Unary,
-                sync: false,
+                is_async: None,
                 infallible: false,
                 readonly: true,
                 destructive: false,

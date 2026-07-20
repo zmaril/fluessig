@@ -165,4 +165,12 @@ catalog! {
     entities: [Repo, PullRequest, GhUser, Review],
     records: [LoadStats, TableRename, SinkOptions],
     api: [Db, GitHelpers],
+    // This four-kind demo predates the sync-by-default inversion and its bindgen
+    // gate (`tests/api_gate.rs`) exercises the historical ASYNC unary projection.
+    // `default_async: true` is the one-line opt-out that holds every op async
+    // (the node `AsyncTask`/`Promise` shape) so the committed `api.json` and the
+    // gate's expectations stay byte-identical — the low-churn lever entl /
+    // disponent use. The sync-default projection is showcased by the `native`
+    // demo instead.
+    default_async: true,
 }

@@ -5,6 +5,7 @@
     "compiler": "1.14.0"
   },
   "source": "union.tsp",
+  "defaultAsync": true,
   "models": [
     {
       "name": "AgentMessage",

@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use fluessig::api::{load_api, ApiType, Shape};
-use fluessig::bindgen::{node_binding, python_binding, EnumDesc};
+use fluessig::bindgen::{node_binding, php_binding, python_binding, ruby_binding, EnumDesc};
 use fluessig::load_catalog;
 
 /// The Rust type name a (possibly nullable/list) op type ultimately references,
@@ -241,66 +241,83 @@ fn bindgen_projects_the_op_surface() {
     );
 }
 
-/// The two node-backend features this PR adds, against the `native` demo schema
-/// (kept apart from the four-kind `Db`/`GitHelpers` demo so the sync/pinned
-/// concept doesn't leak into the multi-backend pedagogy):
+/// The sync-by-default authoring surface this PR lands, against the `native`
+/// demo schema (kept apart from the four-kind `Db`/`GitHelpers` demo so the
+/// sync/async/pin concept doesn't leak into that pedagogy):
 ///
-///   * Feature A — `#[fluessig(sync)]`: a synchronous unary op, emitted as a
-///     plain `#[napi] fn` with NO `AsyncTask`/`Promise`. Infallible (bare-`T`
-///     core) returns the value directly (no `Result` seam, and the shared core
-///     trait method is `fn … -> T`); fallible (`Result<T>` core) emits
-///     `-> napi::Result<T>` (Err → JS throw).
-///   * Feature B — `#[fluessig(name = "…")]`: an op export-name pin, emitted as
-///     `#[napi(js_name = "…")]` on the function.
-///
-/// Both are OPT-IN: the untagged `slow_count` op stays the historical async
-/// `AsyncTask` → `Promise<number>`.
+///   * a DEFAULT op is SYNCHRONOUS — no `async` field in `api.json` (the op
+///     inherits the catalog's `default_async`, which is the global default
+///     `false`). Infallible when the Rust return is a bare `T` (no `Result` seam;
+///     the shared core-trait method is `fn … -> T`), fallible when it is a
+///     `Result<T>`.
+///   * `#[fluessig(async)]` is the OPT-OUT: `is_async == Some(true)` → the
+///     historical async projection.
+///   * `#[fluessig(name = "…")]` pins the export name across every backend.
 #[test]
-fn native_api_carries_sync_and_pin_flags() {
+fn native_api_carries_sync_default_and_pin_flags() {
     let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json())
         .expect("native api.json must load clean");
+    assert!(
+        !api.default_async,
+        "the native demo has no `default_async`, so the global sync default holds"
+    );
     let iface = api.interfaces.iter().find(|i| i.name == "Native").unwrap();
     let op = |n: &str| iface.ops.iter().find(|o| o.name == n).unwrap();
 
-    // sync + infallible + name-pinned: the atilla `atillaNativeVersion` shape.
+    // DEFAULT sync (no `async` override) + infallible + name-pinned: the atilla
+    // `atillaNativeVersion` shape.
     let nv = op("nativeVersion");
     assert_eq!(nv.shape, Shape::Unary);
-    assert!(nv.sync, "nativeVersion is #[fluessig(sync)]");
+    assert_eq!(
+        nv.is_async, None,
+        "a default op carries no `async` override"
+    );
+    assert!(
+        !nv.resolved_async(api.default_async),
+        "nativeVersion resolves synchronous"
+    );
     assert!(nv.infallible, "a bare-String return is infallible");
     assert!(matches!(&nv.returns, ApiType::Scalar(s) if s == "string"));
-    assert_eq!(
-        nv.bindings.get("node").and_then(|b| b.name.as_deref()),
-        Some("atillaNativeVersion"),
-        "the op export-name pin lands under the node binding"
-    );
+    for lang in ["node", "python", "php", "ruby"] {
+        assert_eq!(
+            nv.bindings.get(lang).and_then(|b| b.name.as_deref()),
+            Some("atillaNativeVersion"),
+            "the op export-name pin lands under the {lang} binding"
+        );
+    }
 
-    // sync but FALLIBLE (Result<T> return): sync set, infallible NOT set.
+    // DEFAULT sync but FALLIBLE (Result<T> return): no override, infallible NOT set.
     let cr = op("checkedRoot");
-    assert!(cr.sync, "checkedRoot is #[fluessig(sync)]");
+    assert_eq!(cr.is_async, None, "checkedRoot is a default (sync) op");
+    assert!(
+        !cr.resolved_async(api.default_async),
+        "checkedRoot resolves synchronous"
+    );
     assert!(!cr.infallible, "a Result<T> return keeps the error seam");
 
-    // opt-in: the untagged op is neither sync nor pinned (default async).
+    // opt-OUT: `#[fluessig(async)]` forces async; never infallible; unpinned.
     let sc = op("slowCount");
+    assert_eq!(sc.is_async, Some(true), "slowCount is #[fluessig(async)]");
     assert!(
-        !sc.sync && !sc.infallible,
-        "slowCount stays the async default"
+        sc.resolved_async(api.default_async) && !sc.infallible,
+        "slowCount resolves async (never infallible)"
     );
     assert!(sc.bindings.is_empty(), "an unpinned op has no bindings");
 }
 
-/// The node backend emits the synchronous/infallible + `js_name` shapes, and the
-/// default async op is untouched — the concrete generated-code proof for both
-/// features. Compare `native_version`'s emission to atilla's hand-written
-/// `crates/atilla-napi/src/lib.rs` export (byte-comparable modulo the core-seam
-/// body): `#[napi(js_name = "atillaNativeVersion")] pub fn …() -> String`.
+/// The node backend emits the DEFAULT synchronous/infallible + `js_name` shape,
+/// and the `#[fluessig(async)]` op keeps the async projection — the concrete
+/// generated-code proof. Compare `native_version`'s emission to atilla's
+/// hand-written `crates/atilla-napi/src/lib.rs` export (byte-comparable modulo
+/// the core-seam body): `#[napi(js_name = "atillaNativeVersion")] pub fn …() -> String`.
 #[test]
-fn node_emits_sync_and_pinned_shapes() {
+fn node_emits_sync_default_and_pinned_shapes() {
     let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json()).unwrap();
     let enums: Vec<EnumDesc> = Vec::new();
     let node = node_binding(&api, &enums, None);
 
-    // Feature A + B together: sync + infallible + pinned → a plain `#[napi] fn`
-    // returning `String`, under the pinned js_name, with no Promise/AsyncTask/Result.
+    // DEFAULT sync + infallible + pinned → a plain `#[napi] fn` returning
+    // `String`, under the pinned js_name, with no Promise/AsyncTask/Result.
     assert!(
         node.contains(
             "#[napi(js_name = \"atillaNativeVersion\")]\npub fn native_version() -> String {"
@@ -318,16 +335,16 @@ fn node_emits_sync_and_pinned_shapes() {
         "the infallible op's core-trait method must be `fn … -> String`"
     );
 
-    // Feature A, fallible variant: sync but `Result<T>` → `napi::Result`, still no AsyncTask.
+    // Default sync, fallible variant: `Result<T>` → `napi::Result`, still no AsyncTask.
     assert!(
         node.contains("#[napi]\npub fn checked_root(path: String) -> Result<String> {"),
         "sync+fallible op must emit `-> Result<String>` (throws), no AsyncTask"
     );
 
-    // Opt-in / no regression: the untagged op keeps the async projection verbatim.
+    // Opt-OUT / no regression: the `#[fluessig(async)]` op keeps the async projection.
     assert!(
         node.contains("#[napi(ts_return_type = \"Promise<number>\")]\npub fn slow_count(path: String) -> AsyncTask<SlowCountTask> {"),
-        "the untagged op must stay the default async `Promise<number>`"
+        "the #[fluessig(async)] op must stay the async `Promise<number>`"
     );
 
     // A sync op produces NO per-op Task struct (only the async `slow_count` does).
@@ -338,5 +355,63 @@ fn node_emits_sync_and_pinned_shapes() {
     assert!(
         node.contains("pub struct SlowCountTask"),
         "the async op still generates its Task"
+    );
+}
+
+/// The SAME sync-default + infallible + name-pin shape in python, php, and ruby —
+/// proving the projection is not node-only. python/php/ruby unary ops are already
+/// synchronous, so the observable default-inversion effect is INFALLIBILITY (drop
+/// the raise/throw seam) plus the export-name pin.
+#[test]
+fn python_php_ruby_emit_sync_infallible_and_pinned_shapes() {
+    let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json()).unwrap();
+    let enums: Vec<EnumDesc> = Vec::new();
+
+    // ── python: `#[pyo3(name = "…")]` + a plain `-> String` (no PyResult) ──
+    let py = python_binding(&api, &enums, None);
+    assert!(
+        py.contains("#[pyo3(name = \"atillaNativeVersion\")]"),
+        "python pins the op name via #[pyo3(name = …)]\n{py}"
+    );
+    assert!(
+        py.contains("fn native_version(py: Python<'_>) -> String {"),
+        "python infallible op drops PyResult → `-> String`\n{py}"
+    );
+    // fallible default op keeps PyResult; the async op stays a plain method too.
+    assert!(
+        py.contains("fn checked_root(py: Python<'_>, path: String) -> PyResult<String> {"),
+        "python fallible op keeps the PyResult seam\n{py}"
+    );
+
+    // ── php: ext-php-rs `#[rename("…")]` + a plain `-> String` (no PhpResult) ──
+    let php = php_binding(&api, &enums, None);
+    assert!(
+        php.contains("#[rename(\"atillaNativeVersion\")]"),
+        "php pins the op name via #[rename(…)]\n{php}"
+    );
+    assert!(
+        php.contains("pub fn native_version() -> String {"),
+        "php infallible op drops PhpResult → `-> String`\n{php}"
+    );
+    assert!(
+        php.contains("pub fn checked_root(path: String) -> PhpResult<String> {"),
+        "php fallible op keeps the PhpResult seam\n{php}"
+    );
+
+    // ── ruby: the pinned singleton-method name + a plain `-> String` (no Result) ──
+    let ruby = ruby_binding(&api, &enums, None);
+    assert!(
+        ruby.contains(
+            "define_singleton_method(\"atillaNativeVersion\", function!(native_version, 0))"
+        ),
+        "ruby exposes the pinned method name; the Rust fn stays snake\n{ruby}"
+    );
+    assert!(
+        ruby.contains("fn native_version() -> String {"),
+        "ruby zero-arg infallible op drops the Result seam → `-> String`\n{ruby}"
+    );
+    assert!(
+        ruby.contains("fn checked_root(path: String) -> Result<String, Error> {"),
+        "ruby fallible op keeps the Result seam\n{ruby}"
     );
 }

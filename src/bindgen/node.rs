@@ -748,9 +748,14 @@ pub fn node_binding_with_options(
             }
         }
 
-        // unary op tasks — a `#[fluessig(sync)]` op needs NO off-thread Task
-        // (it is emitted as a plain synchronous `#[napi] fn`), so it is skipped here.
-        for op in i.ops.iter().filter(|o| o.shape == Shape::Unary && !o.sync) {
+        // unary op tasks — a SYNCHRONOUS op (the default; `#[fluessig(async)]`
+        // opts back into async) needs NO off-thread Task (it is emitted as a plain
+        // `#[napi] fn`), so only the async unary ops generate one here.
+        for op in i
+            .ops
+            .iter()
+            .filter(|o| o.shape == Shape::Unary && o.resolved_async(api.default_async))
+        {
             let task = format!("{}Task", pascal(&op.name));
             let name = snake(&op.name);
             let (ret, _) = node_ty(api, opts, &op.returns);
@@ -826,8 +831,8 @@ pub fn node_binding_with_options(
                     Shape::Unary => {
                         let pin = pinned_name(&op.bindings, LANG);
                         let pin = pin.as_deref();
-                        if op.sync {
-                            // Feature A: a synchronous method — no `AsyncTask`, no
+                        if !op.resolved_async(api.default_async) {
+                            // DEFAULT: a synchronous method — no `AsyncTask`, no
                             // `Promise`. Infallible (bare-`T` core) passes the value
                             // straight through; fallible (`Result<T>` core) throws.
                             let (ret, _) = node_ty(api, opts, &op.returns);
@@ -938,8 +943,8 @@ pub fn node_binding_with_options(
                 }
                 let pin = pinned_name(&op.bindings, LANG);
                 let pin = pin.as_deref();
-                if op.sync {
-                    // Feature A: a synchronous free function — a direct call into
+                if !op.resolved_async(api.default_async) {
+                    // DEFAULT: a synchronous free function — a direct call into
                     // the core trait, no `AsyncTask`/`Promise`. Infallible returns
                     // the value; fallible throws on `Err`.
                     let (ret, _) = node_ty(api, opts, &op.returns);

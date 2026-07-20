@@ -202,6 +202,7 @@ fn external_refs_walk_structured_union_member_types() {
     let sub = ApiDoc {
         fluessig: api.fluessig.clone(),
         source: None,
+        default_async: api.default_async,
         models: vec![],
         unions: api.unions.clone(),
         interfaces: vec![],
@@ -328,6 +329,7 @@ fn external_refs_cover_stream_op_return_types() {
     let sub = ApiDoc {
         fluessig: api.fluessig.clone(),
         source: None,
+        default_async: api.default_async,
         models: vec![],
         unions: vec![],
         interfaces: api.interfaces.clone(),
@@ -421,6 +423,7 @@ fn sub_for(api: &ApiDoc, names: &[&str]) -> ApiDoc {
     ApiDoc {
         fluessig: api.fluessig.clone(),
         source: None,
+        default_async: api.default_async,
         models: api
             .models
             .iter()

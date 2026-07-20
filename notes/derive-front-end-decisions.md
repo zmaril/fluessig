@@ -253,34 +253,55 @@ Gate: `crates/disponent-schema-derive/tests/parity.rs` — the derive-emitted ca
 to the SAME physical tables (columns + order + PK order), enums, scalars, unions, ops (every
 readonly/destructive flag), models, and api-unions as disponent's committed artifacts.
 
-### Node-backend addendum — synchronous / infallible unary ops + op export-name pins
+### Synchronous ops are the DEFAULT, across all backends — `#[fluessig(async)]` is the opt-out + op export-name pins
 
-The next acid test after entl/disponent is **atilla** (the pi napi surface): ~157 symbols that
-are almost entirely fluessig-generatable, except its ops are deliberately **synchronous and
-infallible** under **exact JS names** (`atillaNativeVersion(): string`, `#[napi(js_name = …)]`),
-which the node backend could not express — it wrapped every unary op in `AsyncTask` → `Promise<T>`
-over a `Result` seam and applied name pins only to DTO fields. Two OPT-IN front-end features close
-that gap (both proven in `crates/derive-demo/src/native.rs` + `tests/api_gate.rs`; the async
-default is unchanged, so entl/disponent stayed green):
+The next acid test after entl/disponent is **pidgin** (formerly atilla — the pi binding surface,
+now node + python + php, ruby soon): ~157 symbols that are almost entirely fluessig-generatable,
+except its ops are deliberately **synchronous and infallible** under **exact export names**
+(`atillaNativeVersion(): string`, `#[napi(js_name = …)]`). The old default fought that on every
+backend — the node backend wrapped every unary op in `AsyncTask` → `Promise<T>` over a `Result`
+seam, and name pins applied only to DTO fields. So the model was **inverted**: synchronous is now
+the GLOBAL DEFAULT, `#[fluessig(async)]` is the opt-out, and op export-name pins apply across every
+backend. Proven in `crates/derive-demo/src/native.rs` + `tests/api_gate.rs`; entl/disponent stay
+byte-identical via the `default_async` lever (below), NOT migrated.
 
-- **`#[fluessig(sync)]` — synchronous / infallible unary ops.** A FLAG (composing only with a
-  plain unary op; the macro rejects it on ctor/stream/manual) that lowers to `api.json`
-  `"sync": true`. The node backend then emits a plain `#[napi] pub fn name(..) -> T` — no
-  `AsyncTask`, no `Promise`, no per-op `Task` struct. Fallibility is read off the Rust return
-  type: a bare `T` return is **infallible** (`"infallible": true`) — the node fn is `-> T` with a
-  direct core call (no `.map_err`) and the SHARED core-trait method drops its `anyhow::Result`
-  wrapper (`fn name(..) -> T`); a `Result<T>` return keeps the error seam (`-> napi::Result<T>`,
-  Err → JS throw). The core-trait change lives in the shared `emit_core_traits_with`
-  (`src/bindgen/mod.rs`); the node emission in `src/bindgen/node.rs`. The other backends
-  (python/ruby/php) don't yet apply `sync` — atilla is node-only, so this is the honest first
-  step, not a whole-surface rollout.
-- **`#[fluessig(name = "…")]` — op export-name pins.** The op-level twin of the DTO-field
-  `SymbolBinding`/`pinned_name` mechanism: an explicit export name, lowered onto `ApiOp.bindings`
-  (every language slug) so a backend reproduces the exact spelling rather than re-deriving it from
-  a casing rule. The node backend applies it as `#[napi(js_name = "…")]` on the function/method
-  (mirroring the DTO-field path); an unpinned op keeps its default napi camelCase, byte-identical.
+- **Synchronous by default; `#[fluessig(async)]` opts out.** A plain unary op with no marker
+  generates a **synchronous** binding in every backend — node a plain `#[napi] pub fn name(..)`
+  (no `AsyncTask`, no `Promise`, no per-op `Task`), python/php/ruby a plain method (they were
+  already synchronous). `#[fluessig(async)]` on a unary op is the opt-out: it restores the
+  historical async projection (node `AsyncTask` → `Promise<T>`). In `api.json` the OPT-OUT is
+  serialized — `"async": true` appears only on an op that overrides the catalog default; a default
+  op has no `async` field. `#[fluessig(sync)]` is retained as the explicit force-sync override
+  (useful inside a `default_async` catalog). Both `sync`/`async` compose only with a plain unary op
+  (the macro rejects them on ctor/stream/manual — a ctor is always a synchronous constructor, a
+  stream always async-iterable). The per-op override lives on `OpDescriptor.is_async: Option<bool>`
+  (`None` = inherit) and `ApiOp.is_async`; resolve with `ApiOp::resolved_async(default_async)`.
+- **Infallibility is inferred from the Rust return type.** A **synchronous** op whose Rust return
+  is a bare `T` (not `Result<T>`) is **infallible** (`"infallible": true`) — node emits `-> T` with
+  a direct core call (no `.map_err`), python drops its `PyResult`/raise, php its `PhpResult`, ruby
+  its `Result<_, Error>`, and the SHARED core-trait method drops its `anyhow::Result` wrapper
+  (`fn name(..) -> T`, in `emit_core_traits_with`, `src/bindgen/mod.rs`). A `Result<T>` return keeps
+  the throwing/raising seam. Ruby is the one honest edge: its arg marshaling (`scan_args` /
+  `TryConvert`) is itself fallible, so a truly no-raise `-> T` is emitted only for a zero-marshaling
+  op (no params, non-list) — the atilla `atillaNativeVersion()` shape; a param'd / list-returning
+  infallible op keeps the `Result<_, Error>` seam (the CORE call drops its `.map_err`, the
+  marshaling can still raise).
+- **`default_async` — the per-catalog opt-out that holds async-first catalogs byte-identical.**
+  `catalog! { …, default_async: true }` (serialized as the top-level `"defaultAsync": true`) means
+  "every op in this catalog is async unless it opts out per-op." It is the low-churn lever: the
+  entl / disponent parity catalogs and the four-kind `Db`/`GitHelpers` demo carry `default_async:
+  true` (ONE line each), so every op inherits async, no per-op `async` field appears, and their
+  committed `api.json` / goldens stay byte-identical — no op-by-op migration. The owner will
+  rewrite the entl / disponent derives to the sync default later; until then this holds them green.
+- **`#[fluessig(name = "…")]` — op export-name pins, every backend.** The op-level twin of the
+  DTO-field `SymbolBinding`/`pinned_name` mechanism: an explicit export name lowered onto
+  `ApiOp.bindings` (every language slug) so each backend reproduces the exact spelling — node
+  `#[napi(js_name = "…")]`, python `#[pyo3(name = "…")]`, php ext-php-rs `#[rename("…")]`, ruby the
+  `define_(singleton_)method` name (the Rust fn ident stays snake). An unpinned op keeps each
+  backend's default casing, byte-identical.
 
 Together these generate atilla's `#[napi(js_name = "atillaNativeVersion")] pub fn …() -> String`
-verbatim (modulo the core-seam body). The remaining atilla tail (a later slice): binary
-`Uint8Array`/`Buffer` arg spelling + result-envelope shaping; the AgentBridge callback bridge
-stays hand-written.
+verbatim (modulo the core-seam body) in node, and its synchronous/infallible twin in python / php /
+ruby — the sync-default surface pidgin needs to generate its (all-sync) bindings. The remaining
+atilla tail (a later slice): binary `Uint8Array`/`Buffer` arg spelling + result-envelope shaping;
+the AgentBridge callback bridge stays hand-written.

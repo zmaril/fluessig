@@ -435,3 +435,92 @@ fn python_php_ruby_emit_sync_infallible_and_pinned_shapes() {
         "ruby fallible op keeps the Result seam\n{ruby}"
     );
 }
+
+/// The napi-2 unblock (pidgin critical path): the node backend's streaming/async
+/// prelude is CONDITIONAL on the surface's actual op kinds. A pure sync-infallible
+/// surface must NOT emit the napi-3-ONLY `AsyncGenerator` / `AsyncTask` symbols
+/// (they do not exist in `napi = "2"`, so their unconditional import made a pure
+/// sync binding fail to compile against a napi-2-pinned crate) — its prelude
+/// reduces to exactly `use napi_derive::napi;`. A surface that DOES use
+/// async/stream/ctor/fallible ops still emits the full prelude.
+#[test]
+fn node_prelude_is_conditional_on_op_kinds() {
+    // Build a one-interface node surface from a `models` + `ops` JSON fragment,
+    // so the api skeleton lives in ONE place (the two surfaces below differ only
+    // in their ops/models).
+    let node_of = |models: &str, ops: &str| -> String {
+        let api = load_api(&format!(
+            r#"{{"fluessig":{{"format":1}},"models":[{models}],"unions":[],"interfaces":[{{"name":"Svc","ops":[{ops}]}}]}}"#
+        ))
+        .expect("api fragment loads");
+        node_binding(&api, &[], None)
+    };
+
+    // ── a PURE sync-infallible surface: one stateless, synchronous, infallible,
+    // stream-less, ctor-less op → the napi-3-free minimal prelude. ──
+    let node = node_of(
+        "",
+        r#"{"name":"version","shape":"unary","infallible":true,"params":[],"returns":"string"}"#,
+    );
+    // the prelude reduces to EXACTLY `use napi_derive::napi;` (napi-2-compatible).
+    assert!(
+        node.contains(
+            "// The fixed prelude — generated code uses fully-qualified paths elsewhere.\nuse napi_derive::napi;\n"
+        ),
+        "a pure sync-infallible surface's prelude must be exactly `use napi_derive::napi;`\n{node}"
+    );
+    // none of the napi-3-only / throwing / streaming symbols appear.
+    for banned in [
+        "AsyncGenerator",
+        "AsyncTask",
+        "napi::bindgen_prelude::",
+        "use napi::{Env, Task};",
+        "use std::future::Future;",
+        "use std::sync::Arc;",
+        "use std::time::Duration;",
+        "fn err(",
+    ] {
+        assert!(
+            !node.contains(banned),
+            "pure sync-infallible surface must not emit `{banned}`\n{node}"
+        );
+    }
+    // belt-and-suspenders banner is present on the reduced surface.
+    assert!(
+        node.contains("#![allow(unused_imports)]"),
+        "a reduced surface carries the belt-and-suspenders unused-imports banner\n{node}"
+    );
+
+    // ── a FULL surface: ctor + stream + async + sync-fallible ops → every prelude
+    // item is still emitted, byte-for-byte with the historical prelude. ──
+    let node = node_of(
+        r#"{"name":"Chunk","fields":[{"name":"seq","type":"int32","nullable":false}]}"#,
+        r#"{"name":"open","shape":"ctor","params":[],"returns":{"model":"Chunk"}},
+           {"name":"watch","shape":"stream","params":[],"returns":{"model":"Chunk"}},
+           {"name":"run","shape":"unary","async":true,"params":[],"returns":"int32"},
+           {"name":"peek","shape":"unary","params":[],"returns":"int32"}"#,
+    );
+    // one of each: AsyncGenerator (stream), AsyncTask (async/stream), Result +
+    // `err` (fallible), Arc (ctor/stream), Future/Duration + the runtime import.
+    for needed in [
+        "use napi::bindgen_prelude::{AsyncGenerator, AsyncTask, Result};",
+        "use napi::{Env, Task};",
+        "use napi_derive::napi;",
+        "use std::future::Future;",
+        "use std::sync::Arc;",
+        "use std::time::Duration;",
+        "use fluessig_runtime::{Poll, PollStream};",
+        "fn err(",
+    ] {
+        assert!(
+            node.contains(needed),
+            "a full async/stream/ctor/fallible surface must still emit `{needed}`\n{node}"
+        );
+    }
+    // a full surface never carried the unused-imports banner — keeps its golden
+    // byte-identical.
+    assert!(
+        !node.contains("#![allow(unused_imports)]"),
+        "a full surface must NOT gain the unused-imports banner (golden byte-identity)\n{node}"
+    );
+}

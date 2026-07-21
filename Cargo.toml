@@ -16,6 +16,13 @@ members = [
     # round-trip runner / CI leg, never by a bare `cargo build`/`cargo test`.
     "crates/java-demo-schema",
     "crates/java-demo",
+    # The node (napi) and python (pyo3) callback round-trip demos. Members so
+    # they share Cargo.lock and build via `-p`, but — like java-demo above —
+    # DELIBERATELY excluded from `default-members`: their napi/pyo3-linking
+    # cdylibs are built only by their own round-trip runners / CI legs, never by
+    # a bare `cargo build`/`cargo test`.
+    "crates/callback-demo-node",
+    "crates/callback-demo-py",
 ]
 # The root is a hybrid package+workspace; without default-members a bare
 # `cargo build`/`test` would build only the root package. List both so the

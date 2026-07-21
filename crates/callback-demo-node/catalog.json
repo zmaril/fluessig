@@ -1,0 +1,13 @@
+{
+  "fluessig": {"format": 1, "emitter": "fluessig-derive/0.1.0"},
+  "source": "callback_demo",
+  "scalars": [],
+  "unions": [],
+  "enums": [],
+  "entities": [
+    {"name": "Marker", "table": "markers", "key": ["id"],
+     "fields": [{"name": "id", "type": {"k": "scalar", "name": "int64", "base": "numeric"}, "nullable": false, "key": true}]}
+  ],
+  "relationProperties": [],
+  "valueStructs": []
+}

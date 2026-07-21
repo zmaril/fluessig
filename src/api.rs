@@ -303,6 +303,16 @@ pub enum ApiType {
     Foreign {
         foreign: ForeignType,
     },
+    /// A host-supplied callback: `fn(params...) -> returns`. Forward-only sync-void
+    /// today (the only shape any backend lowers); `is_async`/`fallible` are
+    /// reserved on [`CallbackSig`] for later. Untagged variant keyed on
+    /// `"callback"`. The Rust core sees ONE uniform shape regardless of the source
+    /// language: `Box<dyn Fn(args...) + Send + Sync>` (see [`crate::bindgen`]'s
+    /// shared `ty`); each backend's generated binding wraps its native callable
+    /// into that box at the FFI boundary.
+    Callback {
+        callback: CallbackSig,
+    },
 }
 
 /// The payload of an [`ApiType::Foreign`]: the source type `name` and a
@@ -317,6 +327,39 @@ pub struct ForeignType {
     /// A best-effort Rust path/label for the opaque handle (documentation only;
     /// the handle type name is derived deterministically from `name`).
     pub rust_path: String,
+}
+
+/// The signature of an [`ApiType::Callback`]. Additive optional fields mirror the
+/// house style (`skip_serializing_if`), so a plain forward-only sync-void callback
+/// serializes to just `{"callback":{"params":[…]}}` and existing goldens are
+/// untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallbackSig {
+    pub params: Vec<ApiType>,
+    #[serde(
+        default = "callback_void_return",
+        skip_serializing_if = "is_void_return"
+    )]
+    pub returns: Box<ApiType>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_async: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallible: bool,
+}
+
+/// The default `returns` for a callback: `void` (the only return any backend
+/// lowers this slice).
+fn callback_void_return() -> Box<ApiType> {
+    Box::new(ApiType::Scalar("void".into()))
+}
+
+/// Is a callback `returns` the `void` scalar? Drives `skip_serializing_if` so a
+/// sync-void callback omits the field. serde requires the exact `&Box<ApiType>`
+/// predicate signature, hence the clippy allow.
+#[allow(clippy::borrowed_box)]
+fn is_void_return(t: &Box<ApiType>) -> bool {
+    matches!(t.as_ref(), ApiType::Scalar(s) if s == "void")
 }
 
 /// Parse `api.json` (with the same format-version gate as the catalog).
@@ -354,6 +397,20 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
                      threadpool, which is incompatible with a thread-confined `!Send` handle",
                     i.name, op.name
                 ));
+            }
+            // This slice lowers ONLY forward-only sync-void callbacks. Reject any
+            // callback param whose `is_async`/`fallible`/non-void `returns` the
+            // backends do not yet wrap, so the IR stays honest about what compiles.
+            for p in &op.params {
+                if let ApiType::Callback { callback } = &p.ty {
+                    if callback.is_async || callback.fallible || !is_void_return(&callback.returns)
+                    {
+                        return Err(format!(
+                            "callback param `{}` on op `{}.{}`: only forward-only sync void callbacks are supported (is_async/fallible/non-void returns not yet implemented)",
+                            p.name, i.name, op.name
+                        ));
+                    }
+                }
             }
         }
     }

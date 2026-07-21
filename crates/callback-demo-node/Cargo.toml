@@ -1,0 +1,23 @@
+[package]
+name = "callback-demo-node"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The node (napi) callback round-trip demo cdylib: fluessig-generated napi glue (src/generated.rs) for a Ticker interface + a hand-written core_impl, compiled to a .node addon and driven from consumer.mjs, proving a JS closure is invoked from Rust via a napi ThreadsafeFunction."
+
+[lib]
+# cdylib → the loadable node addon (renamed to callback_demo_node.node by
+# run.sh). rlib too so the (excluded-from-default) crate still `cargo check`s.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# napi 2.x — the generated binding uses the `ThreadsafeFunction<_, ErrorStrategy>`
+# API and `#[napi]` free functions.
+napi = { version = "2", default-features = false, features = ["napi4"] }
+napi-derive = "2"
+# The core trait returns `anyhow::Result<T>`; core_impl uses anyhow.
+anyhow = "1"
+
+[build-dependencies]
+napi-build = "2"

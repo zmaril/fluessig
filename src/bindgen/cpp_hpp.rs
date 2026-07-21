@@ -6,7 +6,7 @@
 //! DELIBERATELY parallel: the (language × shape) template grid is the design
 //! (see /translation.md); the truly shared pieces live in the parent module.
 
-use crate::api::{ApiDoc, ApiOp, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, Shape};
 
 use super::cpp::{
     c_enum_name, c_list_name, c_model_name, c_stream_name, classify, classify_param,
@@ -69,7 +69,12 @@ pub fn cpp_hpp(api: &ApiDoc, _enums: &[EnumDesc], banner_note: Option<&str>) -> 
     }
     s.push_str(&format!("#ifndef {guard}\n#define {guard}\n\n"));
     s.push_str(&format!("#include \"{header}.h\"\n"));
-    s.push_str("#include <string>\n#include <vector>\n#include <optional>\n#include <stdexcept>\n#include <utility>\n\n");
+    s.push_str("#include <string>\n#include <vector>\n#include <optional>\n#include <stdexcept>\n#include <utility>\n");
+    // A subscription op's C++ method takes a `std::function` listener.
+    if api_uses_subscription(api) {
+        s.push_str("#include <functional>\n");
+    }
+    s.push('\n');
     s.push_str("namespace fluessig {\n\n");
 
     // ── Error ──
@@ -87,6 +92,12 @@ pub fn cpp_hpp(api: &ApiDoc, _enums: &[EnumDesc], banner_note: Option<&str>) -> 
     s.push_str(
         "// Unions cross as their JSON envelope text — the C++ surface exposes std::string.\n\n",
     );
+
+    // ── Subscription RAII wrapper (once, gated) ──
+    if api_uses_subscription(api) {
+        s.push_str(&subscription_class());
+        s.push('\n');
+    }
 
     // ── stream cursor classes ──
     for i in &api.interfaces {
@@ -238,11 +249,9 @@ fn emit_handle_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
                 op.name
             )),
             Shape::Stream => s.push_str(&emit_stream_method(api, iface, op, true)),
-            // Subscription lowering deferred to a follow-up PR (node/python today).
-            Shape::Subscription => s.push_str(&format!(
-                "    // subscription {iface}::{} — register/unsubscribe lowering deferred.\n",
-                op.name
-            )),
+            // A subscription op registers a `std::function` listener and returns an
+            // RAII `Subscription` (its destructor frees + unsubscribes).
+            Shape::Subscription => s.push_str(&emit_subscription_method(api, iface, op)),
             Shape::Unary => s.push_str(&emit_unary_method(api, iface, op, true)),
         }
     }
@@ -561,5 +570,85 @@ fn emit_stream_method(api: &ApiDoc, iface: &str, op: &ApiOp, member: bool) -> St
         "{kw}    if (::{sym}({lead}{sep}&out, &err)) {{ throw Error(err); }}\n"
     ));
     s.push_str(&format!("{kw}    return {cur}Cursor(out);\n{kw}}}\n"));
+    s
+}
+
+/// The move-only `Subscription` RAII class (emitted once). It owns the C
+/// `::Subscription*` handle AND the heap `std::function` listener behind the C
+/// `void* ctx`; its destructor frees the handle (which unsubscribes) and then
+/// deletes the listener via a type-erased deleter. `unsubscribe()` runs the
+/// unsubscribe early.
+fn subscription_class() -> String {
+    let mut s = String::new();
+    s.push_str("/// RAII subscription handle: unsubscribe()/destroy removes the listener.\n");
+    s.push_str("class Subscription {\npublic:\n");
+    s.push_str(
+        "    Subscription(::Subscription* h, void* ctx, void (*deleter)(void*))\n        : h_(h), ctx_(ctx), deleter_(deleter) {}\n",
+    );
+    s.push_str("    Subscription(Subscription&& o) noexcept\n        : h_(o.h_), ctx_(o.ctx_), deleter_(o.deleter_) { o.h_ = nullptr; o.ctx_ = nullptr; o.deleter_ = nullptr; }\n");
+    s.push_str("    Subscription(const Subscription&) = delete;\n");
+    s.push_str("    Subscription& operator=(const Subscription&) = delete;\n");
+    s.push_str("    ~Subscription() {\n        if (h_) { ::Subscription_free(h_); }\n        if (ctx_ && deleter_) { deleter_(ctx_); }\n    }\n");
+    s.push_str("    /// Remove the listener early (idempotent).\n");
+    s.push_str("    void unsubscribe() { if (h_) { ::Subscription_unsubscribe(h_); } }\n\n");
+    s.push_str("private:\n");
+    s.push_str("    ::Subscription* h_ = nullptr;\n    void* ctx_ = nullptr;\n    void (*deleter_)(void*) = nullptr;\n};\n");
+    s
+}
+
+/// A subscription method on a handle class: takes a `std::function<void(Args)>`
+/// listener, heap-copies it, passes a captureless thunk + the heap ptr as the C
+/// fn-ptr + ctx, and returns an owning `Subscription`. Fallible ⇒ throws (freeing
+/// the heap listener first); infallible ⇒ no error channel.
+fn emit_subscription_method(api: &ApiDoc, iface: &str, op: &ApiOp) -> String {
+    let sym = op_symbol(iface, op);
+    let name = snake(&op.name);
+    let (cbname, sig) = op
+        .params
+        .iter()
+        .find_map(|p| match &p.ty {
+            ApiType::Callback { callback } => Some((snake(&p.name), callback)),
+            _ => None,
+        })
+        .expect("a subscription op has exactly one callback param (loader-enforced)");
+    let arg_tys: Vec<String> = sig
+        .params
+        .iter()
+        .map(|p| cpp_value_type(&classify(api, p)))
+        .collect();
+    let fnty = format!("std::function<void({})>", arg_tys.join(", "));
+    let vars = callback_arg_vars(arg_tys.len());
+    let thunk_params = std::iter::once("void* c".to_string())
+        .chain(vars.iter().zip(&arg_tys).map(|(v, t)| format!("{t} {v}")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let thunk_call = vars.join(", ");
+    let mut s = String::new();
+    if let Some(doc) = &op.doc {
+        for line in doc.lines() {
+            s.push_str(&format!("    /// {line}\n"));
+        }
+    }
+    s.push_str(&format!("    Subscription {name}({fnty} {cbname}) {{\n"));
+    s.push_str(&format!(
+        "        auto* ctx = new {fnty}(std::move({cbname}));\n"
+    ));
+    s.push_str(&format!(
+        "        auto thunk = []({thunk_params}) {{ (*static_cast<{fnty}*>(c))({thunk_call}); }};\n"
+    ));
+    s.push_str(&format!(
+        "        auto deleter = [](void* c) {{ delete static_cast<{fnty}*>(c); }};\n"
+    ));
+    s.push_str("        ::Subscription* out = nullptr;\n");
+    if op.infallible {
+        s.push_str(&format!("        ::{sym}(h_, thunk, ctx, &out);\n"));
+    } else {
+        s.push_str("        char* err = nullptr;\n");
+        s.push_str(&format!(
+            "        if (::{sym}(h_, thunk, ctx, &out, &err)) {{ deleter(ctx); throw Error(err); }}\n"
+        ));
+    }
+    s.push_str("        return Subscription(out, ctx, deleter);\n");
+    s.push_str("    }\n");
     s
 }

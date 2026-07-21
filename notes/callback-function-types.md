@@ -107,7 +107,7 @@ The hand-written `core_impl` implements the trait and just invokes the boxed `Fn
 | wasm | `js_sys::Function` + `Closure` | keep `Closure` alive in handle | single-thread | follow-up |
 | ruby | `Proc` | GVL trampoline | `rb_thread_call_with_gvl` | follow-up |
 | java | `Consumer<Args>` global ref | `AttachCurrentThread` + `CallVoidMethod` | attach/detach | follow-up |
-| php | `Zval` callable | sync-only | **unsupported off-thread** | follow-up (documented restriction) |
+| php | `Zval` callable (`ZendCallable`) | pin owned in unsafe-Send `PhpCb`, `try_call` | **sync same-request-thread ONLY** | **DONE (documented sync-only)** |
 
 ## Vertical slice (this PR)
 
@@ -133,7 +133,22 @@ immediate follow-up: it builds directly on the `Callback` param this slice lands
 
 ## Deferred / follow-ups
 
-- cpp, wasm, ruby, java, php lowering (one follow-up PR each).
+- ~~cpp, wasm, ruby, java, php lowering (one follow-up PR each).~~ **DONE** — the
+  per-backend callback + subscription lowering series is COMPLETE: cpp (#87), java
+  (#88), ruby (#89), wasm (#90), and php (this PR). All seven backends
+  (node/python from the first slice, plus these five) now lower an
+  `ApiType::Callback` param + a `Shape::Subscription` op into the ONE uniform core
+  shape `Box<dyn Fn(..) + Send + Sync>`.
+  - **php is documented SYNC-ONLY** (coordinator ruling — not a hard error): the
+    generated glue pins the PHP callable in a `PhpCb` newtype (`unsafe impl
+    Send/Sync` over a `!Send` `ZendCallable<'static>`), carrying a LOUD
+    compile-time-visible doc marker — the `# SYNC-ONLY — off-thread invocation is
+    undefined behaviour` heading + `SAFETY` note — that the callable is only valid
+    to invoke synchronously on the PHP request thread that supplied it (off-thread
+    invocation is UB). The marker lives in `src/bindgen/php_callback.rs`
+    (`PHP_CALLBACK_PRELUDE`) and is emitted verbatim into every generated PHP
+    binding; the runnable proof is `crates/callback-demo-php` (a real ext-php-rs
+    extension built + loaded against PHP 8.4, invoking the callback synchronously).
 - Inline-object handle return shape for `openRpcStream` (sibling lane — "inline-object minting").
 - The hinzu converter's `=> void` parse branch (`fluessig_api.rs`) that emits `Callback` types from pi source (coordinated with the pi-API-gap session).
 - `is_async` / `fallible` / value-returning callbacks (no pi surface needs them; would layer on the async-oneshot bridge).

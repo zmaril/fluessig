@@ -1,0 +1,128 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "java_demo",
+  "models": [
+    {
+      "name": "Item",
+      "doc": "One streamed record — a flat scalar DTO the `items` stream yields.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "nullable": false
+        }
+      ]
+    }
+  ],
+  "unions": [],
+  "interfaces": [
+    {
+      "name": "Store",
+      "doc": "An open demo store. Exercises one op of every shape the Java backend projects.",
+      "ops": [
+        {
+          "name": "open",
+          "doc": "Open the store with a numeric seed — the stateful ctor (`init`/`free`).",
+          "shape": "ctor",
+          "params": [
+            {
+              "name": "seed",
+              "type": "int64"
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "version",
+          "doc": "The store version — a synchronous, **infallible** op (bare `String`\nreturn, no error seam; a direct blocking native on the Java side).",
+          "shape": "unary",
+          "infallible": true,
+          "params": [],
+          "returns": "string"
+        },
+        {
+          "name": "checked",
+          "doc": "Look up a key — a synchronous but **fallible** op (`Result<i64>`), so the\nJNI `RuntimeException` throw seam is exercised on the `Err` path.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "key",
+              "type": "string"
+            }
+          ],
+          "returns": "int64"
+        },
+        {
+          "name": "count",
+          "doc": "Count matches for a prefix — an `#[fluessig(async)]` op, projected as a\n`CompletableFuture<Long>` wrapping the blocking native.",
+          "shape": "unary",
+          "async": true,
+          "params": [
+            {
+              "name": "prefix",
+              "type": "string"
+            }
+          ],
+          "returns": "int64"
+        },
+        {
+          "name": "items",
+          "doc": "Stream every item — the stream plane; bindgen maps it to a Java poll\ncursor (`Items` with `Optional<Item> next()`).",
+          "shape": "stream",
+          "params": [],
+          "returns": {
+            "model": "Item"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ticker",
+      "doc": "A stateful ticker that fires registered listeners with an incrementing\ncounter. `on_tick` is a `Shape::Subscription` op — it REGISTERS a host\ncallback (a Java `Consumer<Integer>`) and hands back an owning `Subscription`\nhandle whose unsubscribe()/close() removes the listener; `tick` fires every\nlive listener. This is the callback + subscription slice's Java round-trip proof.",
+      "ops": [
+        {
+          "name": "new",
+          "doc": "Open a fresh ticker with no listeners and the counter at 0.",
+          "shape": "ctor",
+          "params": [],
+          "returns": "void"
+        },
+        {
+          "name": "on_tick",
+          "doc": "Register `listener` to be called on every `tick`; returns a Subscription\nhandle that removes the listener when unsubscribed or closed.",
+          "shape": "subscription",
+          "infallible": true,
+          "params": [
+            {
+              "name": "listener",
+              "type": {
+                "callback": {
+                  "params": [
+                    "int32"
+                  ]
+                }
+              }
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "tick",
+          "doc": "Fire every live listener with the current counter value, then increment it\n(infallible — registration/firing never fails).",
+          "shape": "unary",
+          "infallible": true,
+          "params": [],
+          "returns": "void"
+        }
+      ]
+    }
+  ]
+}

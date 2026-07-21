@@ -20,6 +20,7 @@ mod cpp_header;
 mod cpp_hpp;
 mod fanout;
 mod java;
+mod java_callback;
 mod mcp;
 mod node;
 mod php;

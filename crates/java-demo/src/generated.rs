@@ -21,6 +21,45 @@ fn throw(env: &mut JNIEnv, e: impl std::fmt::Display) {
     let _ = env.throw_new("java/lang/RuntimeException", e.to_string());
 }
 
+/// An opaque subscription handle owning the core's returned unsubscribe closure.
+struct Subscription {
+    unsub: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+/// Run the unsubscribe closure early (idempotent — a second call is a no-op).
+#[no_mangle]
+pub extern "system" fn Java_fluessig_Subscription_nativeUnsubscribe<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    let s = unsafe { &*(handle as *const Subscription) };
+    let __taken = s.unsub.lock().unwrap().take();
+    if let Some(__f) = __taken {
+        __f();
+    }
+}
+
+/// Free the subscription handle, unsubscribing if still live (idempotent).
+#[no_mangle]
+pub extern "system" fn Java_fluessig_Subscription_nativeFree<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    let s = unsafe { Box::from_raw(handle as *mut Subscription) };
+    let __taken = s.unsub.lock().unwrap().take();
+    if let Some(__f) = __taken {
+        __f();
+    }
+}
+
 /// One streamed record — a flat scalar DTO the `items` stream yields.
 #[derive(Clone)]
 pub struct Item {
@@ -70,6 +109,13 @@ pub trait StoreCore: Sized + Send + Sync + 'static {
     fn checked(&self, key: String) -> anyhow::Result<i64>;
     fn count(&self, prefix: String) -> anyhow::Result<i64>;
     fn items(&self) -> anyhow::Result<Box<dyn PollStream<Item>>>;
+}
+
+/// The `Ticker` contract — implement over the engine in `crate::core_impl`.
+pub trait TickerCore: Sized + Send + Sync + 'static {
+    fn new() -> anyhow::Result<Self>;
+    fn on_tick(&self, listener: Box<dyn Fn(i32) + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
+    fn tick(&self) -> ();
 }
 
 /// Poll the `Store.items` cursor once: an item (as its Java object),
@@ -218,4 +264,90 @@ pub extern "system" fn Java_fluessig_Store_nativeItems<'local>(
             0
         }
     }
+}
+
+/// Construct the `Ticker` core and hand Java an opaque `long` handle
+/// (a leaked `Box<Arc<TickerImpl>>`); `free` reclaims it.
+#[no_mangle]
+pub extern "system" fn Java_fluessig_Ticker_init<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    let env = &mut env;
+    match <crate::core_impl::TickerImpl as TickerCore>::new() {
+        Ok(__c) => Box::into_raw(Box::new(Arc::new(__c))) as jlong,
+        Err(__e) => {
+            throw(env, __e);
+            0
+        }
+    }
+}
+
+/// Drop the `Ticker` handle (idempotent on the Java side).
+#[no_mangle]
+pub extern "system" fn Java_fluessig_Ticker_free<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    if handle != 0 {
+        unsafe {
+            drop(Box::from_raw(
+                handle as *mut Arc<crate::core_impl::TickerImpl>,
+            ));
+        }
+    }
+}
+
+/// Register a listener on `Ticker.on_tick`; returns an opaque `long` handle
+/// (a leaked `Box<Subscription>`) the `Subscription` class owns.
+#[no_mangle]
+pub extern "system" fn Java_fluessig_Ticker_nativeOnTick<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    listener_j: JObject<'local>,
+) -> jlong {
+    let env = &mut env;
+    let listener: Box<dyn Fn(i32) + Send + Sync> = {
+        let __global = env
+            .new_global_ref(&listener_j)
+            .expect("callback `listener`: new_global_ref");
+        let __vm = env.get_java_vm().expect("callback `listener`: get_java_vm");
+        Box::new(move |v: i32| {
+            let mut __guard = match __vm.attach_current_thread() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let env = &mut *__guard;
+            let __a0 = env
+                .new_object("java/lang/Integer", "(I)V", &[JValue::Int(v)])
+                .expect("box Integer");
+            let _ = env.call_method(
+                __global.as_obj(),
+                "accept",
+                "(Ljava/lang/Object;)V",
+                &[JValue::Object(&__a0)],
+            );
+        })
+    };
+    let __unsub = {
+        let core = unsafe { &*(handle as *const Arc<crate::core_impl::TickerImpl>) };
+        core.on_tick(listener)
+    };
+    Box::into_raw(Box::new(Subscription {
+        unsub: std::sync::Mutex::new(Some(__unsub)),
+    })) as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_fluessig_Ticker_tick<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    let env = &mut env;
+    let core = unsafe { &*(handle as *const Arc<crate::core_impl::TickerImpl>) };
+    let __v = core.tick();
+    ()
 }

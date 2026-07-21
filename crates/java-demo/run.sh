@@ -28,12 +28,17 @@ mkdir -p "$GEN_IN" "$STAGE" "$OUT"
 echo "== 1. build fluessig-gen + emit the schema =="
 cargo build --release -p fluessig >/dev/null
 cargo run  --release -q -p java-demo-schema --bin emit-catalog > "$GEN_IN/catalog.json"
-cargo run  --release -q -p java-demo-schema --bin emit-api     > "$GEN_IN/api.json"
 
-echo "== 2. regenerate the JNI glue + .java from the schema =="
+# api.json is HAND-AUTHORED (not derive-emitted): the derive front end cannot yet
+# spell a callback param, so the `Ticker` interface (a `Shape::Subscription`
+# `on_tick` with a `Callback<(int32)>` listener) lives in the committed
+# crates/java-demo/api.json — mirroring cpp-demo. Its Store surface still matches
+# java-demo-schema's derive-authored ops (kept in sync by hand).
+
+echo "== 2. regenerate the JNI glue + .java from catalog + the hand-authored api.json =="
 "$ROOT/target/release/fluessig-gen" \
   "$GEN_IN/catalog.json" "$GEN_IN/schema-throwaway.rs" \
-  --api "$GEN_IN/api.json" \
+  --api "$HERE/api.json" \
   --java "$HERE/src/generated.rs" \
   --java-src-out "$HERE/java"
 
@@ -58,6 +63,9 @@ item 2 beta
 item 3 gamma
 stream-closed
 throw-ok: boom requested for key boom
+ticks-before-unsub=[0, 1]
+ticks-after-unsub=[0, 1]
+callback-ok: Java Consumer fired [0, 1] from Rust, silent after unsubscribe
 EOF
 
 echo "---- actual ----"
@@ -70,4 +78,4 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
   exit 1
 fi
 
-echo "PASS: sync + infallible + async + stream + throw all round-tripped."
+echo "PASS: sync + infallible + async + stream + throw + callback/subscription all round-tripped."

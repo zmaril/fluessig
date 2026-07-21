@@ -797,7 +797,9 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         // unary + stream-open methods.
         for op in &i.ops {
             match op.shape {
-                Shape::Ctor | Shape::Manual => {}
+                // Subscription lowering deferred to a follow-up PR for java; no JNI
+                // symbol emitted (node/python only today), like the ctor/manual arms.
+                Shape::Ctor | Shape::Manual | Shape::Subscription => {}
                 Shape::Unary => {
                     // async ops route through a `native<Pascal>` symbol (the Java
                     // side wraps them in a CompletableFuture); sync ops use the
@@ -1113,6 +1115,14 @@ fn java_interface_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
             Shape::Manual => {
                 methods.push_str(&format!(
                     "    // @manual: {}.{} — hand-written outside the generated surface.\n\n",
+                    i.name, op.name
+                ));
+            }
+            // Subscription (register/unsubscribe) lowering deferred to a follow-up
+            // PR for java; emit a skip-note so the op is recorded but not bound.
+            Shape::Subscription => {
+                methods.push_str(&format!(
+                    "    // subscription: {}.{} — register/unsubscribe lowering deferred (node/python only today).\n\n",
                     i.name, op.name
                 ));
             }

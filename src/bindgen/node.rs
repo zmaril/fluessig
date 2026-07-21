@@ -776,6 +776,31 @@ pub fn node_binding_with_options(
 
     emit_core_traits_node(&mut t, api, opts);
 
+    // The generated `Subscription` handle class — emitted ONCE (guarded, so a
+    // subscription-free surface is byte-identical). It wraps the core's returned
+    // UNSUBSCRIBE closure; `unsubscribe()` (and drop) takes and calls it.
+    if api_uses_subscription(api) {
+        quote_in! { t =>
+            $['\r']
+            $("/// A subscription handle wrapping the core's returned unsubscribe closure.")
+            $("/// `unsubscribe()` (or dropping the handle) removes the registered listener.")
+            #[napi]
+            pub struct Subscription {
+                unsub: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+            }
+            #[napi]
+            impl Subscription {
+                #[napi]
+                pub fn unsubscribe(&self) {
+                    if let Some(f) = self.unsub.lock().unwrap().take() {
+                        f();
+                    }
+                }
+            }
+            $['\n']
+        };
+    }
+
     // ── per-interface surface ──
     for i in &api.interfaces {
         let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
@@ -1278,6 +1303,30 @@ pub fn node_binding_with_options(
                                     stream: Arc::from(self.core.$(&name)($(&names)).map_err(err)?),
                                     $closed_init
                                 })
+                            }
+                        }
+                    }
+                    Shape::Subscription => {
+                        // Register the listener; return a `Subscription` handle wrapping
+                        // the core's UNSUBSCRIBE closure. The callback param crosses in as
+                        // its TSFN (bridged by `wrappers`); parts shared with python.
+                        let ps = node_binding_param_sig(api, op)
+                            .iter()
+                            .map(|(n, r)| format!("{n}: {r}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let (call_names, wrappers) = node_call_bridge(api, op);
+                        let (ret, call, ok) = subscription_method_parts(
+                            op.infallible,
+                            "Result",
+                            &format!("{core_recv}.{name}({call_names})"),
+                        );
+                        quote_in! { methods =>
+                            $['\r']
+                            #[napi]
+                            pub fn $(&name)(&self, $(&ps)) -> $(&ret) {
+                                $(&wrappers)let unsub = $(&call);
+                                $(&ok)
                             }
                         }
                     }

@@ -40,7 +40,8 @@ echo "== 2. regenerate the JNI glue + .java from catalog + the hand-authored api
   "$GEN_IN/catalog.json" "$GEN_IN/schema-throwaway.rs" \
   --api "$HERE/api.json" \
   --java "$HERE/src/generated.rs" \
-  --java-src-out "$HERE/java"
+  --java-src-out "$HERE/java" \
+  --banner-note "straitjacket-allow-file:duplication — the generated per-interface JNI classes repeat a fixed handle/ctor/close + native-decl template by design (the language × shape grid)."
 
 echo "== 3. build the cdylib and stage libfluessig.so =="
 cargo build -p java-demo >/dev/null

@@ -1,3 +1,4 @@
+// straitjacket-allow-file:duplication — the generated per-interface JNI classes repeat a fixed handle/ctor/close + native-decl template by design (the language × shape grid).
 package fluessig;
 
 /** A stateful ticker that fires registered listeners with an incrementing counter. `on_tick` is a `Shape::Subscription` op — it REGISTERS a host callback (a Java `Consumer<Integer>`) and hands back an owning `Subscription` handle whose unsubscribe()/close() removes the listener; `tick` fires every live listener. This is the callback + subscription slice's Java round-trip proof. */

@@ -35,7 +35,7 @@ pub use fanout::{
     render_use_block, resolve_module_paths, ExternalImport, ExternalRef, FanOutSpec, FannedCrate,
     GroupKey, GroupTable, ModEntry, COMMON_MOD, RUNTIME_STREAM_IMPORT,
 };
-pub use java::{java_binding, java_sources};
+pub use java::{java_binding, java_sources, java_sources_with};
 pub use mcp::{manifest as mcp_manifest, mcp_module};
 pub use node::{node_binding, node_binding_with_options, NodeOptions};
 pub use php::php_binding;

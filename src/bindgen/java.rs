@@ -967,6 +967,21 @@ fn emit_unary_stateful(
 /// wrappers for async ops, and a poll-cursor class per stream op). Returned as
 /// `(relative_path, source)` pairs under the `fluessig/` package dir.
 pub fn java_sources(api: &ApiDoc, enums: &[EnumDesc]) -> Vec<(String, String)> {
+    java_sources_with(api, enums, None)
+}
+
+/// [`java_sources`] with the caller's optional banner note (a lint-suppression
+/// marker) prepended to every emitted `.java` file as a `//` comment — the Java
+/// parallel to the Rust glue's `//!` banner. The generated per-interface classes
+/// repeat a fixed handle/ctor/close + native-decl template across interfaces (the
+/// language × shape grid), which a duplication linter flags; a consumer passes
+/// e.g. `straitjacket-allow-file:duplication` here to mark that as intentional.
+/// `None` ⇒ no comment, so a note-free caller's output stays byte-identical.
+pub fn java_sources_with(
+    api: &ApiDoc,
+    enums: &[EnumDesc],
+    banner_note: Option<&str>,
+) -> Vec<(String, String)> {
     // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
     // today; the Rust JNI glue (`java_binding`) emits nothing for it, so no `.java`
     // handle class must be generated either (it would reference absent JNI symbols).
@@ -1101,6 +1116,14 @@ pub fn java_sources(api: &ApiDoc, enums: &[EnumDesc]) -> Vec<(String, String)> {
                 op = op.name,
             );
             files.push((path(&class), src));
+        }
+    }
+
+    // Prepend the caller's banner note (a `//` comment, legal before `package`)
+    // to every file; `None` leaves the output byte-identical.
+    if let Some(note) = banner_note {
+        for (_, src) in files.iter_mut() {
+            *src = format!("// {note}\n{src}");
         }
     }
 

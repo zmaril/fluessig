@@ -6,6 +6,12 @@
 //!
 //! The core is synchronous and holds its state behind a `Mutex` so the trait's
 //! `&self` methods can mutate it while satisfying `Send + Sync`.
+//!
+//! straitjacket-allow-file:duplication — the per-language demo cores (this
+//! `TickerImpl` and `crates/java-demo`'s) are DELIBERATELY parallel: each proves
+//! the SAME callback/subscription contract round-trips for its language's binding
+//! (C/C++ fn-ptr, JNI global-ref Consumer, …), so the register/tick bodies match
+//! by design. This file sorts first in the clone pair, so the marker lives here.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

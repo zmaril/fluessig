@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include <functional>
 
 namespace fluessig {
 
@@ -25,6 +26,28 @@ struct Error : std::runtime_error {
 enum class Poll { Item = FL_POLL_ITEM, Idle = FL_POLL_IDLE, Closed = FL_POLL_CLOSED, Failed = FL_POLL_FAILED };
 
 // Unions cross as their JSON envelope text — the C++ surface exposes std::string.
+
+/// RAII subscription handle: unsubscribe()/destroy removes the listener.
+class Subscription {
+public:
+    Subscription(::Subscription* h, void* ctx, void (*deleter)(void*))
+        : h_(h), ctx_(ctx), deleter_(deleter) {}
+    Subscription(Subscription&& o) noexcept
+        : h_(o.h_), ctx_(o.ctx_), deleter_(o.deleter_) { o.h_ = nullptr; o.ctx_ = nullptr; o.deleter_ = nullptr; }
+    Subscription(const Subscription&) = delete;
+    Subscription& operator=(const Subscription&) = delete;
+    ~Subscription() {
+        if (h_) { ::Subscription_free(h_); }
+        if (ctx_ && deleter_) { deleter_(ctx_); }
+    }
+    /// Remove the listener early (idempotent).
+    void unsubscribe() { if (h_) { ::Subscription_unsubscribe(h_); } }
+
+private:
+    ::Subscription* h_ = nullptr;
+    void* ctx_ = nullptr;
+    void (*deleter_)(void*) = nullptr;
+};
 
 /// An in-memory key/value store. `put`/`get` are fallible (the error seam); the
 /// observers (`keys`/`count`/`contains`/`remove_all`) are synchronous +
@@ -87,6 +110,43 @@ public:
 
 private:
     ::Store* h_ = nullptr;
+};
+
+/// A stateful ticker that fires registered listeners with an incrementing
+/// counter. `on_tick` is a `Shape::Subscription` op — it REGISTERS a host
+/// callback and hands back an owning `Subscription` handle whose
+/// unsubscribe()/drop removes the listener; `tick` fires every live listener.
+/// This is the callback + subscription slice's real C/C++ round-trip proof.
+class Ticker {
+public:
+    explicit Ticker() {
+        char* err = nullptr;
+        if (::Ticker_new(&h_, &err)) { throw Error(err); }
+    }
+    Ticker(Ticker&& o) noexcept : h_(o.h_) { o.h_ = nullptr; }
+    Ticker(const Ticker&) = delete;
+    Ticker& operator=(const Ticker&) = delete;
+    ~Ticker() { if (h_) { ::Ticker_free(h_); } }
+
+    /// Register `listener` to be called on every `tick`; returns a Subscription
+    /// handle that removes the listener when unsubscribed or dropped.
+    Subscription on_tick(std::function<void(int32_t)> listener) {
+        auto* ctx = new std::function<void(int32_t)>(std::move(listener));
+        auto thunk = [](void* c, int32_t v) { (*static_cast<std::function<void(int32_t)>*>(c))(v); };
+        auto deleter = [](void* c) { delete static_cast<std::function<void(int32_t)>*>(c); };
+        ::Subscription* out = nullptr;
+        char* err = nullptr;
+        if (::Ticker_on_tick(h_, thunk, ctx, &out, &err)) { deleter(ctx); throw Error(err); }
+        return Subscription(out, ctx, deleter);
+    }
+    /// Fire every live listener with the current counter value, then increment it
+    /// (infallible — registration/firing never fails).
+    void tick() {
+        ::Ticker_tick(h_);
+    }
+
+private:
+    ::Ticker* h_ = nullptr;
 };
 
 } // namespace fluessig

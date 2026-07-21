@@ -25,6 +25,8 @@ typedef struct FlStringList {
 } FlStringList;
 
 typedef struct Store Store;
+typedef struct Ticker Ticker;
+typedef struct Subscription Subscription;
 
 /* Store */
 int Store_new(int32_t capacity, Store** out, char** err_out);
@@ -35,11 +37,19 @@ int32_t Store_remove_all(Store* self, const char** keys, size_t keys_len);
 int32_t Store_count(Store* self);
 bool Store_contains(Store* self, const char* key);
 
+/* Ticker */
+int Ticker_new(Ticker** out, char** err_out);
+int Ticker_on_tick(Ticker* self, void (*listener)(void* ctx, int32_t v), void* listener_ctx, Subscription** out, char** err_out);
+void Ticker_tick(Ticker* self);
+
 /* memory management */
 void fl_string_free(char* p);
 void fl_error_free(char* p);
 void fl_string_list_free(FlStringList* p);
 void Store_free(Store* self);
+void Ticker_free(Ticker* self);
+void Subscription_unsubscribe(Subscription* s);
+void Subscription_free(Subscription* s);
 
 #ifdef __cplusplus
 }

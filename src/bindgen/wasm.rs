@@ -15,7 +15,7 @@
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, CallbackSig, Shape};
 
 use super::*;
 
@@ -113,23 +113,39 @@ fn push_doc(out: &mut String, doc: &Option<String>) {
     }
 }
 
-/// Build a unary/ctor op's wasm parameter list: `(decls, deser, args, complex)`.
-/// A native param lands as `name: RustTy`; a complex one lands as an annotated
-/// `#[wasm_bindgen(unchecked_param_type = "Ts")] name: JsValue` plus a
+/// Build a unary/ctor op's wasm parameter list: `(decls, deser, conv, args,
+/// complex)`. A native param lands as `name: RustTy`; a complex one lands as an
+/// annotated `#[wasm_bindgen(unchecked_param_type = "Ts")] name: JsValue` plus a
 /// `serde_wasm_bindgen::from_value` deserialize line, so the body sees the real
-/// Rust type. `complex` is true when ANY param is marshalled (⇒ the fn must
-/// return a `Result` for the deserialize error, even if the op is infallible).
+/// Rust type. A [`ApiType::Callback`] param lands as a `js_sys::Function` (the
+/// value JS supplies) plus a `conv` line wrapping it into the uniform core
+/// `Box<dyn Fn>` (shadowing `{name}`, so the shadowed binding flows straight into
+/// the core call — see [`wasm_callback_conv`]). `complex` is true when ANY serde
+/// param is marshalled (⇒ the fn must return a `Result` for the deserialize
+/// error, even if the op is infallible); a callback wrap is infallible and does
+/// NOT set it.
 fn build_params(
     api: &ApiDoc,
     opts: &WasmOptions,
     op: &ApiOp,
-) -> (String, Vec<String>, String, bool) {
+) -> (String, Vec<String>, Vec<String>, String, bool) {
     let sigs = param_sig(api, op);
     let mut decls = Vec::new();
     let mut deser = Vec::new();
+    let mut conv = Vec::new();
     let mut args = Vec::new();
     let mut complex = false;
     for (p, (n, rty)) in op.params.iter().zip(sigs.iter()) {
+        if let ApiType::Callback { callback } = &p.ty {
+            // A host callback crosses the wasm boundary as a `js_sys::Function`;
+            // the conv line wraps it into the uniform core `Box<dyn Fn>` (via the
+            // unsafe-Send `WasmCb` newtype), shadowing `{n}` so it flows straight
+            // into the core call. The wrap is infallible ⇒ `complex` stays as-is.
+            decls.push(format!("{n}: js_sys::Function"));
+            conv.push(wasm_callback_conv(api, callback, n));
+            args.push(n.clone());
+            continue;
+        }
         let is_cx = is_complex(api, &p.ty) || p.optional == Some(true);
         if is_cx {
             complex = true;
@@ -150,7 +166,55 @@ fn build_params(
         }
         args.push(n.clone());
     }
-    (decls.join(", "), deser, args.join(", "), complex)
+    (decls.join(", "), deser, conv, args.join(", "), complex)
+}
+
+/// Render the conversion that wraps a callback IN param (`{name}: js_sys::
+/// Function`) into the uniform core `Box<dyn Fn(Args) + Send + Sync>` (`{name}`,
+/// so the shadowed binding flows straight into the core call). The JS `Function`
+/// is `!Send`/`!Sync`, but wasm32 is single-threaded, so it rides the `WasmCb`
+/// newtype (asserted `Send`/`Sync`, sound under that invariant — see
+/// [`WASM_CALLBACK_PRELUDE`]); on invoke the closure calls it with the marshalled
+/// args, discarding any result (a host exception surfaces as the `Err` we drop,
+/// per the forward-only-infallible contract). The closure OWNS the `WasmCb`,
+/// keeping the JS `Function` alive for as long as the core holds the listener.
+fn wasm_callback_conv(api: &ApiDoc, sig: &CallbackSig, name: &str) -> String {
+    let arg_tys: Vec<String> = sig.params.iter().map(|p| ty(api, p).0).collect();
+    let vars = callback_arg_vars(arg_tys.len());
+    let box_ty = format!("Box<dyn Fn({}) + Send + Sync>", arg_tys.join(", "));
+    let closure_params = vars
+        .iter()
+        .zip(&arg_tys)
+        .map(|(v, t)| format!("{v}: {t}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // A JS `Function` is invoked positionally: 0/1/2/3 args map to `call0`/`call1`/
+    // `call2`/`call3`; >3 build a `js_sys::Array` and `apply`. Each arg crosses as
+    // a `JsValue::from(v)` (wasm-bindgen's `Into<JsValue>` for the scalar).
+    let call = match vars.len() {
+        0 => "__cb.func().call0(&JsValue::NULL)".to_string(),
+        n if n <= 3 => {
+            let js_args = vars
+                .iter()
+                .map(|v| format!("&JsValue::from({v})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("__cb.func().call{n}(&JsValue::NULL, {js_args})")
+        }
+        _ => {
+            let pushes = vars
+                .iter()
+                .map(|v| format!("__args.push(&JsValue::from({v}));"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "{{ let __args = js_sys::Array::new(); {pushes} __cb.func().apply(&JsValue::NULL, &__args) }}"
+            )
+        }
+    };
+    format!(
+        "let {name}: {box_ty} = {{ let __cb = WasmCb({name}); Box::new(move |{closure_params}| {{ let _ = {call}; }}) }};"
+    )
 }
 
 /// Render one unary op as a `#[wasm_bindgen]` free function (stateless) or method
@@ -168,7 +232,7 @@ fn render_unary(
 ) -> String {
     let name = snake(&op.name);
     let js = pinned_name(&op.bindings, LANG).unwrap_or_else(|| crate::ir::camel(&name));
-    let (params_decl, deser, args, _cx) = build_params(api, opts, op);
+    let (params_decl, deser, conv, args, _cx) = build_params(api, opts, op);
     let sig_params = if is_method {
         if params_decl.is_empty() {
             "&self".to_string()
@@ -188,7 +252,14 @@ fn render_unary(
 
     let mut out = String::new();
     push_doc(&mut out, &op.doc);
-    let deser_block: String = deser.iter().map(|l| format!("{l}\n")).collect();
+    // Callback wraps (`conv_block`) run FIRST — each only builds a local `Box<dyn
+    // Fn>` from the JS `Function` and never fails — then the serde deserialize
+    // lines. Both precede the core call, so `deser_block` carries them together
+    // for the fallible-boundary arms; the infallible arms inject `conv_block`
+    // directly (a callback wrap does not force a `Result` seam).
+    let conv_block: String = conv.iter().map(|l| format!("{l}\n")).collect();
+    let deser_block: String =
+        conv_block.clone() + &deser.iter().map(|l| format!("{l}\n")).collect::<String>();
 
     if op.is_async {
         // Async: a `Promise` via `future_to_promise`. The core call is driven
@@ -250,7 +321,7 @@ fn render_unary(
             }
         } else {
             out.push_str(&format!(
-                "pub fn {name}({sig_params}) {{\n{call_expr};\n}}\n"
+                "pub fn {name}({sig_params}) {{\n{conv_block}{call_expr};\n}}\n"
             ));
         }
         return out;
@@ -269,7 +340,7 @@ fn render_unary(
             }
         } else {
             out.push_str(&format!(
-                "pub fn {name}({sig_params}) -> {ret_rust} {{\n{call_expr}\n}}\n"
+                "pub fn {name}({sig_params}) -> {ret_rust} {{\n{conv_block}{call_expr}\n}}\n"
             ));
         }
     } else if must_result {
@@ -288,6 +359,7 @@ fn render_unary(
         // serde-encoded return, infallible: a null on encode failure keeps the
         // sync fn total (no error channel to surface it through).
         out.push_str(&format!("pub fn {name}({sig_params}) -> JsValue {{\n"));
+        out.push_str(&conv_block);
         out.push_str(&format!("let out = {call_expr};\n"));
         out.push_str("serde_wasm_bindgen::to_value(&out).unwrap_or(JsValue::NULL)\n}\n");
     }
@@ -312,15 +384,120 @@ fn manual_note(op: &ApiOp) -> String {
     )
 }
 
-/// A `Shape::Subscription` op: register/unsubscribe lowering is deferred to a
-/// follow-up PR for the wasm backend (node/python lower it today). The op is
-/// recorded but not auto-bound, keeping the crate compiling.
+/// A `Shape::Subscription` op in a STATELESS interface — unreachable in practice
+/// (the loader requires a subscription op's interface to be stateful, so it
+/// carries a ctor and takes the `render_subscription` path below), emitted as a
+/// defensive skip-note rather than broken free-function code.
 fn subscription_skip(op: &ApiOp) -> String {
     format!(
-        "// subscription op `{}` — register/unsubscribe lowering deferred (node/python only today).\n",
+        "// subscription op `{}` — requires a stateful (ctor-bearing) interface; not bound here.\n",
         op.name
     )
 }
+
+/// A `Shape::Subscription` op: register the listener (its one callback param,
+/// wrapped by [`build_params`] into the uniform core `Box<dyn Fn>` via the
+/// unsafe-Send `WasmCb` newtype) through the core, then hand back an owning
+/// `#[wasm_bindgen]` `Subscription` handle wrapping the core's returned
+/// unsubscribe closure. An INFALLIBLE op returns the handle straight through; a
+/// FALLIBLE one throws on `Err` (`Result<Subscription, JsValue>`, the same `err`
+/// seam the unary arms use). `call` is the core-call path (`self.inner.<op>`).
+/// Always `&self` (a subscription op requires a stateful interface).
+fn render_subscription(api: &ApiDoc, opts: &WasmOptions, op: &ApiOp, call: &str) -> String {
+    let name = snake(&op.name);
+    let js = pinned_name(&op.bindings, LANG).unwrap_or_else(|| crate::ir::camel(&name));
+    let (params_decl, deser, conv, args, _cx) = build_params(api, opts, op);
+    let sig_params = if params_decl.is_empty() {
+        "&self".to_string()
+    } else {
+        format!("&self, {params_decl}")
+    };
+    // The callback wraps (`conv`) build the boxed `Fn`; any serde deserialize lines
+    // (`deser`) follow. Both precede the core call.
+    let prelude: String = conv
+        .iter()
+        .chain(deser.iter())
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let core_call = format!("{call}({args})");
+
+    let mut out = String::new();
+    push_doc(&mut out, &op.doc);
+    out.push_str(&format!("#[wasm_bindgen(js_name = {js:?})]\n"));
+    if op.infallible {
+        // Infallible register → the core returns the unsubscribe closure straight
+        // through; the shared `subscription_method_parts` supplies the handle literal
+        // (kept in agreement with node/python's register→unsubscribe lowering).
+        let (ret, call_e, ok) = subscription_method_parts(true, "Result", &core_call);
+        out.push_str(&format!("pub fn {name}({sig_params}) -> {ret} {{\n"));
+        out.push_str(&prelude);
+        out.push_str(&format!("let unsub = {call_e};\n{ok}\n}}\n"));
+    } else {
+        // Fallible register → throw on `Err` via the `err` seam. wasm's throwing
+        // result is `Result<_, JsValue>`, so the error type is spelled explicitly.
+        out.push_str(&format!(
+            "pub fn {name}({sig_params}) -> Result<Subscription, JsValue> {{\n"
+        ));
+        out.push_str(&prelude);
+        out.push_str(&format!("let unsub = {core_call}.map_err(err)?;\n"));
+        out.push_str("Ok(Subscription { unsub: std::sync::Mutex::new(Some(unsub)) })\n}\n");
+    }
+    out
+}
+
+/// The `WasmCb` newtype prelude (gated on callback usage). A `js_sys::Function`
+/// is `!Send`/`!Sync`, but `wasm32-unknown-unknown` is single-threaded, so — like
+/// cpp's `CbCtx` and ruby's `RubyCb` — it is wrapped in `WasmCb` and asserted
+/// `Send`/`Sync`. Sound because wasm is single-threaded: the boxed closure this
+/// wraps is only ever invoked on the one JS thread. The closure OWNS the `WasmCb`,
+/// so the JS `Function` stays alive as long as the core holds the listener (a
+/// `Shape::Subscription` op keeps it until unsubscribe).
+const WASM_CALLBACK_PRELUDE: &str = r#"
+/// A JS callback (`js_sys::Function`), marshalled into the uniform core `Box<dyn
+/// Fn>`. A `js_sys::Function` is `!Send`/`!Sync`, but wasm32 is single-threaded, so
+/// it is asserted `Send`/`Sync` here: the boxed closure this wraps is only ever
+/// invoked on the one JS thread, and the closure owns the `WasmCb`, keeping the JS
+/// `Function` alive for the callback's lifetime.
+struct WasmCb(js_sys::Function);
+// SAFETY: wasm32-unknown-unknown is single-threaded; the wrapped `Function` is only
+// ever touched on the one JS thread, so asserting `Send`/`Sync` is sound.
+unsafe impl Send for WasmCb {}
+unsafe impl Sync for WasmCb {}
+impl WasmCb {
+    /// The JS `Function`, read through a method so a `move` closure captures the
+    /// WHOLE `WasmCb` (which is `Send + Sync`). Reaching `self.0` directly would,
+    /// under RFC 2229 disjoint capture, capture only the non-`Send` `Function`.
+    fn func(&self) -> &js_sys::Function {
+        &self.0
+    }
+}
+"#;
+
+/// The `#[wasm_bindgen]`-exported `Subscription` handle (gated on subscription
+/// usage). It owns the core's returned unsubscribe closure in a `Mutex<Option<…>>`
+/// (the core box is `Send + Sync`, so the `Mutex` is free of contention on
+/// single-threaded wasm yet keeps the field `Sync` for `#[wasm_bindgen]`);
+/// `unsubscribe()` runs it (take-and-call, so a second call is a no-op). Mirrors
+/// the node `#[napi]` `Subscription`.
+const WASM_SUBSCRIPTION_PRELUDE: &str = r#"/// A subscription handle wrapping the core's returned unsubscribe closure.
+/// `unsubscribe()` removes the registered listener (idempotent — a second call is
+/// a no-op). The wrapped JS callback stays alive via the core's listener
+/// registration until the subscription is removed.
+#[wasm_bindgen]
+pub struct Subscription {
+    unsub: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+#[wasm_bindgen]
+impl Subscription {
+    /// Run the unsubscribe closure early (idempotent — a second call is a no-op).
+    #[wasm_bindgen(js_name = "unsubscribe")]
+    pub fn unsubscribe(&self) {
+        if let Some(f) = self.unsub.lock().unwrap().take() {
+            f();
+        }
+    }
+}
+"#;
 
 /// Generate the wasm-bindgen binding with default options (structured tagged
 /// unions). A thin wrapper over [`wasm_binding_with_options`].
@@ -380,6 +557,12 @@ pub fn wasm_binding_with_options(
             "\n/// Bulk bytes cross into JS as a `Uint8Array` (wasm-bindgen maps `Vec<u8>`).\n\
              pub type Bytes = Vec<u8>;\n",
         );
+    }
+    // The WasmCb callback wrapper (whenever a callback param appears; a
+    // subscription op always carries one). Gated, so a callback-free schema stays
+    // byte-identical.
+    if api_uses_callback(api) {
+        prelude.push_str(WASM_CALLBACK_PRELUDE);
     }
 
     // ── typescript_custom_section: the real .d.ts types ──
@@ -535,6 +718,14 @@ pub fn wasm_binding_with_options(
     body.push_str(&tt.to_file_string().expect("rust renders"));
     body.push('\n');
 
+    // The `#[wasm_bindgen]` `Subscription` handle — emitted ONCE (gated, so a
+    // subscription-free surface stays byte-identical). It wraps the core's
+    // returned unsubscribe closure; `unsubscribe()` takes and calls it.
+    if api_uses_subscription(api) {
+        body.push_str(WASM_SUBSCRIPTION_PRELUDE);
+        body.push('\n');
+    }
+
     // ── per-interface op surface ──
     for i in &api.interfaces {
         let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
@@ -551,14 +742,14 @@ pub fn wasm_binding_with_options(
                 match op.shape {
                     Shape::Ctor => {
                         let name = snake(&op.name);
-                        let (params_decl, deser, args, _cx) = build_params(api, &opts, op);
+                        let (params_decl, deser, conv, args, _cx) = build_params(api, &opts, op);
                         push_doc(&mut body, &op.doc);
                         body.push_str("#[wasm_bindgen(constructor)]\n");
                         body.push_str(&format!(
                             "pub fn new({params_decl}) -> Result<{}, JsValue> {{\n",
                             i.name
                         ));
-                        for l in &deser {
+                        for l in conv.iter().chain(deser.iter()) {
                             body.push_str(&format!("{l}\n"));
                         }
                         body.push_str(&format!(
@@ -571,7 +762,15 @@ pub fn wasm_binding_with_options(
                         body.push_str(&render_unary(api, &opts, op, &call, true));
                     }
                     Shape::Stream => body.push_str(&stream_skip(op)),
-                    Shape::Subscription => body.push_str(&subscription_skip(op)),
+                    // A subscription op REGISTERS the listener (its one callback
+                    // param, wrapped into the uniform core `Box<dyn Fn>`) via the
+                    // core, then hands back an owning `#[wasm_bindgen]` `Subscription`
+                    // handle wrapping the core's returned unsubscribe closure. Always
+                    // a method (a subscription op requires a stateful interface).
+                    Shape::Subscription => {
+                        let call = format!("self.inner.{}", snake(&op.name));
+                        body.push_str(&render_subscription(api, &opts, op, &call));
+                    }
                     Shape::Manual => body.push_str(&manual_note(op)),
                 }
                 body.push('\n');

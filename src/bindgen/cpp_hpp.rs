@@ -238,6 +238,11 @@ fn emit_handle_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
                 op.name
             )),
             Shape::Stream => s.push_str(&emit_stream_method(api, iface, op, true)),
+            // Subscription lowering deferred to a follow-up PR (node/python today).
+            Shape::Subscription => s.push_str(&format!(
+                "    // subscription {iface}::{} — register/unsubscribe lowering deferred.\n",
+                op.name
+            )),
             Shape::Unary => s.push_str(&emit_unary_method(api, iface, op, true)),
         }
     }
@@ -264,6 +269,12 @@ fn emit_stateless(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
                 op.name
             )),
             Shape::Stream => s.push_str(&emit_stream_method(api, iface, op, false)),
+            // Subscription lowering deferred (a subscription op is `&self` on a
+            // stateful interface, so it never reaches this stateless arm).
+            Shape::Subscription => s.push_str(&format!(
+                "// subscription {iface}::{} — register/unsubscribe lowering deferred.\n",
+                op.name
+            )),
             Shape::Unary => s.push_str(&emit_unary_method(api, iface, op, false)),
             Shape::Ctor => {}
         }

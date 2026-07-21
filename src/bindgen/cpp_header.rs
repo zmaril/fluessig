@@ -33,6 +33,10 @@ fn c_in_param(c: &Cross, name: &str) -> String {
     match c {
         Cross::I32 => format!("int32_t {name}"),
         Cross::I64 => format!("int64_t {name}"),
+        Cross::U8 => format!("uint8_t {name}"),
+        Cross::U16 => format!("uint16_t {name}"),
+        Cross::U32 => format!("uint32_t {name}"),
+        Cross::F32 => format!("float {name}"),
         Cross::F64 => format!("double {name}"),
         Cross::Bool => format!("bool {name}"),
         Cross::Str | Cross::StrEnum | Cross::Union => format!("const char* {name}"),
@@ -56,6 +60,10 @@ fn c_out_params(c: &Cross) -> Vec<String> {
         Cross::Void => Vec::new(),
         Cross::I32 => vec!["int32_t* out".into()],
         Cross::I64 => vec!["int64_t* out".into()],
+        Cross::U8 => vec!["uint8_t* out".into()],
+        Cross::U16 => vec!["uint16_t* out".into()],
+        Cross::U32 => vec!["uint32_t* out".into()],
+        Cross::F32 => vec!["float* out".into()],
         Cross::F64 => vec!["double* out".into()],
         Cross::Bool => vec!["bool* out".into()],
         Cross::Enum(e) => vec![format!("{}* out", c_enum_name(e))],
@@ -82,6 +90,11 @@ fn in_list(api: &ApiDoc, op: &ApiOp) -> Vec<String> {
 
 /// Generate the C header string.
 pub fn cpp_header(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+    // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
+    // today; the C ABI cdylib (`cpp_binding`) emits nothing for it, so this header
+    // must not declare its symbols either. Split it out + note it honestly.
+    let (api_owned, st_note) = crate::bindgen::split_single_threaded(api, "cpp");
+    let api = &api_owned;
     let uses_bytes = api_uses_bytes(api);
     let src = api.source.as_deref().unwrap_or("fluessig");
     let guard = format!(
@@ -236,6 +249,7 @@ pub fn cpp_header(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -
 
     s.push_str("\n#ifdef __cplusplus\n}\n#endif\n");
     s.push_str(&format!("#endif /* {guard} */\n"));
+    s.push_str(&st_note);
     s
 }
 

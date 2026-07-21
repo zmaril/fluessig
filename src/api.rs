@@ -22,6 +22,53 @@ pub struct ApiDoc {
     #[serde(default)]
     pub unions: Vec<ApiUnion>,
     pub interfaces: Vec<ApiInterface>,
+    /// Top-level EXPORTED CONSTANTS the surface declares (format 1+), e.g. a
+    /// module's `export const VERSION: string = "…"`. A const has no home in the
+    /// op layer (it is neither an op nor a DTO field), so it rides here as its own
+    /// document section. Empty in every pre-const fixture — `#[serde(default)]`
+    /// makes an api.json WITHOUT this key parse byte-for-byte as before, and the
+    /// empty-Vec skip keeps a re-serialized doc identical too. Backends that don't
+    /// model consts simply ignore it; rust-core lowers each to a `pub const`
+    /// (const-representable literals) or a "runtime value" doc-comment note.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consts: Vec<ApiConst>,
+}
+
+/// A TOP-LEVEL exported constant (see [`ApiDoc::consts`]). Reuses the shared
+/// [`ApiType`] for its declared type, so a `string` const carries `type:
+/// "string"` exactly as an op param/return/field does — no new type vocabulary.
+/// `value` is the STATICALLY-KNOWN literal, when one exists; a const whose source
+/// is a runtime expression (`pkg.version || "0.0.0"`) or a non-literal type
+/// carries `value: None` and is emitted as a documented non-representable note
+/// rather than a broken `pub const`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiConst {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    #[serde(rename = "type")]
+    pub ty: ApiType,
+    /// The compile-time literal, or `None` when the const has no statically-known
+    /// value (a runtime expression, or a non-literal type). Absent ⇒ `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<ConstValue>,
+}
+
+/// The literal a [`ApiConst`] carries. UNTAGGED, so it serializes as the bare
+/// JSON scalar the value naturally is — a string const's value is `"0.80.10"`, an
+/// int's is `42`, a bool's is `true`, a float's is `3.14` — matching how the
+/// source literal reads. On deserialize the arms are tried in order (bool, then
+/// integer, then float, then string), so an integer JSON number lands as `Int`
+/// and a fractional one as `Float`; the const's declared `type` is the authority
+/// for lowering, this is only the value carrier.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ConstValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +132,20 @@ pub struct ApiInterface {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
+    /// `#[fluessig(single_threaded)]` on the exported `impl` — the interface
+    /// lowers to a THREAD-CONFINED handle class (node-only today). Its generated
+    /// napi handle holds the core by plain ownership inside a `RefCell` WITHOUT
+    /// `Arc`/`Send`/`Sync`, so a `!Send` core (`Rc<RefCell<…>>` + non-Send
+    /// closures, e.g. pidgin's `TuiCore`) can be GENERATED — a napi class instance
+    /// never crosses threads, so it needs no `Send` bound. The trade: a
+    /// single_threaded interface may carry ONLY synchronous ops (an async/stream
+    /// op needs a `Send` core for the threadpool), enforced by the derive macro
+    /// (a spanned compile error) and re-checked here by [`load_api`]. Non-node
+    /// backends cannot express a thread-confined handle, so they emit an honest
+    /// skip-note rather than a silently `Send`-assuming handle. Serialized ONLY
+    /// when `true`, so an ordinary (async-capable) interface stays byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub single_threaded: bool,
     pub ops: Vec<ApiOp>,
 }
 
@@ -225,6 +286,33 @@ pub enum ApiType {
     Union {
         union: String,
     },
+    /// A TRULY-FOREIGN type — an external/host value the schema references but
+    /// fluessig has no model for (Node's `http.Server`, a `ChildProcess`, an OS
+    /// file descriptor, …). Rather than silently collapsing it to a `String`/JSON
+    /// carrier, it lowers to a generated, per-type OPAQUE HANDLE the boundary can
+    /// carry without needing the real external type in scope. `name` is the source
+    /// type name (e.g. `http.Server`); `rust_path` is a best-effort Rust path/label
+    /// for the handle (used as documentation, not required to resolve). Serializes
+    /// as `{"foreign": {"name": "…", "rustPath": "…"}}`, mirroring the single
+    /// distinguishing-key convention of the sibling variants (`model`, `enum`,
+    /// `list`, `nullable`, `union`).
+    Foreign {
+        foreign: ForeignType,
+    },
+}
+
+/// The payload of an [`ApiType::Foreign`]: the source type `name` and a
+/// best-effort `rust_path` label for the generated opaque handle. Kept as a
+/// dedicated struct so the variant reads as a single `{"foreign": {…}}` key,
+/// matching how the other `ApiType` variants each carry exactly one tag word.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForeignType {
+    /// The source-language type name, e.g. `http.Server`, `ChildProcess`.
+    pub name: String,
+    /// A best-effort Rust path/label for the opaque handle (documentation only;
+    /// the handle type name is derived deterministically from `name`).
+    pub rust_path: String,
 }
 
 /// Parse `api.json` (with the same format-version gate as the catalog).
@@ -248,6 +336,21 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
                     i.name, op.name, op.shape
                 ));
             }
+            // a `single_threaded` interface lowers to a THREAD-CONFINED handle
+            // holding a `!Send` core — which is incompatible with the async
+            // projection (an async/stream op clones the core onto a threadpool
+            // worker, so the core MUST be `Send`). The derive macro rejects this
+            // at authoring time with a spanned compile error; this re-checks the
+            // hand-written / lowered `api.json` path so a bad surface can never
+            // reach a backend. Keep the message aligned with the macro's.
+            if i.single_threaded && (op.is_async || op.shape == Shape::Stream) {
+                return Err(format!(
+                    "op `{}.{}`: a #[fluessig(single_threaded)] interface may carry only \
+                     synchronous ops — an async or stream op needs a `Send` core for the \
+                     threadpool, which is incompatible with a thread-confined `!Send` handle",
+                    i.name, op.name
+                ));
+            }
         }
     }
     Ok(api)
@@ -258,4 +361,95 @@ pub fn load_api_file(path: impl AsRef<std::path::Path>) -> Result<ApiDoc, String
     let json = std::fs::read_to_string(path.as_ref())
         .map_err(|e| format!("read {}: {e}", path.as_ref().display()))?;
     load_api(&json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Locks the on-wire shape of [`ApiType::Foreign`] so the converter that
+    /// emits it (and the sibling variants' single-distinguishing-key convention)
+    /// stay in agreement: `{"foreign": {"name": …, "rustPath": …}}`, with
+    /// `rust_path` camelCased to `rustPath`. Round-trips byte-for-byte.
+    #[test]
+    fn foreign_serializes_as_single_foreign_key() {
+        let ty = ApiType::Foreign {
+            foreign: ForeignType {
+                name: "http.Server".into(),
+                rust_path: "http::Server".into(),
+            },
+        };
+        let json = serde_json::to_string(&ty).unwrap();
+        assert_eq!(
+            json,
+            r#"{"foreign":{"name":"http.Server","rustPath":"http::Server"}}"#
+        );
+        // Deserializes back to the same variant (untagged, distinguished by the
+        // `foreign` key — no collision with model/enum/list/nullable/union).
+        let back: ApiType = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, ApiType::Foreign { foreign } if foreign.name == "http.Server"
+            && foreign.rust_path == "http::Server")
+        );
+    }
+
+    /// Locks the on-wire shape of an [`ApiConst`] so the converter that emits it
+    /// stays in agreement: a string const is
+    /// `{"name":"VERSION","type":"string","value":"0.80.10"}` — the scalar `type`
+    /// rides as the bare string (identical to a param/field type), and the
+    /// untagged `value` rides as the bare JSON string. Round-trips byte-for-byte.
+    #[test]
+    fn const_string_serializes_as_bare_scalar_and_value() {
+        let c = ApiConst {
+            name: "VERSION".into(),
+            doc: None,
+            ty: ApiType::Scalar("string".into()),
+            value: Some(ConstValue::Str("0.80.10".into())),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"VERSION","type":"string","value":"0.80.10"}"#
+        );
+        let back: ApiConst = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "VERSION");
+        assert!(matches!(back.value, Some(ConstValue::Str(ref s)) if s == "0.80.10"));
+    }
+
+    /// The untagged [`ConstValue`] carries int / float / bool as their bare JSON
+    /// forms, and an integer JSON number lands on `Int` (not `Float`).
+    #[test]
+    fn const_value_untagged_scalar_forms() {
+        let cases = [
+            (ConstValue::Int(42), "42"),
+            (ConstValue::Bool(true), "true"),
+            (ConstValue::Float(3.5), "3.5"),
+        ];
+        for (v, wire) in cases {
+            assert_eq!(serde_json::to_string(&v).unwrap(), wire);
+        }
+        assert!(matches!(
+            serde_json::from_str::<ConstValue>("42").unwrap(),
+            ConstValue::Int(42)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ConstValue>("3.5").unwrap(),
+            ConstValue::Float(f) if (f - 3.5).abs() < f64::EPSILON
+        ));
+    }
+
+    /// A `consts` key absent from api.json parses as an empty vec (backward-compat)
+    /// and re-serializes WITHOUT the key (empty-Vec skip) — no drift for any
+    /// pre-const fixture.
+    #[test]
+    fn missing_consts_is_empty_and_skips_on_serialize() {
+        let json = r#"{
+          "fluessig": {"format": 1, "emitter": "t", "compiler": "t"},
+          "models": [], "unions": [],
+          "interfaces": [{"name": "Api", "ops": []}]
+        }"#;
+        let api = load_api(json).unwrap();
+        assert!(api.consts.is_empty());
+        assert!(!serde_json::to_string(&api).unwrap().contains("consts"));
+    }
 }

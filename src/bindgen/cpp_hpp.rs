@@ -39,6 +39,11 @@ fn cpp_arg(c: &Cross, name: &str) -> String {
 
 /// Generate the C++ header string.
 pub fn cpp_hpp(api: &ApiDoc, _enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+    // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
+    // today; the C ABI cdylib emits nothing for it, so this C++ wrapper header must
+    // not declare its handle class either. Split it out + note it honestly.
+    let (api_owned, st_note) = crate::bindgen::split_single_threaded(api, "cpp");
+    let api = &api_owned;
     let src = api.source.as_deref().unwrap_or("fluessig");
     let guard = format!(
         "FLUESSIG_{}_HPP",
@@ -104,6 +109,7 @@ pub fn cpp_hpp(api: &ApiDoc, _enums: &[EnumDesc], banner_note: Option<&str>) -> 
 
     s.push_str("} // namespace fluessig\n\n");
     s.push_str(&format!("#endif // {guard}\n"));
+    s.push_str(&st_note);
     s
 }
 

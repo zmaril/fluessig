@@ -141,17 +141,6 @@ fn node_param_ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
     }
 }
 
-/// Does any op in the surface take a callback param? Gates the napi
-/// `threadsafe_function` imports in the prelude, so a callback-free file emits
-/// ZERO new import lines and its golden stays byte-identical.
-fn api_uses_callback(api: &ApiDoc) -> bool {
-    api.interfaces.iter().flat_map(|i| &i.ops).any(|op| {
-        op.params
-            .iter()
-            .any(|p| matches!(&p.ty, ApiType::Callback { .. }))
-    })
-}
-
 /// The napi BINDING-position spelling of a callback param: a
 /// `ThreadsafeFunction<Args, ErrorStrategy::Fatal>` (single arg → the arg type
 /// directly, N args → a tuple). This is the type JS supplies; the fn body bridges

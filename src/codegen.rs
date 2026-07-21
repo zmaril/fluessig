@@ -2,6 +2,10 @@
 //! committed language artifacts, via **genco** (whitespace-aware quasi-quoting
 //! with automatic import management):
 //!
+//! straitjacket-allow-file:duplication — `django_models` deliberately parallels
+//! `python_models` (both lower the same physical projection into ORM model
+//! classes); the shared shape is the point, not a refactor target.
+//!
 //! - [`python_models`] → `entl.models` (SQLAlchemy, read-only guards included) —
 //!   replaces entl-python's hand-written `gen_models.py`.
 //! - [`ts_tables`] → `tables.gen.ts` (the typed `EntlTables` enum) and
@@ -11,9 +15,11 @@
 //! All three read the same physical projection the DDL back-end uses
 //! ([`crate::sql::tables`]), so models/types/DDL agree by construction.
 
+use std::collections::HashMap;
+
 use genco::prelude::*;
 
-use crate::ir::{camel, Catalog};
+use crate::ir::{camel, snake, Catalog, Entity, Field, TypeRef, Variant};
 use crate::sql::{tables, Dialect, TableDef};
 
 /// snake_case → PascalCase (`gh_pull_requests` → `GhPullRequests`).
@@ -115,6 +121,310 @@ pub fn python_models(c: &Catalog, banner_note: Option<&str>) -> String {
         banner_with(c.source.as_deref(), banner_note).replace('\n', "\n# "),
         body
     )
+}
+
+// ── Django read-plane ──────────────────────────────────────────────────────
+
+/// The physical column name of a scalar field (mirrors `sql::col_name`, which is
+/// private): the `@name` override, else the snake_cased field name.
+fn field_column(f: &Field) -> String {
+    f.column.clone().unwrap_or_else(|| snake(&f.name))
+}
+
+/// The expanded key of an entity as physical column names — scalars directly,
+/// relation members through their FK columns, recursively. A names-only mirror
+/// of `sql::key_columns` (private), used to resolve a to-one relation's FK
+/// columns when the relation itself carries no explicit `@fk`. Handles abstract
+/// (polymorphic) targets, which have no `TableDef` in `tables()`.
+fn key_column_names(c: &Catalog, e: &Entity) -> Vec<String> {
+    let fields = c.flattened_fields(e);
+    let mut out = Vec::new();
+    for name in c.flattened_key(e) {
+        let f = fields
+            .iter()
+            .find(|f| f.name == name)
+            .expect("validated: key field exists");
+        match &f.relation {
+            None => out.push(field_column(f)),
+            Some(rel) => {
+                let target = c.entity(&rel.to).expect("validated: target exists");
+                let target_key = key_column_names(c, target);
+                let fk = rel.fk_columns.clone().unwrap_or(target_key);
+                out.extend(fk);
+            }
+        }
+    }
+    out
+}
+
+/// A Postgres dialect column type → the Django model field constructor name.
+/// fluessig doesn't carry precision, so `DecimalField` gets defaults appended by
+/// the caller. The `_` arm (text / uuid / hex oids / url / json-as-text) is the
+/// widest, matching how the physical projection collapses semantic scalars.
+fn django_field(ty: &str) -> &'static str {
+    match ty {
+        "boolean" => "BooleanField",
+        "smallint" => "SmallIntegerField",
+        "integer" => "IntegerField",
+        "bigint" => "BigIntegerField",
+        "real" | "double precision" => "FloatField",
+        "numeric" | "decimal" => "DecimalField",
+        "timestamptz" | "timestamp" => "DateTimeField",
+        "date" => "DateField",
+        "time" => "TimeField",
+        "interval" => "DurationField",
+        "json" | "jsonb" => "JSONField",
+        _ => "TextField", // text, uuid, hex oids, url, json-as-text
+    }
+}
+
+/// A Python string literal (double-quoted; backslash, quote, and the newline /
+/// carriage-return / tab control chars escaped so a multi-line doc stays a single
+/// valid literal).
+fn py_str(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{escaped}\"")
+}
+
+/// The stored wire value of an enum variant: the neutral `value` override (string
+/// unquoted, other JSON stringified) else the variant name.
+fn enum_stored(v: &Variant) -> String {
+    match &v.value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => v.name.clone(),
+    }
+}
+
+/// Per-entity analysis threading relations/enums from the catalog back onto the
+/// physical columns of `tables()` — the divergence from `python_models`' flat
+/// projection. FK columns become real `ForeignKey`s; enum columns become
+/// `CharField(choices=…)`.
+#[derive(Default)]
+struct DjangoAnalysis {
+    /// physical FK column → (django field name, target model Pascal name).
+    fk_single: HashMap<String, (String, String)>,
+    /// physical column → the model field name it renders under (FK columns rename
+    /// to the relation field; everything else keeps its column name). Feeds
+    /// `CompositePrimaryKey` member spelling.
+    field_name_for_col: HashMap<String, String>,
+    /// physical column → enum name (for `choices=`).
+    enum_by_col: HashMap<String, String>,
+    /// physical column → a `# NOTE` comment to emit just before it (multi-column
+    /// or polymorphic FKs Django can't model as a single `ForeignKey`).
+    note_before: HashMap<String, String>,
+}
+
+/// Walk an entity's fields, classifying its physical columns into FK / enum /
+/// scalar. A to-one relation becomes a `ForeignKey` only when it is single-column
+/// AND non-polymorphic AND targets a concrete entity; otherwise its columns stay
+/// scalar with an honest `# NOTE` (Django `ForeignKey` is single-column and can't
+/// span a polymorphic family).
+fn analyze_entity(c: &Catalog, e: &Entity) -> DjangoAnalysis {
+    let mut a = DjangoAnalysis::default();
+    for f in c.flattened_fields(e) {
+        match &f.relation {
+            None => {
+                if let TypeRef::Enum { name } = f.ty.innermost() {
+                    a.enum_by_col.insert(field_column(f), name.clone());
+                }
+            }
+            Some(rel) if rel.cardinality == crate::ir::Cardinality::One => {
+                let target = c.entity(&rel.to).expect("validated: target exists");
+                let fk_cols = rel
+                    .fk_columns
+                    .clone()
+                    .unwrap_or_else(|| key_column_names(c, target));
+                let concrete = !target.is_abstract;
+                let single = fk_cols.len() == 1 && rel.type_column.is_none() && concrete;
+                if single {
+                    let col = fk_cols[0].clone();
+                    let fname = snake(&f.name);
+                    a.field_name_for_col.insert(col.clone(), fname.clone());
+                    a.fk_single
+                        .insert(col, (fname, pascal(&c.table_name(target))));
+                } else if let Some(first) = fk_cols.first() {
+                    let why = if rel.type_column.is_some() {
+                        format!("polymorphic FK to the {} family", rel.to)
+                    } else {
+                        format!("multi-column FK to {}", rel.to)
+                    };
+                    a.note_before.insert(
+                        first.clone(),
+                        format!(
+                            "# NOTE: {why} — Django ForeignKey is single-column; \
+                             kept as scalar column(s)."
+                        ),
+                    );
+                }
+            }
+            Some(_) => {} // to-many → its own association table
+        }
+    }
+    a
+}
+
+/// The Django read-plane — one `models.Model` per physical table, mirroring
+/// `python_models` but modeling relations and enums structurally: to-one
+/// relations become real `ForeignKey`s (single-column, concrete targets;
+/// multi-column / polymorphic FKs stay scalar with an honest note), and enum
+/// columns become `CharField(choices=…)`. Every model is `managed = False` — the
+/// Django analog of the SQLAlchemy read-only guard: the sink owns the schema, so
+/// `migrate`/`makemigrations` must never create or drop these tables. Composite
+/// keys use Django 5.2's `CompositePrimaryKey`.
+pub fn django_models(c: &Catalog, banner_note: Option<&str>) -> String {
+    let defs = tables(c, Dialect::Postgres);
+    let models = &python::import("django.db", "models");
+
+    // table name → its owning concrete entity (association/edge tables have none).
+    let entity_of: HashMap<String, &Entity> = c
+        .entities
+        .iter()
+        .filter(|e| !e.is_abstract)
+        .map(|e| (c.table_name(e), e))
+        .collect();
+
+    let classes: Vec<python::Tokens> = defs
+        .iter()
+        .map(|(table, def)| django_class(c, table, def, entity_of.get(table).copied(), models))
+        .collect();
+
+    let table_names: Vec<&String> = defs.keys().collect();
+    let t: python::Tokens = quote! {
+        $("#: Every table fluessig projects, by table name.")
+        FLUESSIG_TABLES = [
+            $(for n in table_names join ($['\r']) => $(quoted(n.as_str())),)
+        ]
+
+        $(for cls in classes join ($['\n']) => $cls)
+    };
+    let body = t.to_file_string().expect("python renders");
+    format!(
+        "# {}\n\n{}",
+        banner_with(c.source.as_deref(), banner_note).replace('\n', "\n# "),
+        body
+    )
+}
+
+/// One Django model class for a physical table. `entity` is `Some` for entity
+/// tables (rich: FKs, enums, docs) and `None` for association/edge tables (plain
+/// scalar columns).
+fn django_class(
+    c: &Catalog,
+    table: &str,
+    def: &TableDef,
+    entity: Option<&Entity>,
+    models: &python::Import,
+) -> python::Tokens {
+    let a = entity.map(|e| analyze_entity(c, e)).unwrap_or_default();
+    let single_pk = (def.pk.len() == 1).then(|| def.pk[0].clone());
+    let composite = def.pk.len() > 1;
+
+    let mut lines: Vec<python::Tokens> = Vec::new();
+    if let Some(doc) = entity.and_then(|e| e.doc.as_deref()) {
+        let d = format!("\"\"\"{}\"\"\"", doc.replace("\"\"\"", "\\\"\\\"\\\""));
+        lines.push(quote!($(d)));
+    }
+
+    for col in &def.columns {
+        if let Some(note) = a.note_before.get(&col.name) {
+            lines.push(quote!($(note.as_str())));
+        }
+        let is_single_pk = single_pk.as_deref() == Some(col.name.as_str());
+        if let Some((fname, target)) = a.fk_single.get(&col.name) {
+            let related = format!("{table}_{fname}");
+            let mut args = format!(
+                "{}, on_delete={}.DO_NOTHING, db_column={}, related_name={}",
+                py_str(target),
+                "models",
+                py_str(&col.name),
+                py_str(&related),
+            );
+            if is_single_pk {
+                args.push_str(", primary_key=True");
+            }
+            if let Some(doc) = &col.doc {
+                args.push_str(&format!(", help_text={}", py_str(doc)));
+            }
+            let rest = format!("ForeignKey({args})");
+            lines.push(quote!($(fname.as_str()) = $models.$(rest)));
+            continue;
+        }
+
+        // scalar / enum column
+        let mut kwargs: Vec<String> = Vec::new();
+        let ctor = if let Some(en) = a.enum_by_col.get(&col.name) {
+            let ed = c.enums.iter().find(|e| &e.name == en).expect("validated");
+            let max = ed
+                .variants
+                .iter()
+                .map(|v| enum_stored(v).chars().count())
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            let choices = ed
+                .variants
+                .iter()
+                .map(|v| format!("({}, {})", py_str(&enum_stored(v)), py_str(&v.name)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            kwargs.push(format!("max_length={max}"));
+            kwargs.push(format!("choices=[{choices}]"));
+            "CharField"
+        } else {
+            let ctor = django_field(&col.ty);
+            if ctor == "DecimalField" {
+                // fluessig carries no precision; pick wide, lossless defaults.
+                kwargs.push("max_digits=38".into());
+                kwargs.push("decimal_places=9".into());
+            }
+            ctor
+        };
+        if is_single_pk {
+            kwargs.push("primary_key=True".into());
+        } else if !col.not_null {
+            kwargs.push("null=True".into());
+            kwargs.push("blank=True".into());
+        }
+        if let Some(doc) = &col.doc {
+            kwargs.push(format!("help_text={}", py_str(doc)));
+        }
+        let rest = format!("{ctor}({})", kwargs.join(", "));
+        lines.push(quote!($(col.name.as_str()) = $models.$(rest)));
+    }
+
+    if composite {
+        let members = def
+            .pk
+            .iter()
+            .map(|col| {
+                let name = a
+                    .field_name_for_col
+                    .get(col)
+                    .cloned()
+                    .unwrap_or_else(|| col.clone());
+                py_str(&name)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(quote!($("# Composite key (requires Django 5.2+ CompositePrimaryKey).")));
+        lines.push(quote!(pk = $models.$(format!("CompositePrimaryKey({members})"))));
+    }
+
+    let cls = pascal(table);
+    quote! {
+        class $(cls)($models.Model):
+            $(for l in &lines join ($['\r']) => $l)
+
+            class Meta:
+                managed = False
+                db_table = $(quoted(table))
+    }
 }
 
 /// `tables.gen.ts` — the typed `EntlTables` enum + `ENTL_TABLES`. Excludes

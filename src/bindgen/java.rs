@@ -113,7 +113,15 @@ fn is_object(t: &ApiType) -> bool {
     match t {
         ApiType::Scalar(s) => !matches!(
             s.as_str(),
-            "boolean" | "int32" | "int64" | "float64" | "void"
+            "boolean"
+                | "int32"
+                | "int64"
+                | "uint8"
+                | "uint16"
+                | "uint32"
+                | "float32"
+                | "float64"
+                | "void"
         ),
         _ => true,
     }
@@ -127,8 +135,11 @@ fn java_boxed(api: &ApiDoc, t: &ApiType) -> String {
     match t {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => "Boolean",
-            "int32" => "Integer",
-            "int64" => "Long",
+            // uint8/uint16 fit a signed `int` losslessly; uint32's full range
+            // needs `long` (JNI has no unsigned primitives).
+            "int32" | "uint8" | "uint16" => "Integer",
+            "int64" | "uint32" => "Long",
+            "float32" => "Float",
             "float64" => "Double",
             "void" => "Void",
             _ => return java_ty(api, t),
@@ -148,8 +159,9 @@ fn java_ty(api: &ApiDoc, t: &ApiType) -> String {
         ApiType::Scalar(s) => match s.as_str() {
             "string" | "Json" => "String",
             "boolean" => "boolean",
-            "int32" => "int",
-            "int64" => "long",
+            "int32" | "uint8" | "uint16" => "int",
+            "int64" | "uint32" => "long",
+            "float32" => "float",
             "float64" => "double",
             "bytes" | "ArrowBatch" => "byte[]",
             "void" => "void",
@@ -172,8 +184,9 @@ fn descriptor(t: &ApiType) -> String {
     match t {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => "Z",
-            "int32" => "I",
-            "int64" => "J",
+            "int32" | "uint8" | "uint16" => "I",
+            "int64" | "uint32" => "J",
+            "float32" => "F",
             "float64" => "D",
             "bytes" | "ArrowBatch" => "[B",
             "void" => "V",
@@ -187,8 +200,9 @@ fn descriptor(t: &ApiType) -> String {
         ApiType::Nullable { nullable } => match &**nullable {
             ApiType::Scalar(s) => match s.as_str() {
                 "boolean" => "Ljava/lang/Boolean;",
-                "int32" => "Ljava/lang/Integer;",
-                "int64" => "Ljava/lang/Long;",
+                "int32" | "uint8" | "uint16" => "Ljava/lang/Integer;",
+                "int64" | "uint32" => "Ljava/lang/Long;",
+                "float32" => "Ljava/lang/Float;",
                 "float64" => "Ljava/lang/Double;",
                 _ => return descriptor(nullable),
             }
@@ -207,8 +221,9 @@ fn jni_ret_ty(t: &ApiType) -> String {
     match t {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => "jboolean",
-            "int32" => "jint",
-            "int64" => "jlong",
+            "int32" | "uint8" | "uint16" => "jint",
+            "int64" | "uint32" => "jlong",
+            "float32" => "jfloat",
             "float64" => "jdouble",
             "bytes" | "ArrowBatch" => "jbyteArray",
             "void" => "()",
@@ -235,8 +250,8 @@ fn jni_zero(t: &ApiType) -> String {
     match t {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => "0",
-            "int32" | "int64" => "0",
-            "float64" => "0.0",
+            "int32" | "int64" | "uint8" | "uint16" | "uint32" => "0",
+            "float32" | "float64" => "0.0",
             "void" => "()",
             _ => "std::ptr::null_mut()",
         }
@@ -257,8 +272,17 @@ fn to_jobject(t: &ApiType, expr: &str) -> String {
             "int32" => format!(
                 "env.new_object(\"java/lang/Integer\", \"(I)V\", &[JValue::Int({expr})]).expect(\"box Integer\")"
             ),
+            "uint8" | "uint16" => format!(
+                "env.new_object(\"java/lang/Integer\", \"(I)V\", &[JValue::Int({expr} as i32)]).expect(\"box Integer\")"
+            ),
             "int64" => format!(
                 "env.new_object(\"java/lang/Long\", \"(J)V\", &[JValue::Long({expr})]).expect(\"box Long\")"
+            ),
+            "uint32" => format!(
+                "env.new_object(\"java/lang/Long\", \"(J)V\", &[JValue::Long({expr} as i64)]).expect(\"box Long\")"
+            ),
+            "float32" => format!(
+                "env.new_object(\"java/lang/Float\", \"(F)V\", &[JValue::Float({expr})]).expect(\"box Float\")"
             ),
             "float64" => format!(
                 "env.new_object(\"java/lang/Double\", \"(D)V\", &[JValue::Double({expr})]).expect(\"box Double\")"
@@ -296,8 +320,9 @@ fn success_expr(t: &ApiType, expr: &str) -> String {
     match t {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => format!("({expr}) as jboolean"),
-            "int32" => format!("{expr} as jint"),
-            "int64" => format!("{expr} as jlong"),
+            "int32" | "uint8" | "uint16" => format!("{expr} as jint"),
+            "int64" | "uint32" => format!("{expr} as jlong"),
+            "float32" => format!("{expr} as jfloat"),
             "float64" => format!("{expr} as jdouble"),
             "void" => "()".to_string(),
             "bytes" | "ArrowBatch" => format!(
@@ -336,8 +361,20 @@ fn from_jobject(t: &ApiType, obj: &str) -> String {
             "int32" => format!(
                 "env.call_method(&{obj}, \"intValue\", \"()I\", &[]).unwrap().i().unwrap()"
             ),
+            "uint8" => format!(
+                "env.call_method(&{obj}, \"intValue\", \"()I\", &[]).unwrap().i().unwrap() as u8"
+            ),
+            "uint16" => format!(
+                "env.call_method(&{obj}, \"intValue\", \"()I\", &[]).unwrap().i().unwrap() as u16"
+            ),
             "int64" => format!(
                 "env.call_method(&{obj}, \"longValue\", \"()J\", &[]).unwrap().j().unwrap()"
+            ),
+            "uint32" => format!(
+                "env.call_method(&{obj}, \"longValue\", \"()J\", &[]).unwrap().j().unwrap() as u32"
+            ),
+            "float32" => format!(
+                "env.call_method(&{obj}, \"floatValue\", \"()F\", &[]).unwrap().f().unwrap()"
             ),
             "float64" => format!(
                 "env.call_method(&{obj}, \"doubleValue\", \"()D\", &[]).unwrap().d().unwrap()"
@@ -377,7 +414,11 @@ fn read_field(t: &ApiType, getter: &str) -> String {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => format!("env.call_method(o, \"{getter}\", \"()Z\", &[]).unwrap().z().unwrap()"),
             "int32" => format!("env.call_method(o, \"{getter}\", \"()I\", &[]).unwrap().i().unwrap()"),
+            "uint8" => format!("env.call_method(o, \"{getter}\", \"()I\", &[]).unwrap().i().unwrap() as u8"),
+            "uint16" => format!("env.call_method(o, \"{getter}\", \"()I\", &[]).unwrap().i().unwrap() as u16"),
             "int64" => format!("env.call_method(o, \"{getter}\", \"()J\", &[]).unwrap().j().unwrap()"),
+            "uint32" => format!("env.call_method(o, \"{getter}\", \"()J\", &[]).unwrap().j().unwrap() as u32"),
+            "float32" => format!("env.call_method(o, \"{getter}\", \"()F\", &[]).unwrap().f().unwrap()"),
             "float64" => format!("env.call_method(o, \"{getter}\", \"()D\", &[]).unwrap().d().unwrap()"),
             "bytes" | "ArrowBatch" => format!(
                 "{{ let __a = env.call_method(o, \"{getter}\", \"()[B\", &[]).unwrap().l().unwrap(); \
@@ -421,7 +462,14 @@ fn model_marshallers(api: &ApiDoc, out: &mut String) {
                         format!("JValue::Bool(v.{rname} as u8)")
                     }
                     ApiType::Scalar(s) if s == "int32" => format!("JValue::Int(v.{rname})"),
+                    ApiType::Scalar(s) if s == "uint8" || s == "uint16" => {
+                        format!("JValue::Int(v.{rname} as i32)")
+                    }
                     ApiType::Scalar(s) if s == "int64" => format!("JValue::Long(v.{rname})"),
+                    ApiType::Scalar(s) if s == "uint32" => {
+                        format!("JValue::Long(v.{rname} as i64)")
+                    }
+                    ApiType::Scalar(s) if s == "float32" => format!("JValue::Float(v.{rname})"),
                     ApiType::Scalar(s) if s == "float64" => format!("JValue::Double(v.{rname})"),
                     _ => format!("JValue::Object(&__f_{rname})"),
                 };
@@ -467,7 +515,11 @@ fn marshal_param(api: &ApiDoc, p: &crate::api::ApiParam) -> (String, String) {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => ("jboolean", format!("let {n} = {n}_j != 0;")),
             "int32" => ("jint", format!("let {n} = {n}_j as i32;")),
+            "uint8" => ("jint", format!("let {n} = {n}_j as u8;")),
+            "uint16" => ("jint", format!("let {n} = {n}_j as u16;")),
             "int64" => ("jlong", format!("let {n} = {n}_j as i64;")),
+            "uint32" => ("jlong", format!("let {n} = {n}_j as u32;")),
+            "float32" => ("jfloat", format!("let {n} = {n}_j as f32;")),
             "float64" => ("jdouble", format!("let {n} = {n}_j as f64;")),
             "bytes" | "ArrowBatch" => (
                 "JByteArray<'local>",
@@ -572,6 +624,12 @@ fn emit_unary_fn(
 /// the `#[no_mangle] extern "system"` routing functions (ctor/init, unary,
 /// stream cursor poll/free) that bridge the JVM to `crate::core_impl`.
 pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+    // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
+    // today; the JNI glue holds the core in a `Send`-requiring wrapper, so java
+    // cannot bind a `!Send` core. Split it out (emit nothing) + append an honest
+    // skip-note rather than a silent `Send`-assuming handle. None ⇒ byte-identical.
+    let (api_owned, st_note) = crate::bindgen::split_single_threaded(api, "java");
+    let api = &api_owned;
     let runtime_import = RUNTIME_STREAM_IMPORT.render();
     let mut body = String::new();
 
@@ -580,7 +638,7 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         "use std::sync::Arc;\n\
          use std::time::Duration;\n\
          use jni::objects::{{JByteArray, JClass, JObject, JString, JValue}};\n\
-         use jni::sys::{{jboolean, jbyteArray, jdouble, jint, jlong, jobject, jstring}};\n\
+         use jni::sys::{{jboolean, jbyteArray, jdouble, jfloat, jint, jlong, jobject, jstring}};\n\
          use jni::JNIEnv;\n\
          {runtime_import}\n\n\
          /// A core-layer failure becomes a thrown Java `RuntimeException` (JNI is\n\
@@ -807,10 +865,11 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
     }
 
     let src = api.source.as_deref().unwrap_or("the fluessig catalog");
-    crate::rustfmt::format(format!(
+    let out = crate::rustfmt::format(format!(
         "//! GENERATED by fluessig bindgen from {src} (api layer, Rust JNI glue). Do not edit.\n{}#![allow(clippy::all)]\n#![allow(unused_imports)]\n#![allow(unused_variables)]\n#![allow(unused_mut)]\n#![allow(non_snake_case)]\n#![allow(dead_code)]\n\n{body}",
         note_line(banner_note)
-    ))
+    ));
+    format!("{out}{st_note}")
 }
 
 /// Emit a stateful unary op's JNI fn: dereference the `handle` into the core
@@ -869,6 +928,11 @@ fn emit_unary_stateful(
 /// wrappers for async ops, and a poll-cursor class per stream op). Returned as
 /// `(relative_path, source)` pairs under the `fluessig/` package dir.
 pub fn java_sources(api: &ApiDoc, enums: &[EnumDesc]) -> Vec<(String, String)> {
+    // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
+    // today; the Rust JNI glue (`java_binding`) emits nothing for it, so no `.java`
+    // handle class must be generated either (it would reference absent JNI symbols).
+    let (api_owned, _st_note) = crate::bindgen::split_single_threaded(api, "java");
+    let api = &api_owned;
     let mut files: Vec<(String, String)> = Vec::new();
     let path = |cls: &str| format!("{PACKAGE}/{cls}.java");
 

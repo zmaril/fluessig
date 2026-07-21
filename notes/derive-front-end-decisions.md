@@ -351,3 +351,65 @@ callback bridge stays `@manual` by design).
   bool to `ok: boolean` in its `.d.ts` (the same limitation the structured-union `type: string` tags
   hit) — the exact `ok: true` / `ok: false` discrimination is an external-`.d.ts` concern, out of
   scope here; the structural `{ ok, value } | { ok, error }` shape is exact.
+
+### `#[fluessig(single_threaded)]` — a thread-confined handle over a `!Send` core (node)
+
+Some native cores are inherently thread-local. pidgin's UI-state cores — `TuiCore`
+(`Tui<LoggingTerminal>` with `Rc<RefCell<dyn Component>>` + boxed non-Send closures),
+`InputCore`, `SelectListCore` — are `!Send`. napi CLASS instances are thread-confined (they
+never cross threads), so a hand-written `#[napi]` class can hold such a core fine (atilla's
+`crates/atilla-napi/src/tui.rs` does exactly this: `struct TuiCore { tui: Tui<LoggingTerminal> }`,
+`&mut self` methods, no `Arc`). But fluessig's ORDINARY generated handle holds the core as
+`Arc<crate::core_impl::<Iface>Impl>`, which forces `Impl: Send + Sync` — needed only for the ASYNC
+projection, where the `Arc` clones onto a threadpool worker. That is a hard `!Send` wall a `Mutex`
+cannot fix, so those cores could be hand-written but not GENERATED.
+
+`#[fluessig(single_threaded)]` is an **interface-level** marker on the exported `impl` block (the
+op flags — `ctor`/`stream`/`async`/`readonly`/… — ride the METHODS; this one rides the impl),
+consistent with the `#59`/`#69`/`#74` per-op-flag precedent. It lowers to
+`api.json`'s `ApiInterface.single_threaded` (skip-if-false, so every existing interface stays
+byte-identical) and, on the **node backend only**, projects a THREAD-CONFINED handle:
+
+- the generated `<Iface>Core` trait sheds `Send + Sync` (`pub trait TuiCore: Sized + 'static`), so
+  a `!Send` core can implement it, and its handle-bound ops take `&mut self`;
+- the handle holds the core by plain ownership inside a `RefCell` — `pub(crate) core:
+  RefCell<crate::core_impl::TuiImpl>`, **no `Arc`, no `Send`/`Sync`** — and its `&self` napi methods
+  reach `&mut` through `borrow_mut()` (`self.core.borrow_mut().tick()`); the ctor builds
+  `RefCell::new(<Impl as Core>::open(…)?)`.
+
+Proven end to end in `crates/derive-demo/src/single_threaded.rs` (a genuinely `!Send` `Tui` core:
+`PhantomData<*const ()>` + `Rc<RefCell<…>>`), `crates/derive-demo/tests/api_gate.rs`, and the byte
+goldens in `tests/single_threaded.rs`. It **unblocks pidgin's UI-state handle classes** and is
+**node-only for now** (extendable when another thread-confined runtime needs it).
+
+**Node-only, fail LOUD elsewhere (honest capability edge).** A thread-confined `!Send` handle is a
+node concept; every other backend's handle wrapper (`#[pyclass]`, `#[php_class]`, `#[wasm_bindgen]`,
+the JNI/C++ glue) would hold the core in a `Send`-requiring form. So python/php/ruby/wasm/java/cpp
+do NOT silently emit a `Send`-assuming handle for a single_threaded interface (which would break the
+consumer's build with a confusing downstream error) — they emit NOTHING for it plus an explicit
+skip-note, e.g. `// interface \`Tui\` is #[fluessig(single_threaded)] (a thread-confined \`!Send\`
+handle) — not supported by the python backend (node-only today); no binding emitted.`
+
+**Rejected marker combinations.** A single_threaded interface may carry ONLY synchronous ops — an
+async or stream op needs a `Send` core for the threadpool, incompatible with a thread-confined
+`!Send` handle. The derive macro rejects the authoring path with a SPANNED compile error at the
+offending method; the loader (`load_api`) re-checks the lowered / hand-written `api.json`. The
+actual messages a developer sees, verbatim:
+
+- `#[fluessig(single_threaded)]` + an `#[fluessig(async)]` op (macro, spanned at the method):
+
+  > `#[fluessig(single_threaded)] interface: an async op is not allowed — a thread-confined \`!Send\` handle cannot serve an async op (the async projection clones the core onto a threadpool worker, which requires a \`Send\` core). Drop #[fluessig(async)], or drop #[fluessig(single_threaded)]`
+
+- `#[fluessig(single_threaded)]` + an `#[fluessig(stream)]` op (macro, spanned at the method):
+
+  > `#[fluessig(single_threaded)] interface: a stream op is not allowed — a thread-confined \`!Send\` handle cannot serve a stream op (streams poll off a threadpool worker, which requires a \`Send\` core). Drop #[fluessig(stream)], or drop #[fluessig(single_threaded)]`
+
+- the same surface reaching the loader as `api.json` (an async or stream op on a
+  `single_threaded` interface):
+
+  > `op \`Tui.slow\`: a #[fluessig(single_threaded)] interface may carry only synchronous ops — an async or stream op needs a \`Send\` core for the threadpool, which is incompatible with a thread-confined \`!Send\` handle`
+
+An unknown interface tag is likewise rejected, e.g. an op flag mistakenly placed on the `impl`:
+`unknown interface tag \`readonly\` — the only #[fluessig(…)] tag on an exported \`impl\` block is
+#[fluessig(single_threaded)] (the thread-confined handle opt-in). Op markers (ctor / stream / async
+/ readonly / …) ride the METHODS, not the impl`.

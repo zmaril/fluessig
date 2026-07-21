@@ -366,7 +366,12 @@ fn ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
             "boolean" => ("bool".into(), "boolean".into()),
             "int32" => ("i32".into(), "number".into()),
             "int64" => ("i64".into(), "number".into()),
-            "float64" => ("f64".into(), "number".into()),
+            "uint8" => ("u8".into(), "number".into()),
+            "uint16" => ("u16".into(), "number".into()),
+            "uint32" => ("u32".into(), "number".into()),
+            "float32" => ("f32".into(), "number".into()),
+            // `float` is TypeSpec's f64 alias; both spell an f64 → `number`.
+            "float64" | "float" => ("f64".into(), "number".into()),
             "Json" => ("String".into(), "string".into()), // JSON text payload
             "bytes" => ("Bytes".into(), "Buffer".into()),
             "void" => ("()".into(), "void".into()),
@@ -454,6 +459,34 @@ pub(super) fn param_sig_with(
         .collect()
 }
 
+/// Split a `#[fluessig(single_threaded)]` interface out of the surface a NON-node
+/// backend emits. A thread-confined `!Send` handle is node-only today: every
+/// other backend's handle wrapper (`#[pyclass]`, `#[php_class]`,
+/// `#[wasm_bindgen]`, the JNI/C++ glue) would hold the core in a form that
+/// requires `Send`, so a `!Send` core cannot be bound. Per the honest-capability-
+/// edge doctrine, such a backend must NOT silently emit a `Send`-assuming handle
+/// (which would break the consumer's build with a confusing downstream error) —
+/// it emits an explicit skip-note and binds NOTHING for the interface (no trait,
+/// no handle). Returns `(filtered_api, skip_note)`: run the backend's normal
+/// emission over `filtered_api`, then append `skip_note` (a block of `//`
+/// comments, empty when no interface is single_threaded ⇒ output byte-identical).
+pub(super) fn split_single_threaded(api: &ApiDoc, lang: &str) -> (ApiDoc, String) {
+    let mut note = String::new();
+    for i in &api.interfaces {
+        if i.single_threaded {
+            note.push_str(&format!(
+                "// interface `{}` is #[fluessig(single_threaded)] (a thread-confined `!Send` \
+                 handle) — not supported by the {lang} backend (node-only today); no binding \
+                 emitted.\n",
+                i.name
+            ));
+        }
+    }
+    let mut filtered = api.clone();
+    filtered.interfaces.retain(|i| !i.single_threaded);
+    (filtered, note)
+}
+
 /// Emit the `<Interface>Core` traits, resolving each op's return type via
 /// `ret_ty`. This is the single shared spine every language's generated file
 /// drives (the traits are implemented once per binding via
@@ -491,6 +524,14 @@ pub(super) fn emit_core_traits_full(
     for i in &api.interfaces {
         let trait_name = format!("{}Core", i.name);
         let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
+        // A `single_threaded` interface lowers to a THREAD-CONFINED handle: the
+        // generated node class holds the core in a `RefCell` and reaches it via
+        // `borrow_mut()`, so its handle-bound ops take `&mut self` (not `&self`),
+        // and the trait sheds its `Send + Sync` supertraits — the whole point is
+        // that a `!Send` core can implement it. Guaranteed sync-only + ctor-having
+        // by the derive macro + loader, so only the `has_ctor` `&self` arms flip.
+        let st = i.single_threaded;
+        let recv = if st { "&mut self" } else { "&self" };
         let mut methods: Vec<rust::Tokens> = Vec::new();
         for op in &i.ops {
             if op.shape == Shape::Manual {
@@ -515,7 +556,7 @@ pub(super) fn emit_core_traits_full(
                 // instead of throwing. Rides the same `has_ctor` receiver split.
                 _ if re.is_some() && has_ctor => {
                     format!(
-                        "fn {name}(&self, {ps}) -> ::core::result::Result<{ret}, {}>",
+                        "fn {name}({recv}, {ps}) -> ::core::result::Result<{ret}, {}>",
                         re.as_deref().unwrap()
                     )
                 }
@@ -529,17 +570,25 @@ pub(super) fn emit_core_traits_full(
                 // drops the `Result` seam entirely — the core method IS the value.
                 // `infallible` is only ever set on a unary op, so this rides the
                 // same `has_ctor` receiver split as the fallible unary arms below.
-                _ if has_ctor && op.infallible => format!("fn {name}(&self, {ps}) -> {ret}"),
+                _ if has_ctor && op.infallible => format!("fn {name}({recv}, {ps}) -> {ret}"),
                 _ if op.infallible => format!("fn {name}({ps}) -> {ret}"),
-                _ if has_ctor => format!("fn {name}(&self, {ps}) -> anyhow::Result<{ret}>"),
+                _ if has_ctor => format!("fn {name}({recv}, {ps}) -> anyhow::Result<{ret}>"),
                 _ => format!("fn {name}({ps}) -> anyhow::Result<{ret}>"),
             };
             methods.push(quote!($sig;));
         }
+        // A single_threaded core is thread-confined — it must NOT require
+        // `Send + Sync` (that is the wall this variant tears down); an ordinary
+        // async-capable core keeps them (its `Arc<Impl>` crosses to a worker).
+        let bounds = if st {
+            "Sized + 'static"
+        } else {
+            "Sized + Send + Sync + 'static"
+        };
         quote_in! { *t =>
             $['\r']
             $(format!("/// The `{}` contract — implement over the engine in `crate::core_impl`.", i.name))
-            pub trait $(&trait_name): Sized + Send + Sync + $("'static") {
+            pub trait $(&trait_name): $(bounds) {
                 $(for m in &methods join ($['\r']) => $m)
             }
             $['\n']

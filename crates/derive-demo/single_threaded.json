@@ -1,0 +1,58 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "single_threaded_demo",
+  "models": [],
+  "unions": [],
+  "interfaces": [
+    {
+      "name": "Tui",
+      "doc": "A thread-confined TUI renderer over a `!Send` core. Sync ops only — the whole\npoint of `single_threaded` is that no op crosses to a threadpool worker.",
+      "single_threaded": true,
+      "ops": [
+        {
+          "name": "open",
+          "doc": "Build a renderer over an in-memory terminal of `cols` x `rows`.",
+          "shape": "ctor",
+          "params": [
+            {
+              "name": "cols",
+              "type": "int64"
+            },
+            {
+              "name": "rows",
+              "type": "int64"
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "tick",
+          "doc": "Render one frame; return the running total of bytes written. Mutates the\nshared frame buffer via the core's own interior mutability, so on the node\nhandle this is a `&self` method reaching `&mut` through `borrow_mut()`.",
+          "shape": "unary",
+          "infallible": true,
+          "params": [],
+          "returns": "int64"
+        },
+        {
+          "name": "setSize",
+          "doc": "Resize the terminal the next render reads — a fallible sync op (a bad size\nis rejected), so it keeps the throwing seam without any async.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "cols",
+              "type": "int64"
+            },
+            {
+              "name": "rows",
+              "type": "int64"
+            }
+          ],
+          "returns": "boolean"
+        }
+      ]
+    }
+  ]
+}

@@ -751,3 +751,53 @@ fn result_envelope_is_node_only_and_opt_in() {
         "ruby must not emit the node-only envelope\n{ruby}"
     );
 }
+
+/// The `#[fluessig(single_threaded)]` authoring path (this PR): the derive-emitted
+/// `api.json` for the `single_threaded` demo carries the interface flag, and the
+/// node backend projects it into a THREAD-CONFINED handle over the genuinely
+/// `!Send` `Tui` core — NO `Arc`, NO `Send`/`Sync` bound, core held in a
+/// `RefCell`. This ties the macro parse → api.json → node emission end to end
+/// (the byte goldens live in the top-level `tests/single_threaded.rs`).
+#[test]
+fn single_threaded_marker_lowers_and_projects_a_thread_confined_handle() {
+    let api = load_api(&derive_demo::single_threaded::fluessig_catalog::api_to_json()).unwrap();
+    let tui = api.interfaces.iter().find(|i| i.name == "Tui").unwrap();
+
+    // the marker lowered onto the interface, and the interface is sync-only.
+    assert!(tui.single_threaded, "Tui must carry single_threaded:true");
+    assert!(
+        tui.ops
+            .iter()
+            .all(|o| !o.is_async && o.shape != Shape::Stream),
+        "a single_threaded interface must be sync-only"
+    );
+
+    // node projects the thread-confined handle.
+    let node = node_binding(&api, &[], None);
+    assert!(
+        node.contains("pub trait TuiCore: Sized + 'static {"),
+        "single_threaded core trait must drop Send + Sync:\n{node}"
+    );
+    assert!(
+        node.contains("pub(crate) core: RefCell<crate::core_impl::TuiImpl>,"),
+        "single_threaded handle must hold the core in a RefCell (no Arc):\n{node}"
+    );
+    assert!(
+        !node.contains("Arc<crate::core_impl::TuiImpl>") && !node.contains("use std::sync::Arc;"),
+        "single_threaded handle must not use Arc at all:\n{node}"
+    );
+    assert!(
+        node.contains("self.core.borrow_mut().tick()"),
+        "single_threaded &self methods reach the core via borrow_mut():\n{node}"
+    );
+
+    // an ordinary (async-capable) interface is UNCHANGED — the demo `Db` still
+    // holds its core as `Arc<Impl>` with a `Send + Sync` trait.
+    let db_api = load_api(&derive_demo::api::fluessig_catalog::api_to_json()).unwrap();
+    let db_node = node_binding(&db_api, &[], None);
+    assert!(
+        db_node.contains("pub(crate) core: Arc<crate::core_impl::DbImpl>,")
+            && db_node.contains("pub trait DbCore: Sized + Send + Sync + 'static {"),
+        "an ordinary handle must still hold Arc<Impl> with a Send+Sync core trait:\n{db_node}"
+    );
+}

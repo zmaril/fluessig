@@ -26,6 +26,7 @@ mod node;
 mod php;
 mod python;
 mod ruby;
+mod ruby_callback;
 mod rust_core;
 mod wasm;
 

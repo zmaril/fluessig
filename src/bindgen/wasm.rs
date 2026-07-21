@@ -312,6 +312,16 @@ fn manual_note(op: &ApiOp) -> String {
     )
 }
 
+/// A `Shape::Subscription` op: register/unsubscribe lowering is deferred to a
+/// follow-up PR for the wasm backend (node/python lower it today). The op is
+/// recorded but not auto-bound, keeping the crate compiling.
+fn subscription_skip(op: &ApiOp) -> String {
+    format!(
+        "// subscription op `{}` — register/unsubscribe lowering deferred (node/python only today).\n",
+        op.name
+    )
+}
+
 /// Generate the wasm-bindgen binding with default options (structured tagged
 /// unions). A thin wrapper over [`wasm_binding_with_options`].
 pub fn wasm_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
@@ -561,6 +571,7 @@ pub fn wasm_binding_with_options(
                         body.push_str(&render_unary(api, &opts, op, &call, true));
                     }
                     Shape::Stream => body.push_str(&stream_skip(op)),
+                    Shape::Subscription => body.push_str(&subscription_skip(op)),
                     Shape::Manual => body.push_str(&manual_note(op)),
                 }
                 body.push('\n');
@@ -575,6 +586,7 @@ pub fn wasm_binding_with_options(
                         body.push_str(&render_unary(api, &opts, op, &call, false));
                     }
                     Shape::Stream => body.push_str(&stream_skip(op)),
+                    Shape::Subscription => body.push_str(&subscription_skip(op)),
                     Shape::Manual => body.push_str(&manual_note(op)),
                     // A ctor in a would-be stateless interface flips has_ctor,
                     // so this arm is unreachable; skip it defensively.

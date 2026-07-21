@@ -47,6 +47,12 @@ pub mod native;
 /// `{ ok, value } | { ok, error }` envelope, proven in `tests/api_gate.rs`.
 pub mod binary;
 
+/// `#[fluessig(single_threaded)]` (this PR): a THREAD-CONFINED handle over a
+/// genuinely `!Send` core (pidgin's `TuiCore` shape). The node backend generates
+/// it holding the core in a `RefCell` without `Arc`/`Send`/`Sync`; proven in
+/// `tests/single_threaded.rs`.
+pub mod single_threaded;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

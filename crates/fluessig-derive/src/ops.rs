@@ -37,6 +37,13 @@ pub struct InterfaceDescriptor {
     pub doc: Option<&'static str>,
     /// The captured ops, in declaration order.
     pub ops: &'static [OpDescriptor],
+    /// `#[fluessig(single_threaded)]` on the exported `impl` — lower to a
+    /// THREAD-CONFINED handle class (node-only today): the generated napi handle
+    /// holds the core by plain ownership inside a `RefCell`, WITHOUT
+    /// `Arc`/`Send`/`Sync`, so a `!Send` core can be generated. Lowered to
+    /// [`fluessig::api::ApiInterface::single_threaded`]. `false` (the default) ⇒
+    /// the ordinary async-capable handle, byte-identical to before this flag.
+    pub single_threaded: bool,
     /// The `.rs` source location of the exported `impl` block (Slice 6).
     pub span: SourceSpan,
 }
@@ -294,6 +301,7 @@ pub fn build_api_typed(
         .map(|i| ApiInterface {
             name: i.name.to_string(),
             doc: i.doc.map(str::to_string),
+            single_threaded: i.single_threaded,
             ops: i.ops.iter().map(|op| lower_op(op, &resolver)).collect(),
         })
         .collect();

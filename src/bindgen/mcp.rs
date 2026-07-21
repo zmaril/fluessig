@@ -52,7 +52,7 @@ fn mentions_binary(api: &ApiDoc, t: &ApiType, seen: &mut Vec<String>) -> bool {
             .iter()
             .find(|u| &u.name == union)
             .is_some_and(|u| u.variants.iter().any(|v| mentions_binary(api, &v.ty, seen))),
-        ApiType::Enum { .. } => false,
+        ApiType::Enum { .. } | ApiType::Foreign { .. } => false,
     }
 }
 
@@ -83,8 +83,8 @@ fn schema_of(
         ApiType::Scalar(s) => match s.as_str() {
             "string" => json!({"type": "string"}),
             "boolean" => json!({"type": "boolean"}),
-            "int32" | "int64" => json!({"type": "integer"}),
-            "float64" => json!({"type": "number"}),
+            "int32" | "int64" | "uint8" | "uint16" | "uint32" => json!({"type": "integer"}),
+            "float32" | "float64" | "float" => json!({"type": "number"}),
             "utcDateTime" | "offsetDateTime" => json!({"type": "string", "format": "date-time"}),
             "Json" => json!({"description": "opaque JSON"}),
             "void" => json!({"type": "null"}),
@@ -173,6 +173,9 @@ fn schema_of(
             sch.insert("oneOf".into(), Value::Array(branches));
             Value::Object(sch)
         }
+        // A foreign type has no JSON projection MCP can speak — an opaque handle
+        // lives only in rust-core — so it surfaces as an opaque description.
+        ApiType::Foreign { .. } => json!({"description": "opaque handle"}),
     }
 }
 
@@ -258,7 +261,11 @@ fn rust_ty(t: &ApiType) -> String {
             "boolean" => "bool".into(),
             "int32" => "i32".into(),
             "int64" => "i64".into(),
-            "float64" => "f64".into(),
+            "uint8" => "u8".into(),
+            "uint16" => "u16".into(),
+            "uint32" => "u32".into(),
+            "float32" => "f32".into(),
+            "float64" | "float" => "f64".into(),
             "Json" => "serde_json::Value".into(),
             "void" => "()".into(),
             _ => "String".into(),
@@ -269,6 +276,8 @@ fn rust_ty(t: &ApiType) -> String {
         ApiType::Nullable { nullable } => format!("Option<{}>", rust_ty(nullable)),
         // the JSON envelope {"kind": tag, "payload": body}, as a Value
         ApiType::Union { .. } => "serde_json::Value".into(),
+        // a foreign handle has no MCP projection; carried as its string form
+        ApiType::Foreign { .. } => "String".into(),
     }
 }
 

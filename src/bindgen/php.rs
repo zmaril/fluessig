@@ -27,8 +27,8 @@ fn php_doc_ty(t: &ApiType) -> String {
         ApiType::Scalar(s) => match s.as_str() {
             "string" | "Json" => "string",
             "boolean" => "bool",
-            "int32" | "int64" => "int",
-            "float64" => "float",
+            "int32" | "int64" | "uint8" | "uint16" | "uint32" => "int",
+            "float32" | "float64" | "float" => "float",
             "bytes" => "string",
             "void" => "void",
             _ => "string",
@@ -38,7 +38,8 @@ fn php_doc_ty(t: &ApiType) -> String {
         ApiType::Enum { .. } => "string".to_string(),
         ApiType::List { .. } => "array".to_string(),
         ApiType::Nullable { nullable } => format!("?{}", php_doc_ty(nullable)),
-        ApiType::Union { .. } => "string".to_string(),
+        // a union envelope and a foreign handle both ride the string carrier here
+        ApiType::Union { .. } | ApiType::Foreign { .. } => "string".to_string(),
     }
 }
 

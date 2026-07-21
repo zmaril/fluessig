@@ -32,11 +32,11 @@ const LANG: &str = "java";
 /// The generated Java package. Single-segment so the JNI symbol mangling
 /// (`Java_<pkg>_<Class>_<method>`) stays free of `_1` escapes — the Rust glue's
 /// `#[no_mangle]` names line up with `javac -h` byte-for-byte.
-const PACKAGE: &str = "fluessig";
+pub(super) const PACKAGE: &str = "fluessig";
 
 /// The shared library name every generated interface class loads
 /// (`System.loadLibrary("fluessig")`) — the cdylib the Rust glue compiles to.
-const LIB: &str = "fluessig";
+pub(super) const LIB: &str = "fluessig";
 
 // ── identifier casing ────────────────────────────────────────────────────────
 
@@ -131,7 +131,7 @@ fn is_object(t: &ApiType) -> bool {
 
 /// The boxed Java type for a slot that must hold a reference (a `List<T>`
 /// element, or a nullable value): `int` → `Integer`, else the plain spelling.
-fn java_boxed(api: &ApiDoc, t: &ApiType) -> String {
+pub(super) fn java_boxed(api: &ApiDoc, t: &ApiType) -> String {
     match t {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => "Boolean",
@@ -172,9 +172,11 @@ fn java_ty(api: &ApiDoc, t: &ApiType) -> String {
         ApiType::Enum { .. } => "String".to_string(),
         ApiType::List { list } => format!("List<{}>", java_boxed(api, list)),
         ApiType::Nullable { nullable } => java_boxed(api, nullable),
-        ApiType::Union { .. } | ApiType::Foreign { .. } | ApiType::Callback { .. } => {
-            "String".to_string()
-        }
+        // A callback param is the Java functional interface the host supplies
+        // (a `Consumer<Boxed>` for the one-arg forward-only shape); the Rust glue
+        // wraps it into the uniform core `Box<dyn Fn(..)>`.
+        ApiType::Callback { callback } => super::java_callback::callback_java_type(api, callback),
+        ApiType::Union { .. } | ApiType::Foreign { .. } => "String".to_string(),
     }
 }
 
@@ -198,9 +200,9 @@ fn descriptor(t: &ApiType) -> String {
         ApiType::Model { model } => format!("L{PACKAGE}/{model};"),
         ApiType::Enum { .. } => "Ljava/lang/String;".to_string(),
         ApiType::List { .. } => "Ljava/util/List;".to_string(),
-        ApiType::Union { .. } | ApiType::Foreign { .. } | ApiType::Callback { .. } => {
-            "Ljava/lang/String;".to_string()
-        }
+        // A callback param crosses as the `java.util.function.Consumer` object.
+        ApiType::Callback { .. } => "Ljava/util/function/Consumer;".to_string(),
+        ApiType::Union { .. } | ApiType::Foreign { .. } => "Ljava/lang/String;".to_string(),
         ApiType::Nullable { nullable } => match &**nullable {
             ApiType::Scalar(s) => match s.as_str() {
                 "boolean" => "Ljava/lang/Boolean;",
@@ -268,7 +270,7 @@ fn jni_zero(t: &ApiType) -> String {
 /// A Rust expression producing a `JObject` from `expr` (of the Rust type
 /// [`ty`] resolves) — used for `List` elements and nullable payloads, boxing
 /// primitives into their wrapper classes.
-fn to_jobject(t: &ApiType, expr: &str) -> String {
+pub(super) fn to_jobject(t: &ApiType, expr: &str) -> String {
     match t {
         ApiType::Scalar(s) => match s.as_str() {
             "boolean" => format!(
@@ -513,8 +515,17 @@ fn model_marshallers(api: &ApiDoc, out: &mut String) {
 }
 
 /// A JNI param declaration + its conversion-to-Rust statement, for one op param.
-fn marshal_param(api: &ApiDoc, p: &crate::api::ApiParam) -> (String, String) {
+pub(super) fn marshal_param(api: &ApiDoc, p: &crate::api::ApiParam) -> (String, String) {
     let n = snake(&p.name);
+    // A `Callback` param crosses in as a `JObject` (the Java `Consumer`) and is
+    // wrapped — via a global ref + captured `JavaVM` — into the uniform core
+    // `Box<dyn Fn(..) + Send + Sync>` shape node/python/cpp all target.
+    if let ApiType::Callback { callback } = &p.ty {
+        return (
+            format!("{n}_j: JObject<'local>"),
+            super::java_callback::rust_callback_conv(api, callback, &n),
+        );
+    }
     let t = param_ty(p);
     let (jni_ty, conv): (&str, String) = match &t {
         ApiType::Scalar(s) => match s.as_str() {
@@ -568,7 +579,7 @@ fn from_jobject_param(_api: &ApiDoc, t: &ApiType, obj: &str) -> String {
 }
 
 /// The `Java_<pkg>_<Class>_<method>` symbol for a JNI extern fn.
-fn jni_symbol(class: &str, method: &str) -> String {
+pub(super) fn jni_symbol(class: &str, method: &str) -> String {
     format!("Java_{PACKAGE}_{class}_{method}")
 }
 
@@ -653,6 +664,13 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
          fn throw(env: &mut JNIEnv, e: impl std::fmt::Display) {{\n    \
          let _ = env.throw_new(\"java/lang/RuntimeException\", e.to_string());\n}}\n\n"
     ));
+
+    // The opaque `Subscription` handle + its `nativeUnsubscribe`/`nativeFree` JNI
+    // fns, emitted once whenever the surface has a `Shape::Subscription` op —
+    // gated so a subscription-free schema stays byte-identical.
+    if crate::bindgen::api_uses_subscription(api) {
+        body.push_str(&super::java_callback::subscription_rust_prelude());
+    }
 
     // enums: plain Rust enum + parse/wire (Java sees the wire token as a String;
     // the standalone Java `enum` class provides fromWire/toWire).
@@ -797,9 +815,23 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         // unary + stream-open methods.
         for op in &i.ops {
             match op.shape {
-                // Subscription lowering deferred to a follow-up PR for java; no JNI
-                // symbol emitted (node/python only today), like the ctor/manual arms.
-                Shape::Ctor | Shape::Manual | Shape::Subscription => {}
+                // Ctor is emitted above; a @manual op is hand-written outside the
+                // generated surface.
+                Shape::Ctor | Shape::Manual => {}
+                // A subscription op REGISTERS the listener (its one callback param,
+                // wrapped into the uniform `Box<dyn Fn>`) and hands Java an opaque
+                // `long` Subscription handle owning the core's unsubscribe closure.
+                Shape::Subscription => {
+                    super::java_callback::emit_subscription_jni(
+                        api,
+                        &i.name,
+                        op,
+                        &impl_path,
+                        &trait_name,
+                        has_ctor,
+                        &mut body,
+                    );
+                }
                 Shape::Unary => {
                     // async ops route through a `native<Pascal>` symbol (the Java
                     // side wraps them in a CompletableFuture); sync ops use the
@@ -935,6 +967,21 @@ fn emit_unary_stateful(
 /// wrappers for async ops, and a poll-cursor class per stream op). Returned as
 /// `(relative_path, source)` pairs under the `fluessig/` package dir.
 pub fn java_sources(api: &ApiDoc, enums: &[EnumDesc]) -> Vec<(String, String)> {
+    java_sources_with(api, enums, None)
+}
+
+/// [`java_sources`] with the caller's optional banner note (a lint-suppression
+/// marker) prepended to every emitted `.java` file as a `//` comment — the Java
+/// parallel to the Rust glue's `//!` banner. The generated per-interface classes
+/// repeat a fixed handle/ctor/close + native-decl template across interfaces (the
+/// language × shape grid), which a duplication linter flags; a consumer passes
+/// e.g. `straitjacket-allow-file:duplication` here to mark that as intentional.
+/// `None` ⇒ no comment, so a note-free caller's output stays byte-identical.
+pub fn java_sources_with(
+    api: &ApiDoc,
+    enums: &[EnumDesc],
+    banner_note: Option<&str>,
+) -> Vec<(String, String)> {
     // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
     // today; the Rust JNI glue (`java_binding`) emits nothing for it, so no `.java`
     // handle class must be generated either (it would reference absent JNI symbols).
@@ -1033,6 +1080,15 @@ pub fn java_sources(api: &ApiDoc, enums: &[EnumDesc]) -> Vec<(String, String)> {
         files.push((path(&u.name), src));
     }
 
+    // the opaque Subscription handle class, once, whenever a subscription op
+    // exists (gated so a subscription-free schema emits no extra file).
+    if crate::bindgen::api_uses_subscription(api) {
+        files.push((
+            path("Subscription"),
+            super::java_callback::subscription_java_class(),
+        ));
+    }
+
     // interfaces → the native-method surface.
     for i in &api.interfaces {
         files.push((path(&i.name), java_interface_class(api, i)));
@@ -1060,6 +1116,14 @@ pub fn java_sources(api: &ApiDoc, enums: &[EnumDesc]) -> Vec<(String, String)> {
                 op = op.name,
             );
             files.push((path(&class), src));
+        }
+    }
+
+    // Prepend the caller's banner note (a `//` comment, legal before `package`)
+    // to every file; `None` leaves the output byte-identical.
+    if let Some(note) = banner_note {
+        for (_, src) in files.iter_mut() {
+            *src = format!("// {note}\n{src}");
         }
     }
 
@@ -1118,12 +1182,29 @@ fn java_interface_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
                     i.name, op.name
                 ));
             }
-            // Subscription (register/unsubscribe) lowering deferred to a follow-up
-            // PR for java; emit a skip-note so the op is recorded but not bound.
+            // A subscription op: a `native<Op>` returning the opaque handle `long`,
+            // wrapped in a public method that hands back a `Subscription` object.
             Shape::Subscription => {
+                let jname = op_jname(op);
+                let native = format!("native{}", pascal(&op.name));
+                let native_decl_params = native_params(api, op, has_ctor);
+                natives.push_str(&format!(
+                    "    private static native long {native}({native_decl_params});\n"
+                ));
+                let handle_arg = if has_ctor { "this.handle" } else { "" };
+                let sep = if has_ctor && !op.params.is_empty() {
+                    ", "
+                } else {
+                    ""
+                };
+                let wrapper_mod = if has_ctor { "" } else { "static " };
                 methods.push_str(&format!(
-                    "    // subscription: {}.{} — register/unsubscribe lowering deferred (node/python only today).\n\n",
-                    i.name, op.name
+                    "    /** Register a listener on `{iface}.{op}`; returns an owning Subscription. */\n    \
+                     public {wrapper_mod}Subscription {jname}({params}) {{ return new Subscription({native}({handle_arg}{sep}{args})); }}\n\n",
+                    iface = i.name,
+                    op = op.name,
+                    params = jparams(op),
+                    args = jargs(op),
                 ));
             }
             Shape::Unary => {
@@ -1267,7 +1348,7 @@ fn java_interface_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
 
 /// The native-method param list for an op on the Java side (a stateful op leads
 /// with `long handle`).
-fn native_params(api: &ApiDoc, op: &ApiOp, has_ctor: bool) -> String {
+pub(super) fn native_params(api: &ApiDoc, op: &ApiOp, has_ctor: bool) -> String {
     let mut ps: Vec<String> = Vec::new();
     if has_ctor {
         ps.push("long handle".to_string());

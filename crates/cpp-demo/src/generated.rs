@@ -50,6 +50,53 @@ pub enum FlPoll {
     Failed = 3,
 }
 
+use std::os::raw::c_void;
+
+/// A C callback context pointer, made `Send`/`Sync` because the C caller owns
+/// thread-safety at the ABI boundary (the boxed closure below is what the core sees).
+struct CbCtx(*mut c_void);
+unsafe impl Send for CbCtx {}
+unsafe impl Sync for CbCtx {}
+impl CbCtx {
+    /// The raw context pointer, read through a method so a `move` closure captures
+    /// the WHOLE `CbCtx` (which is `Send + Sync`). Reaching `ctx.0` directly would,
+    /// under RFC 2229 disjoint capture, capture only the non-`Send` `*mut c_void`.
+    fn ptr(&self) -> *mut c_void {
+        self.0
+    }
+}
+
+/// An opaque subscription handle owning the core's returned unsubscribe closure.
+pub struct Subscription {
+    unsub: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+/// Run the unsubscribe closure early (idempotent — a second call is a no-op).
+#[no_mangle]
+pub unsafe extern "C" fn Subscription_unsubscribe(s: *mut Subscription) {
+    if s.is_null() {
+        return;
+    }
+    let s = &*s;
+    let taken = s.unsub.lock().unwrap().take();
+    if let Some(f) = taken {
+        f();
+    }
+}
+
+/// Free the subscription handle, unsubscribing if still live.
+#[no_mangle]
+pub unsafe extern "C" fn Subscription_free(s: *mut Subscription) {
+    if s.is_null() {
+        return;
+    }
+    let s = Box::from_raw(s);
+    let taken = s.unsub.lock().unwrap().take();
+    if let Some(f) = taken {
+        f();
+    }
+}
+
 /// The `list<String>` carrier across the C ABI (free with `fl_string_list_free`).
 #[repr(C)]
 pub struct FlStringList {
@@ -112,6 +159,16 @@ pub trait StoreCore: Sized + Send + Sync + 'static {
     fn remove_all(&self, keys: Vec<String>) -> i32;
     fn count(&self) -> i32;
     fn contains(&self, key: String) -> bool;
+}
+
+/// The `Ticker` contract — implement over the engine in `crate::core_impl`.
+pub trait TickerCore: Sized + Send + Sync + 'static {
+    fn new() -> anyhow::Result<Self>;
+    fn on_tick(
+        &self,
+        listener: Box<dyn Fn(i32) + Send + Sync>,
+    ) -> anyhow::Result<Box<dyn Fn() + Send + Sync>>;
+    fn tick(&self) -> ();
 }
 
 /// An in-memory key/value store. `put`/`get` are fallible (the error seam); the
@@ -253,6 +310,90 @@ pub unsafe extern "C" fn Store_contains(
 /// Release the `Store` handle.
 #[no_mangle]
 pub unsafe extern "C" fn Store_free(p: *mut crate::core_impl::StoreImpl) {
+    if !p.is_null() {
+        drop(Box::from_raw(p));
+    }
+}
+
+/// A stateful ticker that fires registered listeners with an incrementing
+/// counter. `on_tick` is a `Shape::Subscription` op — it REGISTERS a host
+/// callback and hands back an owning `Subscription` handle whose
+/// unsubscribe()/drop removes the listener; `tick` fires every live listener.
+/// This is the callback + subscription slice's real C/C++ round-trip proof.
+// Stateful `Ticker` handle → `Box<crate::core_impl::TickerImpl>` behind a raw pointer.
+/// Open a fresh ticker with no listeners and the counter at 0.
+/// Construct a `Ticker` (ctor `new`).
+#[no_mangle]
+pub unsafe extern "C" fn Ticker_new(
+    out: *mut *mut crate::core_impl::TickerImpl,
+    err_out: *mut *mut c_char,
+) -> c_int {
+    match <crate::core_impl::TickerImpl as TickerCore>::new() {
+        Ok(v) => {
+            *out = Box::into_raw(Box::new(v));
+            if !err_out.is_null() {
+                *err_out = std::ptr::null_mut();
+            }
+            0
+        }
+        Err(e) => {
+            if !err_out.is_null() {
+                *err_out = fl_str_out(e.to_string());
+            }
+            1
+        }
+    }
+}
+
+/// Register `listener` to be called on every `tick`; returns a Subscription
+/// handle that removes the listener when unsubscribed or dropped.
+/// Register a listener on `Ticker.on_tick`; returns an owning Subscription handle.
+#[no_mangle]
+pub unsafe extern "C" fn Ticker_on_tick(
+    self_: *mut crate::core_impl::TickerImpl,
+    listener: extern "C" fn(*mut c_void, i32),
+    listener_ctx: *mut c_void,
+    out: *mut *mut Subscription,
+    err_out: *mut *mut c_char,
+) -> c_int {
+    let this = &*self_;
+    let listener_cb: Box<dyn Fn(i32) + Send + Sync> = {
+        let ctx = CbCtx(listener_ctx);
+        Box::new(move |v: i32| {
+            (listener)(ctx.ptr(), v);
+        })
+    };
+    match this.on_tick(listener_cb) {
+        Ok(unsub) => {
+            *out = Box::into_raw(Box::new(Subscription {
+                unsub: std::sync::Mutex::new(Some(unsub)),
+            }));
+            if !err_out.is_null() {
+                *err_out = std::ptr::null_mut();
+            }
+            0
+        }
+        Err(e) => {
+            if !err_out.is_null() {
+                *err_out = fl_str_out(e.to_string());
+            }
+            1
+        }
+    }
+}
+
+/// Fire every live listener with the current counter value, then increment it
+/// (infallible — registration/firing never fails).
+// TODO(#69): infallible op — value returned directly, no err_out.
+#[no_mangle]
+pub unsafe extern "C" fn Ticker_tick(self_: *mut crate::core_impl::TickerImpl) {
+    let this = &*self_;
+    this.tick();
+}
+
+/// Release the `Ticker` handle.
+#[no_mangle]
+pub unsafe extern "C" fn Ticker_free(p: *mut crate::core_impl::TickerImpl) {
     if !p.is_null() {
         drop(Box::from_raw(p));
     }

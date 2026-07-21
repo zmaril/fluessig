@@ -123,6 +123,7 @@ fn event_mode_api() -> ApiDoc {
             bindings: Default::default(),
         }],
         unions: Vec::new(),
+        consts: Vec::new(),
         interfaces: vec![ApiInterface {
             name: "Clock".into(),
             doc: None,

@@ -121,7 +121,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The runners lack a JDK; the container that authored this leg ships javac
       # 21, but CI needs it provisioned explicitly.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"

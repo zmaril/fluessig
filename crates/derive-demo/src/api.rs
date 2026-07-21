@@ -16,6 +16,10 @@
 //!   it to a JS async iterator / Python generator / Ruby Enumerator);
 //! * `#[fluessig(manual)]` — recorded in `api.json` but hand-written per binding.
 //!
+//! It also exercises the op-level FLAGS that compose with any kind — here
+//! `#[fluessig(worker)]` on the `repo` lookup (`"worker": true` → the MCP
+//! `workerHint`), the sibling of the `readonly` / `destructive` flags.
+//!
 //! Slice 8a Gap 2 adds the **DTO / `models` layer**: `#[derive(Record)]` declares
 //! the flat data DTOs the ops pass across (`LoadStats`, `SinkOptions`,
 //! `TableRename`), and the entities/DTOs the ops reference — directly or
@@ -87,8 +91,10 @@ impl Db {
         Db { _private: () }
     }
 
-    /// Look up one repo by id — `None` when absent.
+    /// Look up one repo by id — `None` when absent. An observe-only lookup, so
+    /// it's safe on a worker-role MCP surface (`#[fluessig(worker)]`).
     #[fluessig(async)]
+    #[fluessig(worker)]
     pub fn repo(&self, id: &str) -> Option<Repo> {
         let _ = id;
         None

@@ -180,6 +180,10 @@ pub struct ApiOp {
     /// `@destructive` — flows into the MCP `destructiveHint` annotation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub destructive: bool,
+    /// `@worker` — flows into the MCP `workerHint` annotation (marks an op safe for
+    /// a worker-role MCP surface).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worker: bool,
     /// `@streamError(...)` — opts a stream op INTO the error-as-EVENT model and
     /// (optionally) shapes that event, for the node backend. This field drives the
     /// MODE, not just the shape: `None` (unannotated) → the DEFAULT idiomatic

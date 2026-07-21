@@ -50,6 +50,7 @@ fn m0_api() -> ApiDoc {
                 infallible: false,
                 readonly: true,
                 destructive: false,
+                worker: false,
                 stream_error: None,
                 result_error: None,
                 params: Vec::new(),

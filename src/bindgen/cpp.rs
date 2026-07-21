@@ -131,6 +131,10 @@ pub(super) fn classify(api: &ApiDoc, t: &ApiType) -> Cross {
         // UTF-8 string carrier (the honest default the scalar catchall also uses).
         // The typed opaque handle is a rust-core concern (see `rust_core`).
         ApiType::Foreign { .. } => Cross::Str,
+        // cpp callback lowering is a follow-up (see notes/callback-function-types.md);
+        // no committed fixture feeds cpp a callback, so the string carrier is a
+        // reachable-only-in-future placeholder that keeps `classify` total.
+        ApiType::Callback { .. } => Cross::Str,
     }
 }
 

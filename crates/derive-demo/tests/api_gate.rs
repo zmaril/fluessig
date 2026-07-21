@@ -603,3 +603,201 @@ fn node_prelude_is_conditional_on_op_kinds() {
         "a full surface must NOT gain the unused-imports banner (golden byte-identity)\n{node}"
     );
 }
+
+/// The node-backend "tail" features this PR lands, against the `binary` demo
+/// (kept apart from the pedagogy demos): position-aware **binary spelling** and
+/// the **`#[fluessig(result)]` result envelope**.
+///
+///   * a `bytes` PARAM lowers to the scalar `bytes` and `optional` rides as
+///     before — the node divergence (`Uint8Array` vs `Buffer`) is a projection
+///     detail, invisible in `api.json`;
+///   * `#[fluessig(result)]` lowers to `result_error: "<Record>"` on the op, and
+///     pulls that record into `api.json`'s `models` even though it is in no
+///     param/return position.
+#[test]
+fn binary_api_carries_bytes_and_result_envelope() {
+    let api = load_api(&derive_demo::binary::fluessig_catalog::api_to_json())
+        .expect("binary api.json must load clean");
+    let iface = api.interfaces.iter().find(|i| i.name == "NodeIo").unwrap();
+    let op = |n: &str| iface.ops.iter().find(|o| o.name == n).unwrap();
+
+    // a `bytes` param op: the param lowers to the `bytes` scalar (the Uint8Array
+    // spelling is a node projection detail, not part of the op surface).
+    let detect = op("detectSupportedImageMimeType");
+    assert_eq!(detect.shape, Shape::Unary);
+    assert!(!detect.is_async, "a default op is synchronous");
+    assert!(matches!(&detect.params[0].ty, ApiType::Scalar(s) if s == "bytes"));
+    assert!(detect.result_error.is_none(), "detect is not a result op");
+
+    // bytes-in + bytes-out, infallible.
+    let digest = op("digest");
+    assert!(matches!(&digest.params[0].ty, ApiType::Scalar(s) if s == "bytes"));
+    assert!(matches!(&digest.returns, ApiType::Scalar(s) if s == "bytes"));
+    assert!(digest.infallible, "a bare `Vec<u8>` return is infallible");
+
+    // the `#[fluessig(result)]` op: result_error names the explicit error record,
+    // it is NOT infallible (a Result return keeps a seam), and the OK value is the
+    // unwrapped `bytes` return.
+    let rbf = op("readBinaryFile");
+    assert_eq!(
+        rbf.result_error.as_deref(),
+        Some("FileError"),
+        "#[fluessig(result)] captures the explicit error record type"
+    );
+    assert!(!rbf.infallible, "a result-envelope op is not infallible");
+    assert!(
+        !rbf.is_async,
+        "the result envelope is a synchronous value return"
+    );
+    assert!(matches!(&rbf.returns, ApiType::Scalar(s) if s == "bytes"));
+
+    // FileError joins `models` purely via the result_error reference.
+    assert!(
+        api.models.iter().any(|m| m.name == "FileError"),
+        "the result op's error record must be materialised into api.json models"
+    );
+}
+
+/// The node backend emits the position-aware binary spelling (`Uint8Array` param,
+/// `Buffer` return) and the `{ ok, value } | { ok, error }` result envelope — the
+/// concrete generated-code proof, byte-for-byte with pi/pidgin's shapes.
+#[test]
+fn node_emits_binary_spelling_and_result_envelope() {
+    let api = load_api(&derive_demo::binary::fluessig_catalog::api_to_json()).unwrap();
+    let enums: Vec<EnumDesc> = Vec::new();
+    let node = node_binding(&api, &enums, None);
+
+    // ── Feature 1: a `bytes` PARAM is spelled `Uint8Array` ──
+    assert!(
+        node.contains(
+            "pub fn detect_supported_image_mime_type(\n    buffer: napi::bindgen_prelude::Uint8Array,\n) -> Option<String> {"
+        ),
+        "a bytes param must be spelled Uint8Array\n{node}"
+    );
+    // ── Feature 1: a `bytes` RETURN is spelled `Buffer`; both in one op ──
+    assert!(
+        node.contains(
+            "pub fn digest(data: napi::bindgen_prelude::Uint8Array) -> napi::bindgen_prelude::Buffer {"
+        ),
+        "a bytes-in/bytes-out op must be Uint8Array -> Buffer\n{node}"
+    );
+    // the shared core trait agrees: Uint8Array param, Buffer return.
+    assert!(
+        node.contains(
+            "fn digest(data: napi::bindgen_prelude::Uint8Array) -> napi::bindgen_prelude::Buffer;"
+        ),
+        "the core-trait method must spell the same Uint8Array/Buffer split\n{node}"
+    );
+
+    // ── Feature 2: the `{ ok, value } | { ok, error }` envelope arms ──
+    assert!(
+        node.contains("pub struct ReadBinaryFileOk {")
+            && node.contains("pub value: napi::bindgen_prelude::Buffer,"),
+        "the ok arm must carry `value: Buffer`\n{node}"
+    );
+    assert!(
+        node.contains("pub struct ReadBinaryFileErr {") && node.contains("pub error: FileError,"),
+        "the error arm must carry the FileError record\n{node}"
+    );
+    // the method returns the discriminated Either, building the error AS A VALUE.
+    assert!(
+        node.contains(
+            "pub fn read_binary_file(\n    path: String,\n) -> napi::bindgen_prelude::Either<ReadBinaryFileOk, ReadBinaryFileErr> {"
+        ),
+        "the result op must return Either<Ok, Err>, not throw\n{node}"
+    );
+    assert!(
+        node.contains("Err(error) => napi::bindgen_prelude::Either::B(ReadBinaryFileErr { ok: false, error }),"),
+        "the error arm is built from the core Result's Err VALUE\n{node}"
+    );
+    // the core trait returns the EXPLICIT error record, not anyhow.
+    assert!(
+        node.contains(
+            "fn read_binary_file(\n        path: String,\n    ) -> ::core::result::Result<napi::bindgen_prelude::Buffer, FileError>;"
+        ),
+        "the result op's core-trait method returns Result<T, FileError>\n{node}"
+    );
+    // the FileError record struct is emitted.
+    assert!(
+        node.contains("pub struct FileError {") && node.contains("pub code: String,"),
+        "the FileError record must be emitted as a napi object\n{node}"
+    );
+}
+
+/// The result envelope is node-ONLY and opt-in: the other backends treat a
+/// `#[fluessig(result)]` op as an ordinary fallible op (throw/raise), their core
+/// traits keep the `anyhow`/generic seam, and their `bytes` spelling is unchanged.
+#[test]
+fn result_envelope_is_node_only_and_opt_in() {
+    let api = load_api(&derive_demo::binary::fluessig_catalog::api_to_json()).unwrap();
+    let enums: Vec<EnumDesc> = Vec::new();
+
+    // python treats readBinaryFile as a normal fallible op — no Either envelope,
+    // and its core trait keeps the anyhow seam.
+    let py = python_binding(&api, &enums, None);
+    assert!(
+        !py.contains("ReadBinaryFileOk") && !py.contains("bindgen_prelude::Either"),
+        "python must not emit the node-only envelope\n{py}"
+    );
+    // the core trait keeps the anyhow seam (the op is an ordinary fallible op here).
+    assert!(
+        py.contains("fn read_binary_file(path: String) -> anyhow::Result<Bytes>;"),
+        "python's core trait keeps the anyhow seam for a result op\n{py}"
+    );
+    // ruby likewise stays on its normal fallible projection.
+    let ruby = ruby_binding(&api, &enums, None);
+    assert!(
+        !ruby.contains("ReadBinaryFileOk"),
+        "ruby must not emit the node-only envelope\n{ruby}"
+    );
+}
+
+/// The `#[fluessig(single_threaded)]` authoring path (this PR): the derive-emitted
+/// `api.json` for the `single_threaded` demo carries the interface flag, and the
+/// node backend projects it into a THREAD-CONFINED handle over the genuinely
+/// `!Send` `Tui` core — NO `Arc`, NO `Send`/`Sync` bound, core held in a
+/// `RefCell`. This ties the macro parse → api.json → node emission end to end
+/// (the byte goldens live in the top-level `tests/single_threaded.rs`).
+#[test]
+fn single_threaded_marker_lowers_and_projects_a_thread_confined_handle() {
+    let api = load_api(&derive_demo::single_threaded::fluessig_catalog::api_to_json()).unwrap();
+    let tui = api.interfaces.iter().find(|i| i.name == "Tui").unwrap();
+
+    // the marker lowered onto the interface, and the interface is sync-only.
+    assert!(tui.single_threaded, "Tui must carry single_threaded:true");
+    assert!(
+        tui.ops
+            .iter()
+            .all(|o| !o.is_async && o.shape != Shape::Stream),
+        "a single_threaded interface must be sync-only"
+    );
+
+    // node projects the thread-confined handle.
+    let node = node_binding(&api, &[], None);
+    assert!(
+        node.contains("pub trait TuiCore: Sized + 'static {"),
+        "single_threaded core trait must drop Send + Sync:\n{node}"
+    );
+    assert!(
+        node.contains("pub(crate) core: RefCell<crate::core_impl::TuiImpl>,"),
+        "single_threaded handle must hold the core in a RefCell (no Arc):\n{node}"
+    );
+    assert!(
+        !node.contains("Arc<crate::core_impl::TuiImpl>") && !node.contains("use std::sync::Arc;"),
+        "single_threaded handle must not use Arc at all:\n{node}"
+    );
+    assert!(
+        node.contains("self.core.borrow_mut().tick()"),
+        "single_threaded &self methods reach the core via borrow_mut():\n{node}"
+    );
+
+    // an ordinary (async-capable) interface is UNCHANGED — the demo `Db` still
+    // holds its core as `Arc<Impl>` with a `Send + Sync` trait.
+    let db_api = load_api(&derive_demo::api::fluessig_catalog::api_to_json()).unwrap();
+    let db_node = node_binding(&db_api, &[], None);
+    assert!(
+        db_node.contains("pub(crate) core: Arc<crate::core_impl::DbImpl>,")
+            && db_node.contains("pub trait DbCore: Sized + Send + Sync + 'static {"),
+        "an ordinary handle must still hold Arc<Impl> with a Send+Sync core trait:\n{db_node}"
+    );
+}

@@ -311,3 +311,105 @@ verbatim (modulo the core-seam body) in node, and its synchronous/infallible twi
 ruby — the sync-default surface pidgin needs to generate its (all-sync) bindings. The remaining
 atilla tail (a later slice): binary `Uint8Array`/`Buffer` arg spelling + result-envelope shaping;
 the AgentBridge callback bridge stays hand-written.
+
+### The node "tail": `Uint8Array`/`Buffer` binary spelling + the `{ ok, value } | { ok, error }` result envelope
+
+Two of the remaining tail features above, so pidgin (formerly atilla) can generate more of its
+hand-written napi. Both are node-backend concerns; consistent with the `#59`/`#69` op-flag
+precedent, proven in `crates/derive-demo/src/binary.rs` + `tests/api_gate.rs` (the AgentBridge
+callback bridge stays `@manual` by design).
+
+- **Position-aware binary spelling (no annotation).** pi/pidgin spell binary the JS-idiomatic way:
+  a `bytes` **param** is a `Uint8Array` (a read-only view — `detectSupportedImageMimeType(buffer:
+  Uint8Array)`), a `bytes` **return** is a `Buffer` (an owned buffer — `readBinaryFile(path):
+  Buffer`). `Buffer extends Uint8Array`, but the printed `.d.ts` differs, so byte-exact conformance
+  needs the split. Node now spells `bytes` **position-aware by default** — no new schema attribute:
+  the OUT half lives in `node_ty` (→ `napi::bindgen_prelude::Buffer`, a return / a DTO field), the
+  IN half in `node_param_sig`/`node_param_ty` (→ `napi::bindgen_prelude::Uint8Array`, a param),
+  both fully-qualified so napi's `.d.ts` generator names them directly (no alias to resolve, no
+  `ts_return_type` hint). The core-trait params flow through the same `node_param_sig` (via the new
+  `emit_core_traits_full` seam), so the handle-method → core call type-checks. Every other backend
+  keeps the shared `Bytes` spelling, byte-identical.
+- **`#[fluessig(result)]` — the `{ ok, value } | { ok, error }` result envelope.** pidgin's ~13
+  `NodeExecutionEnvCore` methods hand their error back AS A VALUE — a discriminated `{ ok: true,
+  value: T } | { ok: false, error: E }` object the shim reparses — rather than throwing. The
+  op-level `#[fluessig(result)]` marker (mirroring `sync`/`async`, a projection modifier on a
+  **synchronous unary op**) opts in; the error type `E` is a normal `#[derive(Record)]` (`FileError
+  { code, message, path? }`) spelled as the op's `Result<T, E>` return and captured off that return
+  (the macro rejects `anyhow::Result<T>` — the marker demands an explicit, named error record).
+  Node emits two `#[napi(object)]` arms (`<Op>Ok { ok, value }` / `<Op>Err { ok, error }`) and a
+  method returning `napi::bindgen_prelude::Either<…Ok, …Err>` built from the core's `Result<T, E>`
+  VALUE; the core-trait method returns `Result<T, E>` (not `anyhow::Result<T>`, the throw seam). It
+  is strictly **opt-in and node-only**: a default fallible op still throws, and the other backends
+  treat a `result` op as an ordinary fallible op (their core traits keep the `anyhow`/generic seam),
+  so their goldens are unperturbed. The error record joins `api.json`'s `models` purely through the
+  op's `result_error` reference (`build_models` seeds it), even though it appears in no param/return
+  position. **Design notes for the owner:** (1) a *typed discriminated object* (two tagged
+  `#[napi(object)]` arms behind `Either`) is the chosen target — the more fluessig-idiomatic end
+  state — over pidgin's current serialized JSON-string envelope the shim `JSON.parse`s; the pidgin
+  campaign byte-diffs against the real repo to confirm it's acceptable. (2) napi collapses the `ok`
+  bool to `ok: boolean` in its `.d.ts` (the same limitation the structured-union `type: string` tags
+  hit) — the exact `ok: true` / `ok: false` discrimination is an external-`.d.ts` concern, out of
+  scope here; the structural `{ ok, value } | { ok, error }` shape is exact.
+
+### `#[fluessig(single_threaded)]` — a thread-confined handle over a `!Send` core (node)
+
+Some native cores are inherently thread-local. pidgin's UI-state cores — `TuiCore`
+(`Tui<LoggingTerminal>` with `Rc<RefCell<dyn Component>>` + boxed non-Send closures),
+`InputCore`, `SelectListCore` — are `!Send`. napi CLASS instances are thread-confined (they
+never cross threads), so a hand-written `#[napi]` class can hold such a core fine (atilla's
+`crates/atilla-napi/src/tui.rs` does exactly this: `struct TuiCore { tui: Tui<LoggingTerminal> }`,
+`&mut self` methods, no `Arc`). But fluessig's ORDINARY generated handle holds the core as
+`Arc<crate::core_impl::<Iface>Impl>`, which forces `Impl: Send + Sync` — needed only for the ASYNC
+projection, where the `Arc` clones onto a threadpool worker. That is a hard `!Send` wall a `Mutex`
+cannot fix, so those cores could be hand-written but not GENERATED.
+
+`#[fluessig(single_threaded)]` is an **interface-level** marker on the exported `impl` block (the
+op flags — `ctor`/`stream`/`async`/`readonly`/… — ride the METHODS; this one rides the impl),
+consistent with the `#59`/`#69`/`#74` per-op-flag precedent. It lowers to
+`api.json`'s `ApiInterface.single_threaded` (skip-if-false, so every existing interface stays
+byte-identical) and, on the **node backend only**, projects a THREAD-CONFINED handle:
+
+- the generated `<Iface>Core` trait sheds `Send + Sync` (`pub trait TuiCore: Sized + 'static`), so
+  a `!Send` core can implement it, and its handle-bound ops take `&mut self`;
+- the handle holds the core by plain ownership inside a `RefCell` — `pub(crate) core:
+  RefCell<crate::core_impl::TuiImpl>`, **no `Arc`, no `Send`/`Sync`** — and its `&self` napi methods
+  reach `&mut` through `borrow_mut()` (`self.core.borrow_mut().tick()`); the ctor builds
+  `RefCell::new(<Impl as Core>::open(…)?)`.
+
+Proven end to end in `crates/derive-demo/src/single_threaded.rs` (a genuinely `!Send` `Tui` core:
+`PhantomData<*const ()>` + `Rc<RefCell<…>>`), `crates/derive-demo/tests/api_gate.rs`, and the byte
+goldens in `tests/single_threaded.rs`. It **unblocks pidgin's UI-state handle classes** and is
+**node-only for now** (extendable when another thread-confined runtime needs it).
+
+**Node-only, fail LOUD elsewhere (honest capability edge).** A thread-confined `!Send` handle is a
+node concept; every other backend's handle wrapper (`#[pyclass]`, `#[php_class]`, `#[wasm_bindgen]`,
+the JNI/C++ glue) would hold the core in a `Send`-requiring form. So python/php/ruby/wasm/java/cpp
+do NOT silently emit a `Send`-assuming handle for a single_threaded interface (which would break the
+consumer's build with a confusing downstream error) — they emit NOTHING for it plus an explicit
+skip-note, e.g. `// interface \`Tui\` is #[fluessig(single_threaded)] (a thread-confined \`!Send\`
+handle) — not supported by the python backend (node-only today); no binding emitted.`
+
+**Rejected marker combinations.** A single_threaded interface may carry ONLY synchronous ops — an
+async or stream op needs a `Send` core for the threadpool, incompatible with a thread-confined
+`!Send` handle. The derive macro rejects the authoring path with a SPANNED compile error at the
+offending method; the loader (`load_api`) re-checks the lowered / hand-written `api.json`. The
+actual messages a developer sees, verbatim:
+
+- `#[fluessig(single_threaded)]` + an `#[fluessig(async)]` op (macro, spanned at the method):
+
+  > `#[fluessig(single_threaded)] interface: an async op is not allowed — a thread-confined \`!Send\` handle cannot serve an async op (the async projection clones the core onto a threadpool worker, which requires a \`Send\` core). Drop #[fluessig(async)], or drop #[fluessig(single_threaded)]`
+
+- `#[fluessig(single_threaded)]` + an `#[fluessig(stream)]` op (macro, spanned at the method):
+
+  > `#[fluessig(single_threaded)] interface: a stream op is not allowed — a thread-confined \`!Send\` handle cannot serve a stream op (streams poll off a threadpool worker, which requires a \`Send\` core). Drop #[fluessig(stream)], or drop #[fluessig(single_threaded)]`
+
+- the same surface reaching the loader as `api.json` (an async or stream op on a
+  `single_threaded` interface):
+
+  > `op \`Tui.slow\`: a #[fluessig(single_threaded)] interface may carry only synchronous ops — an async or stream op needs a \`Send\` core for the threadpool, which is incompatible with a thread-confined \`!Send\` handle`
+
+An unknown interface tag is likewise rejected, e.g. an op flag mistakenly placed on the `impl`:
+`unknown interface tag \`readonly\` — the only #[fluessig(…)] tag on an exported \`impl\` block is
+#[fluessig(single_threaded)] (the thread-confined handle opt-in). Op markers (ctor / stream / async
+/ readonly / …) ride the METHODS, not the impl`.

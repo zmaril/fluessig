@@ -77,6 +77,11 @@ fn main() {
     let python = flag("--python");
     let ruby = flag("--ruby");
     let php = flag("--php");
+    // The standalone Rust API skeleton: the `<Interface>Core` traits plus the DTO
+    // models/enums they reference, as plain `pub struct`/`pub enum` (no FFI
+    // attributes), in one self-contained module that compiles against only
+    // `anyhow`. Unlike the per-language backends, it embeds no binding glue.
+    let rust_core = flag("--rust-core");
     // The C/C++ backend: three single-file artifacts (no fan-out).
     let cpp = flag("--cpp");
     let cpp_header = flag("--cpp-header");
@@ -160,6 +165,7 @@ fn main() {
         || python.is_some()
         || ruby.is_some()
         || php.is_some()
+        || rust_core.is_some()
         || cpp.is_some()
         || cpp_header.is_some()
         || cpp_hpp.is_some()
@@ -269,6 +275,9 @@ fn main() {
         }
         if let Some(p) = php {
             write(&p, fluessig::bindgen::php_binding(&api, &enums, note));
+        }
+        if let Some(p) = rust_core {
+            write(&p, fluessig::bindgen::rust_core_binding(&api, &enums, note));
         }
         // ── C/C++ backend (single-file only — no package/module fan-out) ──
         if let Some(p) = cpp {

@@ -119,6 +119,7 @@ fn main() {
     let java_mod_out = flag("--java-mod-out");
     let mcp_mod_out = flag("--mcp-mod-out");
     let py_models = flag("--py-models");
+    let django_models = flag("--django-models");
     let ts_tables = flag("--ts-tables");
     let ts_drizzle = flag("--ts-drizzle");
     let readme = flag("--readme");
@@ -154,6 +155,9 @@ fn main() {
     }
     if let Some(p) = py_models {
         write(&p, fluessig::codegen::python_models(&catalog, note));
+    }
+    if let Some(p) = django_models {
+        write(&p, fluessig::codegen::django_models(&catalog, note));
     }
     if let Some(p) = ts_tables {
         write(&p, fluessig::codegen::ts_tables(&catalog, note));

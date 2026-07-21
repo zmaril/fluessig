@@ -27,6 +27,7 @@ jobs:
       java: ${{ steps.filter.outputs.java }}
       callback: ${{ steps.filter.outputs.callback }}
       ruby: ${{ steps.filter.outputs.ruby }}
+      wasm: ${{ steps.filter.outputs.wasm }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -88,6 +89,18 @@ jobs:
               - 'crates/callback-demo-ruby/**'
               - 'crates/fluessig-runtime/**'
               - 'tests/ruby_callback_lowering.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            # The wasm-bindgen compile-to-wasm32 leg runs only when the wasm
+            # backend, the shared type-map/gen, the wasm demo crate, or the
+            # harness itself change.
+            wasm:
+              - 'src/bindgen/wasm.rs'
+              - 'src/bindgen/mod.rs'
+              - 'src/bin/fluessig-gen.rs'
+              - 'crates/callback-demo-wasm/**'
+              - 'tests/wasm_callback_lowering.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -230,3 +243,24 @@ jobs:
       - name: install libclang (for rb-sys' bindgen)
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
       - run: bash crates/callback-demo-ruby/run.sh
+
+  # The compile-to-wasm32 gate for the wasm-bindgen backend: compile the
+  # callback-demo-wasm crate (the committed generated glue + hand-written core)
+  # to `wasm32-unknown-unknown`. That compile IS the proof the generated callback
+  # (JS Function → unsafe-Send WasmCb → uniform core Box<dyn Fn>) + subscription
+  # (#[wasm_bindgen] Subscription handle) binding is valid wasm-bindgen code —
+  # there is no in-repo browser/node runner, so the wasm32 compile is the proof
+  # (the way the wasm backend has always been validated).
+  callback-wasm:
+    name: wasm-bindgen compile-to-wasm32
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: bash crates/callback-demo-wasm/run.sh

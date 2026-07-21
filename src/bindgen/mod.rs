@@ -15,6 +15,7 @@
 //! convention.
 
 mod cpp;
+mod cpp_callback;
 mod cpp_header;
 mod cpp_hpp;
 mod fanout;
@@ -355,6 +356,18 @@ pub(super) fn api_uses_subscription(api: &ApiDoc) -> bool {
         .iter()
         .flat_map(|i| &i.ops)
         .any(|op| op.shape == Shape::Subscription)
+}
+
+/// Does any op in the surface take an [`ApiType::Callback`] param? Gates the C
+/// backend's callback prelude (the `CbCtx` newtype + `c_void` import), so a
+/// callback-free surface emits ZERO new lines and its golden stays byte-identical.
+/// (node keeps its own private predicate to gate its napi imports.)
+pub(super) fn api_uses_callback(api: &ApiDoc) -> bool {
+    api.interfaces.iter().flat_map(|i| &i.ops).any(|op| {
+        op.params
+            .iter()
+            .any(|p| matches!(&p.ty, ApiType::Callback { .. }))
+    })
 }
 
 /// The `(return_type, unsub_expr, ok_expr)` a `Shape::Subscription` op method

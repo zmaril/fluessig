@@ -1,0 +1,51 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "callback_demo_php",
+  "models": [],
+  "unions": [],
+  "interfaces": [
+    {
+      "name": "Ticker",
+      "doc": "A stateful ticker that fires registered listeners with an incrementing\ncounter. `on_tick` is a `Shape::Subscription` op — it REGISTERS a host\ncallback (a PHP `callable`/`Closure`) and hands back an owning `Subscription`\nhandle whose unsubscribe() removes the listener; `tick` fires every live\nlistener SYNCHRONOUSLY on the PHP request thread. This is the callback +\nsubscription slice's PHP (ext-php-rs) round-trip proof. PHP callbacks are\ndocumented SYNC-ONLY: the callable is only ever invoked on the request thread\nthat supplied it (off-thread invocation is unsupported) — see the PhpCb marker.",
+      "ops": [
+        {
+          "name": "new",
+          "doc": "Open a fresh ticker with no listeners and the counter at 0.",
+          "shape": "ctor",
+          "params": [],
+          "returns": "void"
+        },
+        {
+          "name": "on_tick",
+          "doc": "Register `listener` to be called on every `tick`; returns a Subscription\nhandle that removes the listener when unsubscribed. The listener is invoked\nsynchronously on the PHP request thread (the sync-only contract).",
+          "shape": "subscription",
+          "infallible": true,
+          "params": [
+            {
+              "name": "listener",
+              "type": {
+                "callback": {
+                  "params": [
+                    "int32"
+                  ]
+                }
+              }
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "tick",
+          "doc": "Fire every live listener with the current counter value, then increment it\n(infallible — registration/firing never fails).",
+          "shape": "unary",
+          "infallible": true,
+          "params": [],
+          "returns": "void"
+        }
+      ]
+    }
+  ]
+}

@@ -42,6 +42,11 @@ pub mod leaf_fk;
 /// proven against the node backend in `tests/api_gate.rs`.
 pub mod native;
 
+/// Node-backend "tail" features (this PR): position-aware binary spelling
+/// (`bytes` param → `Uint8Array`, return → `Buffer`) and the `#[fluessig(result)]`
+/// `{ ok, value } | { ok, error }` envelope, proven in `tests/api_gate.rs`.
+pub mod binary;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

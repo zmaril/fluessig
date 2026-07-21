@@ -67,6 +67,27 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
     let name_pin = option_str(meta.name_pin.as_deref());
     let readonly = meta.readonly;
     let destructive = meta.destructive;
+    // `#[fluessig(result)]` opts into the node result-envelope: capture the
+    // explicit error record `E` from the op's `Result<T, E>` return. The macro
+    // guarantees (in `method_meta`) that `result` rides a plain synchronous unary
+    // op; here it must also carry a `Result<T, E>` with a NAMED error type.
+    let result_error =
+        if meta.result {
+            match result_error_ident(&f.sig) {
+                Some(id) => {
+                    let s = id.to_string();
+                    quote! { ::core::option::Option::Some(#s) }
+                }
+                None => return Err(syn::Error::new_spanned(
+                    &f.sig,
+                    "#[fluessig(result)] requires a `Result<T, E>` return whose error type `E` is \
+                     a NAMED record (a `#[derive(Record)]`, e.g. `FileError`) — it becomes the \
+                     `{ ok: false, error: E }` arm of the envelope",
+                )),
+            }
+        } else {
+            quote! { ::core::option::Option::None }
+        };
     let params = param_descriptors(&f.sig)?;
     let returns = return_descriptor(meta.kind, &f.sig)?;
     let span = span_tokens(f.sig.ident.span());
@@ -80,6 +101,7 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
             name_pin: #name_pin,
             readonly: #readonly,
             destructive: #destructive,
+            result_error: #result_error,
             params: &[ #( #params ),* ],
             returns: #returns,
             span: #span,
@@ -102,6 +124,23 @@ fn returns_result(sig: &syn::Signature) -> bool {
         .unwrap_or(false)
 }
 
+/// The NAMED error type `E` of a `Result<T, E>` return — the record a
+/// `#[fluessig(result)]` op hands back as the `{ ok: false, error: E }` arm.
+/// `None` when the return is not a two-arg `Result<T, E>` with a single-segment
+/// (named) error type. `anyhow::Result<T>` (one type arg) yields `None`, so the
+/// marker legitimately rejects the default anyhow error channel.
+fn result_error_ident(sig: &syn::Signature) -> Option<Ident> {
+    let ReturnType::Type(_, ty) = &sig.output else {
+        return None;
+    };
+    let err = *result_type_args(ty)?.get(1)?;
+    let Type::Path(etp) = err else { return None };
+    if etp.qself.is_some() || etp.path.segments.len() != 1 {
+        return None;
+    }
+    Some(etp.path.segments[0].ident.clone())
+}
+
 /// The op-shaping tags on a method: its kind (`ctor` / plain unary / `stream` /
 /// `manual`) plus the `readonly` / `destructive` FLAGS that compose with it (a
 /// readonly op is still unary/stream; a destructive op likewise). Tags may ride one
@@ -120,6 +159,10 @@ struct MethodMeta {
     destructive: bool,
     /// `#[fluessig(name = "…")]` — an explicit op export-name pin.
     name_pin: Option<String>,
+    /// `#[fluessig(result)]` — opt the op into the node result-envelope
+    /// projection (error-as-value). A projection modifier legal on a plain
+    /// synchronous unary op only, like `#[fluessig(sync)]`.
+    result: bool,
 }
 
 /// One parsed tag inside a `#[fluessig(…)]` op attribute. The `async` keyword is
@@ -155,6 +198,8 @@ fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
     let mut readonly = false;
     let mut destructive = false;
     let mut name_pin: Option<String> = None;
+    let mut result = false;
+    let mut result_span: Option<proc_macro2::Span> = None;
     for a in attrs {
         if !a.path().is_ident("fluessig") {
             continue;
@@ -203,6 +248,10 @@ fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
                         }
                         "readonly" => readonly = true,
                         "destructive" => destructive = true,
+                        "result" => {
+                            result = true;
+                            result_span = Some(id.span());
+                        }
                         kind_tag @ ("ctor" | "stream" | "manual") => {
                             if kind.is_some() {
                                 return Err(syn::Error::new_spanned(
@@ -225,7 +274,8 @@ fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
                                      an op kind (#[fluessig(ctor)] / #[fluessig(stream)] / \
                                      #[fluessig(manual)], or untagged for a plain unary op), the \
                                      projection overrides #[fluessig(async)] / #[fluessig(sync)] \
-                                     (synchronous is the default), the flags \
+                                     (synchronous is the default), the node result-envelope \
+                                     opt-in #[fluessig(result)], the flags \
                                      #[fluessig(readonly)] / #[fluessig(destructive)], and/or the \
                                      export-name pin #[fluessig(name = \"…\")]"
                                 ),
@@ -274,12 +324,34 @@ fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
              (not a ctor / stream / manual)",
         ));
     }
+    // `#[fluessig(result)]` is the node result-envelope projection — a SYNCHRONOUS
+    // unary op that returns its error AS A VALUE. It flips the error seam, so like
+    // sync/async it composes only with a plain unary op, and never with the async
+    // projection (the envelope is a synchronous value return).
+    if result {
+        let span = result_span.unwrap_or_else(proc_macro2::Span::call_site);
+        if kind.is_some() {
+            return Err(syn::Error::new(
+                span,
+                "#[fluessig(result)] applies only to a plain unary op \
+                 (not a ctor / stream / manual)",
+            ));
+        }
+        if is_async == Some(true) {
+            return Err(syn::Error::new(
+                span,
+                "#[fluessig(result)] is a synchronous value-return envelope — it does not \
+                 compose with #[fluessig(async)]",
+            ));
+        }
+    }
     Ok(MethodMeta {
         kind: kind.unwrap_or(OpKindChoice::Unary),
         is_async,
         readonly,
         destructive,
         name_pin,
+        result,
     })
 }
 
@@ -434,23 +506,32 @@ fn api_scalar_name(ident: &str) -> Option<&'static str> {
 /// channel, so the `Result` wrapper is transparent); any other type is returned
 /// unchanged.
 fn unwrap_result(ty: &Type) -> &Type {
-    let Type::Path(tp) = ty else { return ty };
-    let Some(seg) = tp.path.segments.last() else {
-        return ty;
-    };
+    result_type_args(ty)
+        .and_then(|a| a.into_iter().next())
+        .unwrap_or(ty)
+}
+
+/// The type arguments of a `Result<…>` type, in order, or `None` when `ty` is not
+/// a `Result<…>`. The shared extraction behind both [`unwrap_result`] (the OK type
+/// `T`) and [`result_error_ident`] (the error type `E`).
+fn result_type_args(ty: &Type) -> Option<Vec<&Type>> {
+    let Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
     if seg.ident != "Result" {
-        return ty;
+        return None;
     }
     let PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return ty;
+        return None;
     };
-    args.args
-        .iter()
-        .find_map(|a| match a {
-            GenericArgument::Type(t) => Some(t),
-            _ => None,
-        })
-        .unwrap_or(ty)
+    Some(
+        args.args
+            .iter()
+            .filter_map(|a| match a {
+                GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// `impl Iterator<Item = T>` → `T`. A `#[fluessig(stream)]` op must return an

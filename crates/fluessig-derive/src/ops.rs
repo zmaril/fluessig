@@ -78,6 +78,13 @@ pub struct OpDescriptor {
     /// to `api.json` `"destructive": true` and the MCP `destructiveHint`. Also a
     /// flag composing with `kind`.
     pub destructive: bool,
+    /// `#[fluessig(result)]` — the explicit error RECORD type `E` of a
+    /// `Result<T, E>` return, when this op opts into the node result-envelope
+    /// projection (the `{ ok, value } | { ok, error }` object, error-as-value).
+    /// `Some("FileError")` ⇒ lower to [`fluessig::api::ApiOp::result_error`];
+    /// `None` ⇒ the default (a fallible op throws). A projection modifier on a
+    /// SYNCHRONOUS unary op only, like `#[fluessig(sync)]`.
+    pub result_error: Option<&'static str>,
     /// The method params (receiver excluded), in declaration order.
     pub params: &'static [ParamDescriptor],
     /// The return type as an op-surface type. A `ctor` is always `void`; a
@@ -193,6 +200,10 @@ fn lower_op(op: &OpDescriptor, resolver: &RefResolver) -> ApiOp {
         readonly: op.readonly,
         destructive: op.destructive,
         stream_error: None,
+        // `#[fluessig(result)]` carries the explicit error record `E` from the
+        // op's `Result<T, E>` return; node projects it to the `{ ok, value } |
+        // { ok, error }` envelope. Unmarked ⇒ `None`, byte-identical to before.
+        result_error: op.result_error.map(str::to_string),
         params: op
             .params
             .iter()

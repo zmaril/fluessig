@@ -131,6 +131,18 @@ pub struct ApiOp {
     /// to be legal only on [`Shape::Stream`] (see [`load_api`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_error: Option<StreamErrorShape>,
+    /// `#[fluessig(result)]` — opts a SYNCHRONOUS unary op INTO the node
+    /// result-envelope projection: instead of throwing on `Err`, the binding
+    /// returns a discriminated `{ ok: true, value: T } | { ok: false, error: E }`
+    /// object, with the error handed back AS A VALUE. `Some(name)` carries the
+    /// explicit error RECORD type `E` (a `#[derive(Record)]`, e.g. `FileError`),
+    /// which the op's Rust return type spells as `Result<T, E>`; the core-trait
+    /// method then returns `Result<T, E>` (not `anyhow::Result<T>`) so the binding
+    /// can construct the error arm. Node-only today; other backends treat the op
+    /// as an ordinary fallible op (throw/raise). `None` ⇒ the default (throw).
+    /// Serialized only when set, so an unmarked op is byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_error: Option<String>,
     pub params: Vec<ApiParam>,
     pub returns: ApiType,
     /// Per-language export-name / package / module pins for this op symbol (see

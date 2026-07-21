@@ -393,10 +393,22 @@ fn ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
 }
 
 fn param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
+    param_sig_with(op, |t| ty(api, t).0)
+}
+
+/// The `(name, rust_type)` param list, spelling each param type via `ty_of` and
+/// wrapping an `optional` param in `Option<…>`. The shared spine behind both the
+/// default [`param_sig`] (via the shared [`ty`]) and node's `node_param_sig`
+/// (which spells a `bytes` param `Uint8Array`); factoring it here keeps the two
+/// from being flagged as a duplicated loop body.
+pub(super) fn param_sig_with(
+    op: &ApiOp,
+    mut ty_of: impl FnMut(&ApiType) -> String,
+) -> Vec<(String, String)> {
     op.params
         .iter()
         .map(|p| {
-            let (r, _) = ty(api, &p.ty);
+            let r = ty_of(&p.ty);
             let r = if p.optional == Some(true) {
                 format!("Option<{r}>")
             } else {
@@ -418,7 +430,28 @@ fn param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
 pub(super) fn emit_core_traits_with(
     t: &mut rust::Tokens,
     api: &ApiDoc,
+    ret_ty: impl FnMut(&ApiOp) -> String,
+) {
+    // The shared default: params via [`param_sig`], and no result-envelope error
+    // channel (every backend but node throws on a fallible op). Node reaches the
+    // fuller [`emit_core_traits_full`] to spell its `bytes` params `Uint8Array`
+    // and give a `#[fluessig(result)]` op a `Result<T, E>` core signature.
+    emit_core_traits_full(t, api, ret_ty, param_sig, |_| None)
+}
+
+/// The core-trait spine with two extra seams node needs (both no-ops for the
+/// other backends, so their output is byte-identical): `param_sig_fn` spells the
+/// trait method params (node overrides only `bytes` → `Uint8Array`), and
+/// `result_err` returns `Some(E)` for a `#[fluessig(result)]` op so its core
+/// method is `fn … -> Result<T, E>` (error-as-value) rather than the default
+/// `anyhow::Result<T>` (throw). Passing `param_sig` + `|_| None` reproduces the
+/// historical signature exactly.
+pub(super) fn emit_core_traits_full(
+    t: &mut rust::Tokens,
+    api: &ApiDoc,
     mut ret_ty: impl FnMut(&ApiOp) -> String,
+    param_sig_fn: impl Fn(&ApiDoc, &ApiOp) -> Vec<(String, String)>,
+    result_err: impl Fn(&ApiOp) -> Option<String>,
 ) {
     for i in &api.interfaces {
         let trait_name = format!("{}Core", i.name);
@@ -429,16 +462,33 @@ pub(super) fn emit_core_traits_with(
                 continue;
             }
             let name = snake(&op.name);
-            let ps = param_sig(api, op)
+            let ps = param_sig_fn(api, op)
                 .iter()
                 .map(|(n, r)| format!("{n}: {r}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let ret = ret_ty(op);
+            let re = result_err(op);
             let sig = match op.shape {
                 Shape::Ctor => format!("fn {name}({ps}) -> anyhow::Result<Self>"),
                 Shape::Stream => {
                     format!("fn {name}(&self, {ps}) -> anyhow::Result<Box<dyn PollStream<{ret}>>>")
+                }
+                // A `#[fluessig(result)]` op returns its error AS A VALUE: the core
+                // method is `Result<T, E>` with the EXPLICIT error record `E`, so
+                // the binding can build the `{ ok, value } | { ok, error }` envelope
+                // instead of throwing. Rides the same `has_ctor` receiver split.
+                _ if re.is_some() && has_ctor => {
+                    format!(
+                        "fn {name}(&self, {ps}) -> ::core::result::Result<{ret}, {}>",
+                        re.as_deref().unwrap()
+                    )
+                }
+                _ if re.is_some() => {
+                    format!(
+                        "fn {name}({ps}) -> ::core::result::Result<{ret}, {}>",
+                        re.as_deref().unwrap()
+                    )
                 }
                 // An infallible (`#[fluessig(sync)]` + bare-`T` return) unary op
                 // drops the `Result` seam entirely — the core method IS the value.

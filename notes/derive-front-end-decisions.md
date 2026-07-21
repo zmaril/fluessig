@@ -311,3 +311,43 @@ verbatim (modulo the core-seam body) in node, and its synchronous/infallible twi
 ruby — the sync-default surface pidgin needs to generate its (all-sync) bindings. The remaining
 atilla tail (a later slice): binary `Uint8Array`/`Buffer` arg spelling + result-envelope shaping;
 the AgentBridge callback bridge stays hand-written.
+
+### The node "tail": `Uint8Array`/`Buffer` binary spelling + the `{ ok, value } | { ok, error }` result envelope
+
+Two of the remaining tail features above, so pidgin (formerly atilla) can generate more of its
+hand-written napi. Both are node-backend concerns; consistent with the `#59`/`#69` op-flag
+precedent, proven in `crates/derive-demo/src/binary.rs` + `tests/api_gate.rs` (the AgentBridge
+callback bridge stays `@manual` by design).
+
+- **Position-aware binary spelling (no annotation).** pi/pidgin spell binary the JS-idiomatic way:
+  a `bytes` **param** is a `Uint8Array` (a read-only view — `detectSupportedImageMimeType(buffer:
+  Uint8Array)`), a `bytes` **return** is a `Buffer` (an owned buffer — `readBinaryFile(path):
+  Buffer`). `Buffer extends Uint8Array`, but the printed `.d.ts` differs, so byte-exact conformance
+  needs the split. Node now spells `bytes` **position-aware by default** — no new schema attribute:
+  the OUT half lives in `node_ty` (→ `napi::bindgen_prelude::Buffer`, a return / a DTO field), the
+  IN half in `node_param_sig`/`node_param_ty` (→ `napi::bindgen_prelude::Uint8Array`, a param),
+  both fully-qualified so napi's `.d.ts` generator names them directly (no alias to resolve, no
+  `ts_return_type` hint). The core-trait params flow through the same `node_param_sig` (via the new
+  `emit_core_traits_full` seam), so the handle-method → core call type-checks. Every other backend
+  keeps the shared `Bytes` spelling, byte-identical.
+- **`#[fluessig(result)]` — the `{ ok, value } | { ok, error }` result envelope.** pidgin's ~13
+  `NodeExecutionEnvCore` methods hand their error back AS A VALUE — a discriminated `{ ok: true,
+  value: T } | { ok: false, error: E }` object the shim reparses — rather than throwing. The
+  op-level `#[fluessig(result)]` marker (mirroring `sync`/`async`, a projection modifier on a
+  **synchronous unary op**) opts in; the error type `E` is a normal `#[derive(Record)]` (`FileError
+  { code, message, path? }`) spelled as the op's `Result<T, E>` return and captured off that return
+  (the macro rejects `anyhow::Result<T>` — the marker demands an explicit, named error record).
+  Node emits two `#[napi(object)]` arms (`<Op>Ok { ok, value }` / `<Op>Err { ok, error }`) and a
+  method returning `napi::bindgen_prelude::Either<…Ok, …Err>` built from the core's `Result<T, E>`
+  VALUE; the core-trait method returns `Result<T, E>` (not `anyhow::Result<T>`, the throw seam). It
+  is strictly **opt-in and node-only**: a default fallible op still throws, and the other backends
+  treat a `result` op as an ordinary fallible op (their core traits keep the `anyhow`/generic seam),
+  so their goldens are unperturbed. The error record joins `api.json`'s `models` purely through the
+  op's `result_error` reference (`build_models` seeds it), even though it appears in no param/return
+  position. **Design notes for the owner:** (1) a *typed discriminated object* (two tagged
+  `#[napi(object)]` arms behind `Either`) is the chosen target — the more fluessig-idiomatic end
+  state — over pidgin's current serialized JSON-string envelope the shim `JSON.parse`s; the pidgin
+  campaign byte-diffs against the real repo to confirm it's acceptable. (2) napi collapses the `ok`
+  bool to `ok: boolean` in its `.d.ts` (the same limitation the structured-union `type: string` tags
+  hit) — the exact `ok: true` / `ok: false` discrimination is an external-`.d.ts` concern, out of
+  scope here; the structural `{ ok, value } | { ok, error }` shape is exact.

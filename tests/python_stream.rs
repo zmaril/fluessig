@@ -136,6 +136,7 @@ fn event_mode_api() -> ApiDoc {
                     readonly: false,
                     destructive: false,
                     stream_error: None,
+                    result_error: None,
                     params: vec![],
                     returns: ApiType::Scalar("void".into()),
                     bindings: Default::default(),
@@ -149,6 +150,7 @@ fn event_mode_api() -> ApiDoc {
                     readonly: true,
                     destructive: false,
                     stream_error: Some(StreamErrorShape::default()),
+                    result_error: None,
                     params: vec![],
                     returns: ApiType::Model {
                         model: "Tick".into(),

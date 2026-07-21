@@ -6,7 +6,11 @@
 import fluessig.Store;
 import fluessig.Item;
 import fluessig.Items;
+import fluessig.Ticker;
+import fluessig.Subscription;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 public class Main {
@@ -43,5 +47,31 @@ public class Main {
         }
 
         store.close();
+
+        // ── callback + subscription: a real Java Consumer fired from Rust ──
+        // Register a Consumer<Integer> that records every value it sees. `tick()`
+        // fires the listener from the Rust core with an incrementing counter;
+        // unsubscribe() removes it, so later ticks are silent.
+        Ticker ticker = new Ticker();
+        List<Integer> seen = new ArrayList<>();
+        Subscription sub = ticker.onTick(seen::add);
+
+        ticker.tick(); // fires 0
+        ticker.tick(); // fires 1
+        if (!seen.equals(List.of(0, 1))) {
+            throw new AssertionError("expected [0, 1] before unsubscribe, saw " + seen);
+        }
+        System.out.println("ticks-before-unsub=" + seen);
+
+        sub.unsubscribe();
+        ticker.tick(); // fires 2 to nobody — the listener is gone
+        if (!seen.equals(List.of(0, 1))) {
+            throw new AssertionError("expected [0, 1] after unsubscribe, saw " + seen);
+        }
+        System.out.println("ticks-after-unsub=" + seen);
+
+        sub.close();
+        ticker.close();
+        System.out.println("callback-ok: Java Consumer fired [0, 1] from Rust, silent after unsubscribe");
     }
 }

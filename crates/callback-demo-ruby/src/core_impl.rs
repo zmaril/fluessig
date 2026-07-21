@@ -7,6 +7,12 @@
 //! `tick` fires every live listener with an incrementing counter. It knows nothing
 //! about Ruby — it sees only the uniform boxed `Fn`, exactly as the java/cpp/node/
 //! python demo cores do.
+//!
+//! straitjacket-allow-file:duplication — deliberately parallel to the sibling
+//! `crates/java-demo/src/core_impl.rs` `TickerImpl` (the callback + subscription
+//! demo core); each demo crate carries its own so the per-language round-trips are
+//! independently buildable. This crate sorts first in the clone pair, so the
+//! marker lives here.
 
 use std::sync::{Arc, Mutex};
 

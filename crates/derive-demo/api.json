@@ -120,9 +120,10 @@
         },
         {
           "name": "repo",
-          "doc": "Look up one repo by id — `None` when absent.",
+          "doc": "Look up one repo by id — `None` when absent. An observe-only lookup, so\nit's safe on a worker-role MCP surface (`#[fluessig(worker)]`).",
           "shape": "unary",
           "async": true,
+          "worker": true,
           "params": [
             {
               "name": "id",

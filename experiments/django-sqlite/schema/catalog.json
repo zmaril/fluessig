@@ -1,0 +1,466 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "issue_tracker",
+  "scalars": [],
+  "unions": [],
+  "enums": [
+    {
+      "name": "IssueState",
+      "variants": [
+        {
+          "name": "OPEN"
+        },
+        {
+          "name": "CLOSED"
+        }
+      ]
+    },
+    {
+      "name": "IssueKind",
+      "variants": [
+        {
+          "name": "Bug",
+          "value": "bug"
+        },
+        {
+          "name": "Feature",
+          "value": "feat"
+        },
+        {
+          "name": "Chore",
+          "value": "chore"
+        }
+      ]
+    },
+    {
+      "name": "Priority",
+      "variants": [
+        {
+          "name": "LOW"
+        },
+        {
+          "name": "MEDIUM"
+        },
+        {
+          "name": "HIGH"
+        }
+      ]
+    }
+  ],
+  "entities": [
+    {
+      "name": "Org",
+      "table": "orgs",
+      "key": [
+        "id"
+      ],
+      "doc": "An organization — the root of the ownership chain, keyed by a slug.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The org slug (a stable identifier), e.g. `acme`.",
+          "key": true
+        },
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The org's display name."
+        }
+      ]
+    },
+    {
+      "name": "User",
+      "table": "users",
+      "key": [
+        "id"
+      ],
+      "doc": "A person — the target of the author FKs.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The user id.",
+          "key": true
+        },
+        {
+          "name": "login",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The login handle."
+        },
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Display name, if the user set one."
+        }
+      ]
+    },
+    {
+      "name": "Repo",
+      "table": "repos",
+      "key": [
+        "id"
+      ],
+      "doc": "A repository — belongs to an [`Org`] via a single-column FK, and is the\ncomposite-key target that both [`Issue`] and [`Label`] key on.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The repo id (`org/name`).",
+          "key": true
+        },
+        {
+          "name": "org",
+          "type": {
+            "k": "ref",
+            "name": "Org",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The owning org — a single-column to-one FK.",
+          "relation": {
+            "to": "Org",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "org"
+            ]
+          }
+        },
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The short repo name."
+        },
+        {
+          "name": "is_private",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": false,
+          "doc": "Whether the repo is private."
+        }
+      ]
+    },
+    {
+      "name": "Label",
+      "table": "labels",
+      "key": [
+        "repo",
+        "name"
+      ],
+      "doc": "A label — **composite-keyed** on `(repo, name)`, where `repo` is itself an\nFK. `ref_cols` spells the `name` key part as `label_name` at referencing\nsites (the `repo` part spells as `repo_id`).",
+      "fields": [
+        {
+          "name": "repo",
+          "type": {
+            "k": "ref",
+            "name": "Repo",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The repo the label belongs to — an FK that is also a key member.",
+          "key": true,
+          "relation": {
+            "to": "Repo",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo"
+            ]
+          }
+        },
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The label text.",
+          "key": true
+        },
+        {
+          "name": "color",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "A hex color, e.g. `#ff0000`."
+        }
+      ]
+    },
+    {
+      "name": "Issue",
+      "table": "issues",
+      "key": [
+        "repo",
+        "number"
+      ],
+      "doc": "An issue — the centerpiece. **Composite-keyed** on `(repo, number)` where\n`repo: Id<Repo>` is a foreign key (the FK-in-composite-PK case). Carries two\nenums, a nullable datetime, a bool, and an int with a DDL default.",
+      "fields": [
+        {
+          "name": "repo",
+          "type": {
+            "k": "ref",
+            "name": "Repo",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The repo the issue belongs to — an FK **and** the leading PK member.",
+          "key": true,
+          "relation": {
+            "to": "Repo",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo"
+            ]
+          }
+        },
+        {
+          "name": "number",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The issue number within the repo — the second PK member.",
+          "key": true
+        },
+        {
+          "name": "title",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The issue title."
+        },
+        {
+          "name": "body",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "The issue body (Markdown); absent for a title-only issue."
+        },
+        {
+          "name": "state",
+          "type": {
+            "k": "enum",
+            "name": "IssueState"
+          },
+          "nullable": false,
+          "doc": "Whether the issue is open or closed."
+        },
+        {
+          "name": "kind",
+          "type": {
+            "k": "enum",
+            "name": "IssueKind"
+          },
+          "nullable": false,
+          "doc": "What kind of issue this is (bug / feature / chore)."
+        },
+        {
+          "name": "author",
+          "type": {
+            "k": "ref",
+            "name": "User",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The issue author — a single-column to-one FK to [`User`].",
+          "relation": {
+            "to": "User",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "author"
+            ]
+          }
+        },
+        {
+          "name": "is_locked",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": false,
+          "doc": "Whether the conversation is locked to collaborators."
+        },
+        {
+          "name": "comment_count",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "Number of comments — defaults to 0 at the DDL level.",
+          "default": 0
+        },
+        {
+          "name": "closed_at",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": true,
+          "doc": "When the issue was closed, if it has been."
+        },
+        {
+          "name": "priority",
+          "type": {
+            "k": "enum",
+            "name": "Priority"
+          },
+          "nullable": true,
+          "doc": "Triage priority, once assigned (Step-5 drift demo: a nullable enum added\nafter the schema first shipped)."
+        },
+        {
+          "name": "labels",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "ref",
+              "name": "Label",
+              "entity": true
+            }
+          },
+          "nullable": false,
+          "doc": "The issue-label edge — a to-many join from [`Issue`] to [`Label`] with no\nlocal key. Both the issue and the label live in the *same* repo, so the\nlabel reference `#[fluessig(shares(repo))]` declares that its leading FK\ncolumn is the shared physical `repo_id` — the `issue_labels` table carries\n`repo_id` once.",
+          "relation": {
+            "to": "Label",
+            "cardinality": "many",
+            "kind": "association",
+            "table": "issue_labels",
+            "fkColumns": [
+              "repo",
+              "label_name"
+            ],
+            "sourceColumns": [
+              "repo",
+              "issue_number"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Comment",
+      "table": "comments",
+      "key": [
+        "id"
+      ],
+      "doc": "A comment on an issue — globally id-keyed, referencing the composite-keyed\n[`Issue`] by a single `Id<Issue>` field that expands to `(repo_id,\nissue_number)`, plus a to-one FK to its [`User`] author.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The comment id.",
+          "key": true
+        },
+        {
+          "name": "issue",
+          "type": {
+            "k": "ref",
+            "name": "Issue",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The issue this comment is on — a composite FK `(repo_id, issue_number)`.",
+          "relation": {
+            "to": "Issue",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "repo",
+              "issue_number"
+            ]
+          }
+        },
+        {
+          "name": "author",
+          "type": {
+            "k": "ref",
+            "name": "User",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The comment author.",
+          "relation": {
+            "to": "User",
+            "cardinality": "one",
+            "kind": "association",
+            "fkColumns": [
+              "author"
+            ]
+          }
+        },
+        {
+          "name": "body",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The comment body (Markdown)."
+        },
+        {
+          "name": "created_at",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": true,
+          "doc": "When the comment was posted."
+        }
+      ]
+    }
+  ],
+  "relationProperties": [],
+  "valueStructs": []
+}

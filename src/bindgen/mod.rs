@@ -282,6 +282,9 @@ pub fn fan_out(api: &ApiDoc, lang: &str, pattern: &str) -> Vec<(String, ApiDoc)>
                 // Interfaces/ops are not fanned out (see KNOWN LIMITATION): a
                 // group file is the DTO surface, so the op layer stays empty.
                 interfaces: Vec::new(),
+                // Top-level consts are a whole-document concern, not a per-group
+                // DTO; a fanned-out sub-document carries none.
+                consts: Vec::new(),
             };
             (fan_out_path(pattern, &g), sub)
         })

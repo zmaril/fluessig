@@ -19,7 +19,7 @@
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiType, ForeignType, Shape};
+use crate::api::{ApiConst, ApiDoc, ApiType, ConstValue, ForeignType, Shape};
 
 use super::*;
 
@@ -51,6 +51,9 @@ pub fn rust_core_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&
             $['\n']
         };
     }
+
+    // ── top-level exported consts: `pub const` (or a runtime-value note) ──
+    emit_consts(&mut t, api);
 
     // ── enums: plain Rust (no serde/napi derives) ──
     for (name, variants) in enums {
@@ -187,6 +190,77 @@ fn collect_foreign<'a>(t: &'a ApiType, out: &mut Vec<&'a ForeignType>) {
         ApiType::List { list } => collect_foreign(list, out),
         ApiType::Nullable { nullable } => collect_foreign(nullable, out),
         _ => {}
+    }
+}
+
+/// Emit the surface's TOP-LEVEL exported constants as `pub const` items, sorted
+/// by name for deterministic output.
+///
+/// Const-representability policy: a const lowers to a real `pub const NAME: T =
+/// LITERAL;` ONLY when its declared `type` is a const-constructible SCALAR
+/// (`string`/`boolean`/`int32`/`int64`/`float64`) AND it carries a statically-known
+/// literal `value`. A `string` rides as `&str` (a `String` const is not
+/// const-constructible); the other scalars reuse the shared [`ty`] Rust mapping
+/// verbatim. Anything else — a model/union/foreign/`Json`/`bytes` type, or a const
+/// with no literal value (a runtime expression the extractor could not fold) — is
+/// NOT forced into a broken `pub const`. Instead it is skipped and recorded as a
+/// `// const NAME: <ty> — not const-representable (runtime value)` doc comment, so
+/// the const's existence is visible in the skeleton without emitting code that
+/// would not compile.
+fn emit_consts(t: &mut rust::Tokens, api: &ApiDoc) {
+    let mut consts: Vec<&ApiConst> = api.consts.iter().collect();
+    consts.sort_by(|a, b| a.name.cmp(&b.name));
+    for c in consts {
+        match const_literal(api, c) {
+            Some((rust_ty, literal)) => {
+                let doc = c.doc.as_deref().map(doc_line).unwrap_or_default();
+                quote_in! { *t =>
+                    $(&doc)pub const $(&c.name): $(rust_ty) = $(literal);
+                    $['\n']
+                };
+            }
+            None => {
+                let label = ty(api, &c.ty).0;
+                quote_in! { *t =>
+                    $(format!("// const {}: {label} — not const-representable (runtime value)", c.name))
+                    $['\n']
+                };
+            }
+        }
+    }
+}
+
+/// The `(Rust type, Rust literal)` a const lowers to, or `None` when it is not
+/// const-representable (non-scalar type, no literal value, or a value whose form
+/// does not match a const-constructible scalar). See [`emit_consts`] for policy.
+fn const_literal(api: &ApiDoc, c: &ApiConst) -> Option<(String, String)> {
+    let ApiType::Scalar(scalar) = &c.ty else {
+        return None;
+    };
+    let value = c.value.as_ref()?;
+    let out = match (scalar.as_str(), value) {
+        // A string const rides as `&str` (deviating from `ty()`'s `String`, which
+        // is not const-constructible); `{:?}` renders an escaped Rust string literal.
+        ("string", ConstValue::Str(s)) => ("&str".to_string(), format!("{s:?}")),
+        ("boolean", ConstValue::Bool(b)) => (ty(api, &c.ty).0, b.to_string()),
+        ("int32" | "int64", ConstValue::Int(i)) => (ty(api, &c.ty).0, i.to_string()),
+        // A float const accepts an integer JSON number too (the untagged carrier
+        // lands whole numbers on `Int`); either way it renders as an `f64` literal.
+        ("float64", ConstValue::Float(f)) => (ty(api, &c.ty).0, float_lit(*f)),
+        ("float64", ConstValue::Int(i)) => (ty(api, &c.ty).0, float_lit(*i as f64)),
+        _ => return None,
+    };
+    Some(out)
+}
+
+/// Render an `f64` as a valid Rust float literal — ensure a decimal point (or
+/// exponent) so `2` becomes `2.0` (a bare `2` is not a valid `f64` const value).
+fn float_lit(f: f64) -> String {
+    let s = format!("{f}");
+    if s.contains(['.', 'e', 'E']) || !s.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+        s
+    } else {
+        format!("{s}.0")
     }
 }
 
@@ -388,5 +462,93 @@ mod tests {
         assert!(out.contains("pub struct HttpServerHandle(pub u64);"));
         // Nested through `List`, the return is `Vec<HttpServerHandle>`, not `Vec<String>`.
         assert!(out.contains("-> anyhow::Result<Vec<HttpServerHandle>>"));
+    }
+
+    /// A string / int / bool / float exported const lowers to a real `pub const`,
+    /// with `string` riding as `&str`; consts are emitted sorted by name and the
+    /// whole module still round-trips through rustfmt (proof it parses).
+    #[test]
+    fn representable_consts_lower_to_pub_const() {
+        let json = r#"{
+          "fluessig": {"format": 1, "emitter": "t", "compiler": "t"},
+          "models": [], "unions": [],
+          "consts": [
+            {"name": "VERSION", "type": "string", "value": "0.80.10"},
+            {"name": "MAX_RETRIES", "type": "int64", "value": 5},
+            {"name": "DEBUG", "type": "boolean", "value": true},
+            {"name": "RATIO", "type": "float64", "value": 1.5}
+          ],
+          "interfaces": [{"name": "Api", "ops": []}]
+        }"#;
+        let api = load_api(json).unwrap();
+        let out = rust_core_binding(&api, &[], None);
+
+        assert!(out.contains(r#"pub const VERSION: &str = "0.80.10";"#));
+        assert!(out.contains("pub const MAX_RETRIES: i64 = 5;"));
+        assert!(out.contains("pub const DEBUG: bool = true;"));
+        assert!(out.contains("pub const RATIO: f64 = 1.5;"));
+        // Deterministic: sorted by name (DEBUG < MAX_RETRIES < RATIO < VERSION).
+        let pos = |n: &str| out.find(n).unwrap();
+        assert!(pos("DEBUG") < pos("MAX_RETRIES"));
+        assert!(pos("MAX_RETRIES") < pos("RATIO"));
+        assert!(pos("RATIO") < pos("VERSION"));
+    }
+
+    /// A whole-number float const still renders a valid `f64` literal (`2` → `2.0`),
+    /// tolerating the untagged carrier landing it on `Int`.
+    #[test]
+    fn whole_number_float_const_gets_decimal() {
+        let json = r#"{
+          "fluessig": {"format": 1, "emitter": "t", "compiler": "t"},
+          "models": [], "unions": [],
+          "consts": [{"name": "SCALE", "type": "float64", "value": 2}],
+          "interfaces": [{"name": "Api", "ops": []}]
+        }"#;
+        let api = load_api(json).unwrap();
+        let out = rust_core_binding(&api, &[], None);
+        assert!(out.contains("pub const SCALE: f64 = 2.0;"));
+    }
+
+    /// A const that is NOT const-representable — a model-typed const, and a
+    /// scalar const with no literal value (a runtime expression the extractor
+    /// could not fold) — is SKIPPED with a doc-comment note, never a broken
+    /// `pub const`.
+    #[test]
+    fn non_representable_consts_are_skipped_with_note() {
+        let json = r#"{
+          "fluessig": {"format": 1, "emitter": "t", "compiler": "t"},
+          "models": [
+            {"name": "Config", "fields": [
+              {"name": "id", "type": "string", "nullable": false}
+            ]}
+          ],
+          "unions": [],
+          "consts": [
+            {"name": "DEFAULT_CONFIG", "type": {"model": "Config"}, "value": null},
+            {"name": "BUILD_STAMP", "type": "string"}
+          ],
+          "interfaces": [{"name": "Api", "ops": []}]
+        }"#;
+        let api = load_api(json).unwrap();
+        let out = rust_core_binding(&api, &[], None);
+
+        // No broken `pub const` for either.
+        assert!(!out.contains("pub const DEFAULT_CONFIG"));
+        assert!(!out.contains("pub const BUILD_STAMP"));
+        // Both recorded as runtime-value notes.
+        assert!(out
+            .contains("// const DEFAULT_CONFIG: Config — not const-representable (runtime value)"));
+        assert!(
+            out.contains("// const BUILD_STAMP: String — not const-representable (runtime value)")
+        );
+    }
+
+    /// A const-free surface is byte-identical to before this slot existed: the
+    /// emitter adds nothing.
+    #[test]
+    fn no_consts_emits_nothing() {
+        let out = rust_core_binding(&sample(), &[], None);
+        assert!(!out.contains("pub const"));
+        assert!(!out.contains("not const-representable"));
     }
 }

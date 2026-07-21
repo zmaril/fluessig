@@ -493,6 +493,7 @@ pub fn fan_out_crate(
             models: common_models,
             unions: common_unions,
             interfaces: Vec::new(),
+            consts: Vec::new(),
         };
         let refs = refs_for(&sub, &common_home);
         let content = splice_imports(render(&sub, enums), &render_use_block(&refs));

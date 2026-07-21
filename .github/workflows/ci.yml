@@ -28,6 +28,7 @@ jobs:
       callback: ${{ steps.filter.outputs.callback }}
       ruby: ${{ steps.filter.outputs.ruby }}
       wasm: ${{ steps.filter.outputs.wasm }}
+      php: ${{ steps.filter.outputs.php }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -101,6 +102,20 @@ jobs:
               - 'src/bin/fluessig-gen.rs'
               - 'crates/callback-demo-wasm/**'
               - 'tests/wasm_callback_lowering.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            # The PHP (ext-php-rs) callback round-trip leg runs only when the PHP
+            # backend, the shared type-map/gen, the php demo crate, or the harness
+            # itself change.
+            php:
+              - 'src/bindgen/php.rs'
+              - 'src/bindgen/php_callback.rs'
+              - 'src/bindgen/mod.rs'
+              - 'src/bin/fluessig-gen.rs'
+              - 'crates/callback-demo-php/**'
+              - 'crates/fluessig-runtime/**'
+              - 'tests/php_callback_lowering.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -264,3 +279,28 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: bash crates/callback-demo-wasm/run.sh
+
+  # The compile+run gate for the PHP (ext-php-rs) backend: build the
+  # callback-demo-php cdylib, load it as a PHP extension, and run the PHP consumer
+  # — a real round-trip proving a PHP Closure is invoked from Rust SYNCHRONOUSLY on
+  # the request thread with [0, 1] and removed on unsubscribe. PHP is documented
+  # SYNC-ONLY (the coordinator ruling) — the generated PhpCb newtype carries the
+  # compile-visible marker, and the demo invokes the callback only synchronously on
+  # the request thread. NOT in the branch ruleset's required-checks list, so it does
+  # not block merges (like java-roundtrip). Its own job block so a rebase alongside
+  # sibling legs keeps both. ext-php-rs' build script needs the PHP dev headers
+  # (`php-config`), provided by setup-php.
+  callback-php:
+    name: php callback round-trip
+    needs: changes
+    if: needs.changes.outputs.php == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+      - run: bash crates/callback-demo-php/run.sh

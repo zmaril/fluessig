@@ -1,0 +1,24 @@
+[package]
+name = "callback-demo-php"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The PHP (ext-php-rs) callback round-trip demo cdylib: fluessig-generated ext-php-rs glue (src/generated.rs) for a Ticker interface + a hand-written core_impl, compiled to a loadable PHP extension and driven from consumer.php, proving a PHP Closure is invoked from Rust SYNCHRONOUSLY on the request thread and removed on unsubscribe (PHP is documented sync-only)."
+
+[lib]
+# Fixed lib name so the built cdylib is `libcallback_demo_php.so`; run.sh loads it
+# directly via `php -d extension=<path>` (ext-php-rs's `#[php_module]` exports the
+# `get_module` entry point the PHP engine calls on load). rlib too so the
+# (excluded-from-default) crate still `cargo check`s.
+name = "callback_demo_php"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# ext-php-rs 0.13 — the generated binding uses `#[php_class]`, `#[php_impl]`,
+# `#[php_module]`, `ext_php_rs::types::{Zval, ZendCallable}`, and `shallow_clone`.
+ext-php-rs = "0.13"
+# The generated php binding prelude imports `fluessig_runtime::{Poll, PollStream}`.
+fluessig-runtime = { path = "../fluessig-runtime" }
+# The core trait returns `anyhow::Result<T>`; core_impl uses anyhow.
+anyhow = "1"

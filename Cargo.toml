@@ -36,6 +36,13 @@ members = [
     # runner / CI leg (`cargo build --target wasm32-unknown-unknown`), never by a
     # bare host `cargo build`/`cargo test`.
     "crates/callback-demo-wasm",
+    # The PHP (ext-php-rs) callback round-trip demo. Member so it shares Cargo.lock
+    # and builds via `-p`, but — like the sibling demos above — DELIBERATELY
+    # excluded from `default-members`: its ext-php-rs-linking cdylib (which links
+    # against the PHP runtime discovered via `php-config`) is built only by its own
+    # round-trip runner / CI leg, never by a bare `cargo build`/`cargo test`. PHP
+    # callbacks are documented SYNC-ONLY (see the generated PhpCb marker).
+    "crates/callback-demo-php",
 ]
 # The root is a hybrid package+workspace; without default-members a bare
 # `cargo build`/`test` would build only the root package. List both so the

@@ -3,6 +3,13 @@
 //! straitjacket-allow-file:duplication — the per-language generators are
 //! DELIBERATELY parallel: the (language × shape) template grid is the design
 //! (see /translation.md); the truly shared pieces live in the parent module.
+//!
+//! The callback + subscription slice (an `ApiType::Callback` param, a
+//! `Shape::Subscription` op) lives in the sibling [`super::php_callback`] module.
+//! PHP callbacks are DOCUMENTED SYNC-ONLY (the coordinator ruling): the generated
+//! `PhpCb` newtype asserts `Send`/`Sync` over a `!Send` PHP callable, sound only
+//! under synchronous same-request-thread invocation (off-thread is UB) — see the
+//! LOUD marker on `PhpCb` and notes/callback-function-types.md.
 
 use genco::prelude::*;
 
@@ -40,9 +47,10 @@ fn php_doc_ty(t: &ApiType) -> String {
         ApiType::Nullable { nullable } => format!("?{}", php_doc_ty(nullable)),
         // a union envelope and a foreign handle both ride the string carrier here
         ApiType::Union { .. } | ApiType::Foreign { .. } => "string".to_string(),
-        // PHP callback lowering is a follow-up (and off-thread-restricted — see
-        // notes/callback-function-types.md); `callable` is the honest docblock
-        // placeholder, unreached by any committed fixture.
+        // A callback param crosses in as a PHP `callable` (a `Closure`); the
+        // generated method wraps it into the uniform core `Box<dyn Fn>` via the
+        // sync-only `PhpCb` newtype (see php_callback.rs / notes/callback-function-
+        // types.md — PHP callbacks are documented sync-only).
         ApiType::Callback { .. } => "callable".to_string(),
     }
 }
@@ -99,6 +107,17 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
             $("/// which packs to a PHP string rather than an array of ints).")
             pub type Bytes = ext_php_rs::binary::Binary<u8>;
         };
+    }
+    // The PhpCb callback wrapper (whenever a callback param appears; a
+    // subscription op always carries one) + the opaque `#[php_class]`
+    // Subscription handle. Both gated, so a callback/subscription-free schema
+    // stays byte-identical. The `PhpCb` doc is the sync-only compile-visible
+    // marker (the coordinator ruling — off-thread invocation is UB).
+    if api_uses_callback(api) {
+        quote_in! { t => $(super::php_callback::PHP_CALLBACK_PRELUDE) };
+    }
+    if api_uses_subscription(api) {
+        quote_in! { t => $(super::php_callback::PHP_SUBSCRIPTION_PRELUDE) };
     }
     t.line();
 
@@ -280,22 +299,35 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                     }
                     quote_in! { methods => $['\r']$(php_sig_note(&i.name, op)) };
                 }
-                let ps = param_sig(api, op)
+                // A callback param crosses in as a raw callable `&Zval` (not the
+                // uniform core box); the conv prelude wraps it. Every other param
+                // keeps its shared `ty` spelling.
+                let sig = super::php_callback::php_param_sig(api, op);
+                let ps = sig
                     .iter()
                     .map(|(n, r)| format!("{n}: {r}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let names = param_sig(api, op)
+                let names = sig
                     .iter()
                     .map(|(n, _)| n.clone())
                     .collect::<Vec<_>>()
                     .join(", ");
                 let sep = if ps.is_empty() { "" } else { ", " };
                 let (ret, _) = ty(api, &op.returns);
+                // The callback-conv prelude (wraps each callable `&Zval` into the
+                // uniform core `Box<dyn Fn>`, shadowing `{name}`); empty for a
+                // callback-free op, so its body stays byte-identical. A
+                // callback-carrying op is forced fallible (the conv marshals via
+                // `?`), so it always rides the `PhpResult` throw seam.
+                let convs = super::php_callback::callback_conv_lines(api, op);
+                let prelude = convs.join("\n");
+                let has_cb = super::php_callback::op_uses_callback(op);
                 match op.shape {
                     Shape::Ctor => quote_in! { methods =>
                         $['\r']
                         pub fn __construct($(&ps)) -> PhpResult<Self> {
+                            $(&prelude)
                             Ok(Self { core: Arc::new(<$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)?) })
                         }
                     },
@@ -305,21 +337,31 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                         // synchronous (the async/sync default is a node-only
                         // projection), so the only default-inversion effect here is
                         // INFALLIBILITY: a bare-`T` core drops the `PhpResult`/throw
-                        // seam entirely.
+                        // seam entirely — UNLESS the op carries a callback param,
+                        // whose conv marshals via `?` and forces the throw seam back.
                         if let Some(nm) = pinned_name(&op.bindings, LANG) {
                             quote_in! { methods => $['\r']$(format!("#[rename({nm:?})]")) };
                         }
-                        if op.infallible {
+                        if op.infallible && !has_cb {
                             quote_in! { methods =>
                                 $['\r']
                                 pub fn $(&name)(&self$sep$(&ps)) -> $(&ret) {
                                     self.core.$(&name)($(&names))
                                 }
                             }
+                        } else if op.infallible {
+                            quote_in! { methods =>
+                                $['\r']
+                                pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&ret)> {
+                                    $(&prelude)
+                                    Ok(self.core.$(&name)($(&names)))
+                                }
+                            }
                         } else {
                             quote_in! { methods =>
                                 $['\r']
                                 pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&ret)> {
+                                    $(&prelude)
                                     self.core.$(&name)($(&names)).map_err(err)
                                 }
                             }
@@ -330,17 +372,37 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                         quote_in! { methods =>
                             $['\r']
                             pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&class)> {
+                                $(&prelude)
                                 Ok($(&class) { stream: self.core.$(&name)($(&names)).map_err(err)? })
                             }
                         }
                     }
-                    // Subscription (register/unsubscribe) lowering deferred to a
-                    // follow-up PR for php; emit a skip-note so the op is recorded
-                    // but not auto-bound (node/python only today).
-                    Shape::Subscription => quote_in! { methods =>
-                        $['\r']
-                        $(format!("// subscription: {} — register/unsubscribe lowering deferred (node/python only today).", op.name))
-                    },
+                    // A subscription op REGISTERS the listener (its one callback
+                    // param, wrapped by the `prelude` into the uniform `Box<dyn
+                    // Fn>`) through the core, then hands back an owning `#[php_class]`
+                    // `Subscription` handle holding the core's returned unsubscribe
+                    // closure. Always `PhpResult<Subscription>`: even an infallible
+                    // core op's callable-conv can raise (a non-callable `Zval`), and
+                    // a fallible core op throws on `Err` via the same `err` seam.
+                    // Always `&self` (a subscription op requires a stateful iface).
+                    Shape::Subscription => {
+                        if let Some(nm) = pinned_name(&op.bindings, LANG) {
+                            quote_in! { methods => $['\r']$(format!("#[rename({nm:?})]")) };
+                        }
+                        let register = if op.infallible {
+                            format!("let unsub = self.core.{name}({names});")
+                        } else {
+                            format!("let unsub = self.core.{name}({names}).map_err(err)?;")
+                        };
+                        quote_in! { methods =>
+                            $['\r']
+                            pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<Subscription> {
+                                $(&prelude)
+                                $(&register)
+                                Ok(Subscription { unsub: std::sync::Mutex::new(Some(unsub)) })
+                            }
+                        }
+                    }
                     Shape::Manual => quote_in! { methods =>
                         $['\r']
                         $(format!("// @manual: {} — hand-written in lib.rs.", op.name))
@@ -382,33 +444,52 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                     }
                 }
                 quote_in! { methods => $['\r']$(php_sig_note(&i.name, op)) };
-                let ps = param_sig(api, op)
+                // A callback param crosses in as a callable `&Zval`; the conv
+                // prelude wraps it into the uniform core `Box<dyn Fn>` (and forces
+                // the `PhpResult` throw seam, since the conv marshals via `?`). A
+                // stateless subscription op is unreachable (the loader requires a
+                // subscription op's interface to be stateful), so only Ctor/Unary/
+                // Stream land here.
+                let sig = super::php_callback::php_param_sig(api, op);
+                let ps = sig
                     .iter()
                     .map(|(n, r)| format!("{n}: {r}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let names = param_sig(api, op)
+                let names = sig
                     .iter()
                     .map(|(n, _)| n.clone())
                     .collect::<Vec<_>>()
                     .join(", ");
                 let (ret, _) = ty(api, &op.returns);
+                let convs = super::php_callback::callback_conv_lines(api, op);
+                let prelude = convs.join("\n");
+                let has_cb = super::php_callback::op_uses_callback(op);
                 // op export-name pin ⇒ `#[rename("…")]`; infallible ⇒ drop the
                 // `PhpResult`/throw seam (see the method arm above).
                 if let Some(nm) = pinned_name(&op.bindings, LANG) {
                     quote_in! { methods => $['\r']$(format!("#[rename({nm:?})]")) };
                 }
-                if op.infallible {
+                if op.infallible && !has_cb {
                     quote_in! { methods =>
                         $['\r']
                         pub fn $(&name)($(&ps)) -> $(&ret) {
                             <$(&impl_path) as $(&trait_name)>::$(&name)($(&names))
                         }
                     }
+                } else if op.infallible {
+                    quote_in! { methods =>
+                        $['\r']
+                        pub fn $(&name)($(&ps)) -> PhpResult<$(&ret)> {
+                            $(&prelude)
+                            Ok(<$(&impl_path) as $(&trait_name)>::$(&name)($(&names)))
+                        }
+                    }
                 } else {
                     quote_in! { methods =>
                         $['\r']
                         pub fn $(&name)($(&ps)) -> PhpResult<$(&ret)> {
+                            $(&prelude)
                             <$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)
                         }
                     }

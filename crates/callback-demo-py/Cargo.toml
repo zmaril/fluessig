@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # pyo3 with `extension-module` — the .so resolves libpython symbols at import
 # time (the interpreter provides them), so it loads as a plain python module.
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
 # The generated python binding prelude imports `fluessig_runtime::{Poll, PollStream}`.
 fluessig-runtime = { path = "../fluessig-runtime" }
 # The core trait returns `anyhow::Result<T>`; core_impl uses anyhow.

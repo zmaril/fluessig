@@ -6,7 +6,7 @@
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiType, ApiUnion, Shape};
+use crate::api::{ApiDoc, ApiType, ApiUnion, CallbackSig, Shape};
 
 use super::*;
 
@@ -139,6 +139,93 @@ fn node_param_ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
         }
         _ => ty(api, t),
     }
+}
+
+/// Does any op in the surface take a callback param? Gates the napi
+/// `threadsafe_function` imports in the prelude, so a callback-free file emits
+/// ZERO new import lines and its golden stays byte-identical.
+fn api_uses_callback(api: &ApiDoc) -> bool {
+    api.interfaces.iter().flat_map(|i| &i.ops).any(|op| {
+        op.params
+            .iter()
+            .any(|p| matches!(&p.ty, ApiType::Callback { .. }))
+    })
+}
+
+/// The napi BINDING-position spelling of a callback param: a
+/// `ThreadsafeFunction<Args, ErrorStrategy::Fatal>` (single arg → the arg type
+/// directly, N args → a tuple). This is the type JS supplies; the fn body bridges
+/// it into the uniform core `Box<dyn Fn(..)>` via [`node_callback_wrapper`]. The
+/// CORE-trait side keeps the shared `Box<dyn Fn>` spelling (via [`node_param_ty`]
+/// → [`ty`]) so the boxed closure the binding builds type-checks against it.
+fn node_callback_tsfn_ty(api: &ApiDoc, sig: &CallbackSig) -> String {
+    let args: Vec<String> = sig.params.iter().map(|p| ty(api, p).0).collect();
+    let arg = match args.len() {
+        1 => args[0].clone(),
+        _ => format!("({})", args.join(", ")),
+    };
+    format!("ThreadsafeFunction<{arg}, ErrorStrategy::Fatal>")
+}
+
+/// Node's BINDING param `(name, rust_type)` list: a callback param is spelled its
+/// napi `ThreadsafeFunction` (the value JS supplies); every other param delegates
+/// to [`node_param_ty`], so it is byte-identical to [`node_param_sig`]. Used for
+/// the emitted fn/method signature ONLY — the core-trait method keeps the shared
+/// `Box<dyn Fn>` spelling.
+fn node_binding_param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
+    param_sig_with(op, |t| match t {
+        ApiType::Callback { callback } => node_callback_tsfn_ty(api, callback),
+        _ => node_param_ty(api, t).0,
+    })
+}
+
+/// The wrapper `let {name}_cb: Box<dyn Fn(..)> = { … };` bridging a napi
+/// `ThreadsafeFunction` param into the uniform core closure: the boxed `Fn`
+/// forwards each invocation to the TSFN `NonBlocking` (queues to the JS event
+/// loop, never blocks the caller thread). Single-arg forwards the value directly;
+/// N-arg forwards a tuple.
+fn node_callback_wrapper(api: &ApiDoc, name: &str, sig: &CallbackSig) -> String {
+    let arg_tys: Vec<String> = sig.params.iter().map(|p| ty(api, p).0).collect();
+    let vars = callback_arg_vars(arg_tys.len());
+    let box_ty = format!("Box<dyn Fn({}) + Send + Sync>", arg_tys.join(", "));
+    let closure_params = vars
+        .iter()
+        .zip(&arg_tys)
+        .map(|(v, ty)| format!("{v}: {ty}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // the TSFN takes the sole value directly, or a tuple for 0 / N args.
+    let call_arg = match vars.len() {
+        1 => vars[0].clone(),
+        _ => format!("({})", vars.join(", ")),
+    };
+    format!(
+        "let {name}_cb: {box_ty} = {{ let tsfn = {name}.clone(); Box::new(move |{closure_params}| {{ tsfn.call({call_arg}, ThreadsafeFunctionCallMode::NonBlocking); }}) }};\n"
+    )
+}
+
+/// The trait-call argument name list and the wrapper prelude for a node fn/method:
+/// a callback param is passed as its bridged `{name}_cb` local (whose `let` is in
+/// the returned prelude), every other param by its plain name. An op with no
+/// callback param yields the historical name list and an empty prelude, so its
+/// output is byte-identical.
+fn node_call_bridge(api: &ApiDoc, op: &ApiOp) -> (String, String) {
+    let mut wrappers = String::new();
+    let names = op
+        .params
+        .iter()
+        .map(|p| {
+            let n = snake(&p.name);
+            if let ApiType::Callback { callback } = &p.ty {
+                wrappers.push_str(&node_callback_wrapper(api, &n, callback));
+                format!("{n}_cb")
+            } else {
+                n
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    (names, wrappers)
 }
 
 /// The node `(rust, ts)` spelling of a type, applying structured union
@@ -376,6 +463,11 @@ struct NodePrelude {
     /// throwing site both spells `Result<…>` and calls `.map_err(err)`), so one
     /// flag gates both.
     result: bool,
+    /// Any op with a callback param → the `napi::threadsafe_function::{…}` import
+    /// trio (the `ThreadsafeFunction` binding type + `NonBlocking` call mode +
+    /// `ErrorStrategy`). A callback-free surface leaves this `false` and emits ZERO
+    /// new import lines, keeping its golden byte-identical.
+    callback: bool,
 }
 
 impl NodePrelude {
@@ -428,6 +520,7 @@ impl NodePrelude {
             // the ctor of a single_threaded handle still throws (`.map_err(err)?`),
             // so it too needs `Result` + `err` — `ctor` (any ctor) already covers it.
             result: async_unary || stream || ctor || sync_fallible || arrow,
+            callback: api_uses_callback(api),
         }
     }
 
@@ -497,6 +590,12 @@ pub fn node_binding_with_options(
     }
     // ALWAYS — the one napi-2-compatible import every surface needs.
     quote_in! { t => $['\r'] use napi_derive::napi; };
+    if needs.callback {
+        // Callback params cross in as a napi `ThreadsafeFunction`, delivered to the
+        // JS event loop `NonBlocking` (never blocks the caller thread). Guarded, so
+        // a callback-free surface emits none of these lines.
+        quote_in! { t => $['\r'] use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, ErrorStrategy}; };
+    }
     if needs.stream {
         quote_in! { t => $['\r'] use std::future::Future; };
     }
@@ -1114,14 +1213,24 @@ pub fn node_binding_with_options(
                             // DEFAULT: a synchronous method — no `AsyncTask`, no
                             // `Promise`. Infallible (bare-`T` core) passes the value
                             // straight through; fallible (`Result<T>` core) throws.
+                            // A callback param crosses in as its `ThreadsafeFunction`
+                            // (via `node_binding_param_sig`) and is bridged into the
+                            // core `Box<dyn Fn>` by `wrappers` before the call; a
+                            // callback-free op keeps `ps`/`names` byte-identical.
                             let (ret, _) = node_ty(api, opts, &op.returns);
                             let attr = sync_napi_attr(pin);
+                            let ps = node_binding_param_sig(api, op)
+                                .iter()
+                                .map(|(n, r)| format!("{n}: {r}"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let (call_names, wrappers) = node_call_bridge(api, op);
                             if op.infallible {
                                 quote_in! { methods =>
                                     $['\r']
                                     $attr
                                     pub fn $(&name)(&self, $(&ps)) -> $(&ret) {
-                                        $(core_recv).$(&name)($(&names))
+                                        $(&wrappers)$(core_recv).$(&name)($(&call_names))
                                     }
                                 }
                             } else {
@@ -1129,7 +1238,7 @@ pub fn node_binding_with_options(
                                     $['\r']
                                     $attr
                                     pub fn $(&name)(&self, $(&ps)) -> Result<$(&ret)> {
-                                        $(core_recv).$(&name)($(&names)).map_err(err)
+                                        $(&wrappers)$(core_recv).$(&name)($(&call_names)).map_err(err)
                                     }
                                 }
                             }
@@ -1253,16 +1362,25 @@ pub fn node_binding_with_options(
                 } else if !op.is_async {
                     // DEFAULT: a synchronous free function — a direct call into
                     // the core trait, no `AsyncTask`/`Promise`. Infallible returns
-                    // the value; fallible throws on `Err`.
+                    // the value; fallible throws on `Err`. A callback param crosses
+                    // in as its `ThreadsafeFunction` (via `node_binding_param_sig`)
+                    // and is bridged into the core `Box<dyn Fn>` by `wrappers` before
+                    // the call; a callback-free op keeps `ps`/`names` byte-identical.
                     let (ret, _) = node_ty(api, opts, &op.returns);
                     let attr = sync_napi_attr(pin);
-                    let call = format!("<{impl_path} as {trait_name}>::{name}({names})");
+                    let ps = node_binding_param_sig(api, op)
+                        .iter()
+                        .map(|(n, r)| format!("{n}: {r}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let (call_names, wrappers) = node_call_bridge(api, op);
+                    let call = format!("<{impl_path} as {trait_name}>::{name}({call_names})");
                     if op.infallible {
                         quote_in! { t =>
                             $['\r']
                             $attr
                             pub fn $(&name)($(&ps)) -> $(&ret) {
-                                $(&call)
+                                $(&wrappers)$(&call)
                             }
                             $['\n']
                         };
@@ -1271,7 +1389,7 @@ pub fn node_binding_with_options(
                             $['\r']
                             $attr
                             pub fn $(&name)($(&ps)) -> Result<$(&ret)> {
-                                $(&call).map_err(err)
+                                $(&wrappers)$(&call).map_err(err)
                             }
                             $['\n']
                         };

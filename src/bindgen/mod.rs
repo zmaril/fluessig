@@ -408,6 +408,30 @@ fn ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
             let h = foreign_handle_name(foreign);
             (h.clone(), h)
         }
+        // The UNIFORM core-side shape of a callback — what the generated
+        // `<Iface>Core` trait sees, regardless of which language supplied it. Each
+        // backend's binding wraps its native callable into this box at the FFI
+        // boundary (napi `ThreadsafeFunction`, PyO3 `Py<PyAny>`, …). The ts half is
+        // the source-language spelling `(argN: T) => void`.
+        ApiType::Callback { callback } => {
+            let rust_args = callback
+                .params
+                .iter()
+                .map(|p| ty(api, p).0)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ts_args = callback
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("arg{i}: {}", ty(api, p).1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                format!("Box<dyn Fn({rust_args}) + Send + Sync>"),
+                format!("({ts_args}) => void"),
+            )
+        }
     }
 }
 
@@ -437,6 +461,17 @@ pub(super) fn foreign_handle_name(f: &ForeignType) -> String {
 
 fn param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
     param_sig_with(op, |t| ty(api, t).0)
+}
+
+/// The closure-argument variable names a callback wrapper binds, shared by the
+/// node and python backends so their generated closures agree: a single arg is
+/// the bare `v` (matching the design note's spelling), N args are `v0..v{N-1}`,
+/// zero args is empty (the wrapper then forwards the unit `()`).
+pub(super) fn callback_arg_vars(n: usize) -> Vec<String> {
+    match n {
+        1 => vec!["v".to_string()],
+        _ => (0..n).map(|i| format!("v{i}")).collect(),
+    }
 }
 
 /// The `(name, rust_type)` param list, spelling each param type via `ty_of` and

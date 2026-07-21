@@ -203,8 +203,13 @@ fn collect_type_refs(api: &ApiDoc, t: &ApiType, out: &mut Vec<String>) {
         ApiType::List { list } => collect_type_refs(api, list, out),
         ApiType::Nullable { nullable } => collect_type_refs(api, nullable, out),
         // A foreign type's opaque handle is generated locally (rust-core) and
-        // references no model/enum, so it makes no cross-group dependency.
-        ApiType::Scalar(_) | ApiType::Union { .. } | ApiType::Foreign { .. } => {}
+        // references no model/enum, so it makes no cross-group dependency. A callback
+        // likewise carries no cross-group DTO reference this slice (callbacks are
+        // never fanned out); its sig-param types are walked at their own sites.
+        ApiType::Scalar(_)
+        | ApiType::Union { .. }
+        | ApiType::Foreign { .. }
+        | ApiType::Callback { .. } => {}
     }
 }
 

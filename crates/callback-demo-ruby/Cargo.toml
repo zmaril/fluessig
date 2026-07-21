@@ -1,0 +1,24 @@
+[package]
+name = "callback-demo-ruby"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The Ruby (magnus) callback round-trip demo cdylib: fluessig-generated magnus glue (src/generated.rs) for a Ticker interface + a hand-written core_impl, compiled to a loadable Ruby extension and driven from consumer.rb, proving a Ruby Proc is invoked from Rust under the GVL and removed on unsubscribe."
+
+[lib]
+# Fixed lib name so the built cdylib is `libcallback_demo_ruby.so`; run.sh renames
+# it to `callback_demo_ruby.so` (matching the `#[magnus::init]` symbol
+# `Init_callback_demo_ruby`) for `require "callback_demo_ruby"`. rlib too so the
+# (excluded-from-default) crate still `cargo check`s.
+name = "callback_demo_ruby"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# magnus 0.7 — the generated binding uses `#[magnus::wrap]`, `magnus::block::Proc`,
+# `magnus::value::BoxValue`, and the `function!`/`method!` registration macros.
+magnus = "0.7"
+# The generated ruby binding prelude imports `fluessig_runtime::{Poll, PollStream}`.
+fluessig-runtime = { path = "../fluessig-runtime" }
+# The core trait returns `anyhow::Result<T>`; core_impl uses anyhow.
+anyhow = "1"

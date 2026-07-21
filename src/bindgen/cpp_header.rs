@@ -90,6 +90,11 @@ fn in_list(api: &ApiDoc, op: &ApiOp) -> Vec<String> {
 
 /// Generate the C header string.
 pub fn cpp_header(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+    // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
+    // today; the C ABI cdylib (`cpp_binding`) emits nothing for it, so this header
+    // must not declare its symbols either. Split it out + note it honestly.
+    let (api_owned, st_note) = crate::bindgen::split_single_threaded(api, "cpp");
+    let api = &api_owned;
     let uses_bytes = api_uses_bytes(api);
     let src = api.source.as_deref().unwrap_or("fluessig");
     let guard = format!(
@@ -244,6 +249,7 @@ pub fn cpp_header(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -
 
     s.push_str("\n#ifdef __cplusplus\n}\n#endif\n");
     s.push_str(&format!("#endif /* {guard} */\n"));
+    s.push_str(&st_note);
     s
 }
 

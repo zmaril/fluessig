@@ -314,7 +314,7 @@ fn main() {
             // (b) the `.java` source classes, one file per DTO/enum/union/
             // interface/stream cursor, under `--java-src-out <dir>`.
             if let Some(dir) = &java_src_out {
-                for (rel, content) in fluessig::bindgen::java_sources(&api, &enums) {
+                for (rel, content) in fluessig::bindgen::java_sources_with(&api, &enums, note) {
                     let path = std::path::Path::new(dir).join(&rel);
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).unwrap_or_else(|e| {

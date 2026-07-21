@@ -674,6 +674,32 @@ pub fn python_binding_with_options(
 
     emit_core_traits_python(&mut t, api, opts);
 
+    // The generated `Subscription` pyclass — emitted ONCE when any op in the
+    // surface is `Shape::Subscription`. It wraps the core's returned UNSUBSCRIBE
+    // closure; `unsubscribe()` (or dropping the handle) takes and calls it,
+    // removing the listener. Guarded so a subscription-free surface is unchanged.
+    if api_uses_subscription(api) {
+        class_names.push("Subscription".to_string());
+        quote_in! { t =>
+            $['\r']
+            $("/// A subscription handle wrapping the core's returned unsubscribe closure.")
+            $("/// `unsubscribe()` (or dropping the handle) removes the registered listener.")
+            #[pyclass]
+            pub struct Subscription {
+                unsub: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+            }
+            #[pymethods]
+            impl Subscription {
+                fn unsubscribe(&self) {
+                    if let Some(f) = self.unsub.lock().unwrap().take() {
+                        f();
+                    }
+                }
+            }
+            $['\n']
+        };
+    }
+
     // ── per-interface surface ──
     for i in &api.interfaces {
         let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
@@ -1038,6 +1064,28 @@ pub fn python_binding_with_options(
                                     stream: Arc::from(self.core.$(&name)($(&args)).map_err(err)?),
                                     $closed_init
                                 })
+                            }
+                        }
+                    }
+                    Shape::Subscription => {
+                        // Register the listener; return a `Subscription` handle
+                        // wrapping the core's UNSUBSCRIBE closure. The callback param
+                        // crosses in as a `PyObject`, bridged into the core
+                        // `Box<dyn Fn>` under the GIL by `prelude` (so the core call
+                        // HOLDS the GIL — no `py.detach`); the fallible/infallible
+                        // parts are shared with node.
+                        let (ret, call, ok) = subscription_method_parts(
+                            op.infallible,
+                            "PyResult",
+                            &format!("self.core.{name}({args})"),
+                        );
+                        quote_in! { methods =>
+                            $['\r']
+                            #[pyo3(signature = ($(&signature)))]
+                            fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> $(&ret) {
+                                $prelude
+                                let unsub = $(&call);
+                                $(&ok)
                             }
                         }
                     }

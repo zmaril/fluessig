@@ -254,6 +254,17 @@ pub enum Shape {
     Ctor,
     Unary,
     Stream,
+    /// A register/unsubscribe op (a cousin of [`Shape::Stream`]): it takes exactly
+    /// one [`ApiType::Callback`] param, REGISTERS that listener, and returns a
+    /// generated `Subscription` HANDLE whose `unsubscribe()`/drop removes the
+    /// listener. Maps to pi's `onEvent`/`onExit` `(listener) => () => void`. The
+    /// core-trait method returns the UNSUBSCRIBE closure (`Box<dyn Fn() + Send +
+    /// Sync>`); each backend's generated binding wraps that closure into its
+    /// `Subscription` handle class. Because a Subscription method is `&self`, the
+    /// interface must be stateful (carry a [`Shape::Ctor`]) — enforced by
+    /// [`load_api`]. node + python lower it fully today; the other backends emit a
+    /// skip-note (deferred to follow-up PRs).
+    Subscription,
     Manual,
 }
 
@@ -397,6 +408,31 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
                      threadpool, which is incompatible with a thread-confined `!Send` handle",
                     i.name, op.name
                 ));
+            }
+            // A `Shape::Subscription` op REGISTERS a listener and returns a
+            // `Subscription` handle whose drop/unsubscribe removes it. It must take
+            // exactly ONE callback param (the listener), and — since its method is
+            // `&self` — the interface must be stateful (carry a `Shape::Ctor`).
+            if op.shape == Shape::Subscription {
+                let callback_params = op
+                    .params
+                    .iter()
+                    .filter(|p| matches!(&p.ty, ApiType::Callback { .. }))
+                    .count();
+                if callback_params != 1 {
+                    return Err(format!(
+                        "subscription op `{}.{}` must have exactly one callback param",
+                        i.name, op.name
+                    ));
+                }
+                let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
+                if !has_ctor {
+                    return Err(format!(
+                        "subscription op `{}.{}` requires a stateful interface (its method is \
+                         `&self`), but `{}` has no ctor op",
+                        i.name, op.name, i.name
+                    ));
+                }
             }
             // This slice lowers ONLY forward-only sync-void callbacks. Reject any
             // callback param whose `is_async`/`fallible`/non-void `returns` the

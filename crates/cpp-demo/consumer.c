@@ -1,13 +1,32 @@
 /* A real C round-trip through the generated C ABI (`cpp_demo.h`), linked against
  * the cdylib. Drives the stateful Store handle: create, put/get, list keys, hit
- * the reachable error path, bulk-remove, free — asserting every result. Prints
+ * the reachable error path, bulk-remove, free — asserting every result. Then the
+ * Ticker callback + subscription round-trip: a C function is registered as a
+ * listener (via a fn-ptr + ctx) and fired FROM RUST across the C ABI. Prints
  * `C consumer OK` and returns 0 on success; nonzero on any mismatch. */
 
 #include "cpp_demo.h"
 
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+
+/* The listener's context: an array the C callback appends each tick value to. */
+typedef struct {
+    int32_t vals[16];
+    size_t len;
+} Seen;
+
+/* The host callback fired from Rust: it receives its `ctx` back + the tick value
+ * and records it. This proves a plain C function is invoked from the Rust core
+ * through the generated fn-ptr + ctx callback ABI. */
+static void on_tick_cb(void* ctx, int32_t v) {
+    Seen* seen = (Seen*)ctx;
+    if (seen->len < 16) {
+        seen->vals[seen->len++] = v;
+    }
+}
 
 int main(void) {
     char* err = NULL;
@@ -71,6 +90,35 @@ int main(void) {
 
     /* lifecycle: release the handle. */
     Store_free(s);
+
+    /* ── Ticker: the callback + subscription round-trip ── */
+    Ticker* t = NULL;
+    err = NULL;
+    rc = Ticker_new(&t, &err);
+    assert(rc == 0 && t != NULL && err == NULL);
+
+    /* subscribe a C function (fn-ptr + ctx); on_tick is fallible → out + err_out. */
+    Seen seen = {0};
+    Subscription* sub = NULL;
+    err = NULL;
+    rc = Ticker_on_tick(t, on_tick_cb, &seen, &sub, &err);
+    assert(rc == 0 && sub != NULL && err == NULL);
+
+    /* tick twice: the host callback fires from Rust with the incrementing counter. */
+    Ticker_tick(t);
+    Ticker_tick(t);
+    assert(seen.len == 2 && seen.vals[0] == 0 && seen.vals[1] == 1);
+
+    /* unsubscribe, then tick again: the listener is gone, so nothing is recorded. */
+    Subscription_unsubscribe(sub);
+    Ticker_tick(t);
+    assert(seen.len == 2 && "unsubscribe removes the listener");
+
+    /* lifecycle: free the subscription (idempotent unsubscribe) + the ticker. */
+    Subscription_free(sub);
+    Ticker_free(t);
+    printf("C callback fired with [%d, %d] then stayed silent after unsubscribe\n",
+           seen.vals[0], seen.vals[1]);
 
     printf("C consumer OK\n");
     return 0;

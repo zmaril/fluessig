@@ -37,6 +37,7 @@ fn m0_api() -> ApiDoc {
         source: Some("atilla.tsp".into()),
         models: Vec::new(),
         unions: Vec::new(),
+        consts: Vec::new(),
         interfaces: vec![ApiInterface {
             name: "Atilla".into(),
             doc: None,

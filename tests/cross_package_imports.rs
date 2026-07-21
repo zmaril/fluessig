@@ -204,6 +204,7 @@ fn external_refs_walk_structured_union_member_types() {
         source: None,
         models: vec![],
         unions: api.unions.clone(),
+        consts: Vec::new(),
         interfaces: vec![],
     };
     let refs = external_refs(&sub, &alpha, &table);
@@ -330,6 +331,7 @@ fn external_refs_cover_stream_op_return_types() {
         source: None,
         models: vec![],
         unions: vec![],
+        consts: Vec::new(),
         interfaces: api.interfaces.clone(),
     };
     let refs = external_refs(&sub, &GroupKey::Common, &table);
@@ -428,6 +430,7 @@ fn sub_for(api: &ApiDoc, names: &[&str]) -> ApiDoc {
             .cloned()
             .collect(),
         unions: vec![],
+        consts: Vec::new(),
         interfaces: vec![],
     }
 }

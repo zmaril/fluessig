@@ -9,7 +9,7 @@
 //! export layer and the C++ wrapper, so every prototype here matches the
 //! `extern "C"` symbol it fronts.
 
-use crate::api::{ApiDoc, ApiOp, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, CallbackSig, Shape};
 
 use super::cpp::{
     c_enum_name, c_list_name, c_model_name, c_stream_name, c_value_type, classify, classify_param,
@@ -79,13 +79,42 @@ fn c_out_params(c: &Cross) -> Vec<String> {
     }
 }
 
-/// Join the IN params + a receiver prefix into a C parameter list fragment.
+/// Join the IN params + a receiver prefix into a C parameter list fragment. A
+/// callback param expands to a fn-ptr + `void* ctx` pair (one comma-joined entry).
 fn in_list(api: &ApiDoc, op: &ApiOp) -> Vec<String> {
     op.params
         .iter()
-        .map(|p| c_in_param(&classify_param(api, p), &snake(&p.name)))
-        .filter(|s| !s.is_empty())
+        .filter_map(|p| {
+            let name = snake(&p.name);
+            if let ApiType::Callback { callback } = &p.ty {
+                Some(c_callback_in_param(api, callback, &name))
+            } else {
+                let s = c_in_param(&classify_param(api, p), &name);
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            }
+        })
         .collect()
+}
+
+/// A callback IN param's C decls: the fn pointer `void (*name)(void* ctx, Args)`
+/// plus its `void* name_ctx` context, comma-joined into one list entry.
+fn c_callback_in_param(api: &ApiDoc, sig: &CallbackSig, name: &str) -> String {
+    let vars = callback_arg_vars(sig.params.len());
+    let args: Vec<String> = sig
+        .params
+        .iter()
+        .zip(&vars)
+        .map(|(p, v)| format!("{} {v}", c_val(&classify(api, p))))
+        .collect();
+    let arg_list = std::iter::once("void* ctx".to_string())
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("void (*{name})({arg_list}), void* {name}_ctx")
 }
 
 /// Generate the C header string.
@@ -202,6 +231,10 @@ pub fn cpp_header(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -
             s.push_str(&format!("typedef struct {cur} {cur};\n"));
         }
     }
+    // The opaque subscription handle (once, gated) — a subscription op returns it.
+    if api_uses_subscription(api) {
+        s.push_str("typedef struct Subscription Subscription;\n");
+    }
     s.push('\n');
 
     // ── op prototypes ──
@@ -245,6 +278,11 @@ pub fn cpp_header(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -
             let cur = c_stream_name(&i.name, op);
             s.push_str(&format!("void {cur}_close({cur}* s);\n"));
         }
+    }
+    // The subscription handle lifecycle (once, gated): unsubscribe early + free.
+    if api_uses_subscription(api) {
+        s.push_str("void Subscription_unsubscribe(Subscription* s);\n");
+        s.push_str("void Subscription_free(Subscription* s);\n");
     }
 
     s.push_str("\n#ifdef __cplusplus\n}\n#endif\n");
@@ -305,14 +343,22 @@ fn op_prototype(api: &ApiDoc, iface: &str, op: &ApiOp, has_ctor: bool) -> String
             format!("int {iface}_new({});\n", join(parts))
         }
         Shape::Manual => format!("/* @manual {iface}::{} */\n", op.name),
-        // Full Subscription (register/unsubscribe) lowering is deferred to a
-        // follow-up PR for the C header; emit a skip-note so the op is recorded but
-        // not declared (node/python only today).
+        // A subscription op registers the listener (its callback param, a fn-ptr +
+        // ctx pair) and hands back an opaque `Subscription*`. Infallible ⇒ void +
+        // `out`; fallible ⇒ int status + `err_out`.
         Shape::Subscription => {
-            format!(
-                "/* subscription {iface}::{} — lowering deferred */\n",
-                op.name
-            )
+            let mut parts = Vec::new();
+            if let Some(r) = &recv {
+                parts.push(r.clone());
+            }
+            parts.extend(ins);
+            parts.push("Subscription** out".into());
+            if op.infallible {
+                format!("void {sym}({});\n", join(parts))
+            } else {
+                parts.push("char** err_out".into());
+                format!("int {sym}({});\n", join(parts))
+            }
         }
         Shape::Stream => {
             let cur = c_stream_name(iface, op);

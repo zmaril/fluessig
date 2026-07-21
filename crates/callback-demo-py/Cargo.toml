@@ -1,0 +1,23 @@
+[package]
+name = "callback-demo-py"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The python (pyo3) callback round-trip demo cdylib: fluessig-generated pyo3 glue (src/generated.rs) for a Ticker interface + a hand-written core_impl, compiled to an importable extension module and driven from consumer.py, proving a Python callable is invoked from Rust inline under the GIL."
+
+[lib]
+# Fixed lib name so the built cdylib is `libcallback_demo.so`; run.sh renames it
+# to `callback_demo.so` (matching the `#[pymodule]` name) for `import callback_demo`.
+# rlib too so the (excluded-from-default) crate still `cargo check`s.
+name = "callback_demo"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# pyo3 with `extension-module` — the .so resolves libpython symbols at import
+# time (the interpreter provides them), so it loads as a plain python module.
+pyo3 = { version = "0.22", features = ["extension-module"] }
+# The generated python binding prelude imports `fluessig_runtime::{Poll, PollStream}`.
+fluessig-runtime = { path = "../fluessig-runtime" }
+# The core trait returns `anyhow::Result<T>`; core_impl uses anyhow.
+anyhow = "1"

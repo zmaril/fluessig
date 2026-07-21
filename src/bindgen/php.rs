@@ -40,6 +40,10 @@ fn php_doc_ty(t: &ApiType) -> String {
         ApiType::Nullable { nullable } => format!("?{}", php_doc_ty(nullable)),
         // a union envelope and a foreign handle both ride the string carrier here
         ApiType::Union { .. } | ApiType::Foreign { .. } => "string".to_string(),
+        // PHP callback lowering is a follow-up (and off-thread-restricted — see
+        // notes/callback-function-types.md); `callable` is the honest docblock
+        // placeholder, unreached by any committed fixture.
+        ApiType::Callback { .. } => "callable".to_string(),
     }
 }
 

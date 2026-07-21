@@ -18,7 +18,9 @@ conventional-commits = "required"
 #   - the callback-demo-ruby crate's regen.sh / run.sh regenerate and exercise
 #     the committed magnus callback round-trip in place;
 #   - the callback-demo-wasm crate's regen.sh / run.sh regenerate and compile the
-#     committed wasm-bindgen callback binding to wasm32 in place.
+#     committed wasm-bindgen callback binding to wasm32 in place;
+#   - the callback-demo-php crate's regen.sh / run.sh regenerate and exercise the
+#     committed ext-php-rs callback round-trip (sync-only) in place.
 allow = [
     "crates/fluessig-publish/tests/verify_dry_run.sh",
     "crates/cpp-demo/regen.sh",
@@ -32,6 +34,8 @@ allow = [
     "crates/callback-demo-ruby/run.sh",
     "crates/callback-demo-wasm/regen.sh",
     "crates/callback-demo-wasm/run.sh",
+    "crates/callback-demo-php/regen.sh",
+    "crates/callback-demo-php/run.sh",
 ]
 
 [stray-todos]

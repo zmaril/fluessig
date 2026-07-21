@@ -1,0 +1,51 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "callback_demo_wasm",
+  "models": [],
+  "unions": [],
+  "interfaces": [
+    {
+      "name": "Ticker",
+      "doc": "A stateful ticker that fires registered listeners with an incrementing\ncounter. `on_tick` is a `Shape::Subscription` op — it REGISTERS a host\ncallback (a JS `Function`) and hands back an owning `Subscription` handle whose\nunsubscribe() removes the listener; `tick` fires every live listener.\nThis is the callback + subscription slice's wasm-bindgen round-trip proof.",
+      "ops": [
+        {
+          "name": "new",
+          "doc": "Open a fresh ticker with no listeners and the counter at 0.",
+          "shape": "ctor",
+          "params": [],
+          "returns": "void"
+        },
+        {
+          "name": "on_tick",
+          "doc": "Register `listener` to be called on every `tick`; returns a Subscription\nhandle that removes the listener when unsubscribed.",
+          "shape": "subscription",
+          "infallible": true,
+          "params": [
+            {
+              "name": "listener",
+              "type": {
+                "callback": {
+                  "params": [
+                    "int32"
+                  ]
+                }
+              }
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "tick",
+          "doc": "Fire every live listener with the current counter value, then increment it\n(infallible — registration/firing never fails).",
+          "shape": "unary",
+          "infallible": true,
+          "params": [],
+          "returns": "void"
+        }
+      ]
+    }
+  ]
+}

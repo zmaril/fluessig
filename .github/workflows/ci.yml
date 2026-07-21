@@ -1,3 +1,9 @@
+# straitjacket-allow-file:duplication — the per-backend round-trip jobs
+# (cpp / java-roundtrip / callback-node / callback-python) deliberately repeat
+# the same checkout + rust-toolchain + cache + setup-<lang> + run.sh scaffolding;
+# each is an independent, keep-both leg so a rebase alongside sibling backend legs
+# never has to merge them. The repetition is intrinsic to GitHub Actions job
+# definitions, not extractable duplication.
 name: ci
 
 on:

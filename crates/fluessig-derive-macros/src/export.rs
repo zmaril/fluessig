@@ -19,6 +19,11 @@ pub(crate) fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStr
     let iface_span = span_tokens(iface_ident.span());
     let iface_doc = option_str(doc_string(&item.attrs).as_deref());
 
+    // Interface-level `#[fluessig(single_threaded)]` on the `impl` block — lower to
+    // a THREAD-CONFINED handle class (node-only today). Parsed from the impl's own
+    // attributes (the op markers ride the methods; this one rides the impl).
+    let single_threaded = interface_meta(&item.attrs)?.single_threaded;
+
     // Build the op descriptors from the ORIGINAL methods (op-kind tags + docs
     // intact), then re-emit the impl with the `#[fluessig(…)]` tags stripped so
     // the methods still compile.
@@ -26,9 +31,37 @@ pub(crate) fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStr
     let mut cleaned = item.clone();
     for it in &mut cleaned.items {
         let ImplItem::Fn(f) = it else { continue };
+        // A single_threaded interface may carry ONLY synchronous ops: an async or
+        // stream op needs a `Send` core for the threadpool, incompatible with a
+        // thread-confined `!Send` handle. Reject at the offending method's span.
+        if single_threaded {
+            let meta = method_meta(&f.attrs)?;
+            if meta.is_async == Some(true) {
+                return Err(syn::Error::new(
+                    f.sig.ident.span(),
+                    "#[fluessig(single_threaded)] interface: an async op is not allowed — a \
+                     thread-confined `!Send` handle cannot serve an async op (the async \
+                     projection clones the core onto a threadpool worker, which requires a \
+                     `Send` core). Drop #[fluessig(async)], or drop #[fluessig(single_threaded)]",
+                ));
+            }
+            if matches!(meta.kind, OpKindChoice::Stream) {
+                return Err(syn::Error::new(
+                    f.sig.ident.span(),
+                    "#[fluessig(single_threaded)] interface: a stream op is not allowed — a \
+                     thread-confined `!Send` handle cannot serve a stream op (streams poll off \
+                     a threadpool worker, which requires a `Send` core). Drop #[fluessig(stream)], \
+                     or drop #[fluessig(single_threaded)]",
+                ));
+            }
+        }
         ops.push(op_descriptor_tokens(f)?);
         f.attrs.retain(|a| !a.path().is_ident("fluessig"));
     }
+    // The impl block itself must also shed a `#[fluessig(single_threaded)]` attr so
+    // the re-emitted impl compiles (the op-kind attrs are stripped per-method
+    // above; this strips the interface-level one).
+    cleaned.attrs.retain(|a| !a.path().is_ident("fluessig"));
 
     Ok(quote! {
         #cleaned
@@ -38,11 +71,77 @@ pub(crate) fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStr
                 &::fluessig_derive::InterfaceDescriptor {
                     name: #iface_name,
                     doc: #iface_doc,
+                    single_threaded: #single_threaded,
                     ops: &[ #( #ops ),* ],
                     span: #iface_span,
                 };
         }
     })
+}
+
+/// The interface-level tags on the exported `impl` block. Today the only one is
+/// `#[fluessig(single_threaded)]` (the thread-confined handle opt-in); the doc
+/// comment is read separately. Kept its own struct so more interface markers can
+/// join without reshaping the call site.
+struct InterfaceMeta {
+    single_threaded: bool,
+}
+
+/// Parse the interface-level `#[fluessig(…)]` attributes on an `impl` block. Only
+/// `#[fluessig(single_threaded)]` is understood; anything else is an authoring
+/// error (an op-only tag riding the impl instead of a method is a common slip, so
+/// the message spells the one legal interface tag).
+fn interface_meta(attrs: &[Attribute]) -> syn::Result<InterfaceMeta> {
+    let mut single_threaded = false;
+    for a in attrs {
+        if !a.path().is_ident("fluessig") {
+            continue;
+        }
+        let tags = a.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        )?;
+        // Each tag is classified by [`interface_tag`] (the error construction lives
+        // there, keeping this loop flat); today the only legal one flips the flag.
+        for m in &tags {
+            match interface_tag(m)? {
+                InterfaceTag::SingleThreaded => single_threaded = true,
+            }
+        }
+    }
+    Ok(InterfaceMeta { single_threaded })
+}
+
+/// The one recognised interface-level tag. Its own enum (rather than a bare bool)
+/// so a second interface marker can join without reshaping [`interface_meta`].
+enum InterfaceTag {
+    SingleThreaded,
+}
+
+/// Classify one `#[fluessig(…)]` interface tag, or error. Split out of
+/// [`interface_meta`] so the error paths don't deepen that loop's nesting.
+fn interface_tag(m: &syn::Meta) -> syn::Result<InterfaceTag> {
+    let syn::Meta::Path(p) = m else {
+        return Err(syn::Error::new_spanned(
+            m,
+            "unexpected interface tag — the only #[fluessig(…)] tag on an exported \
+             `impl` block is #[fluessig(single_threaded)]",
+        ));
+    };
+    let id = p.get_ident().ok_or_else(|| {
+        syn::Error::new_spanned(p, "expected a bare interface tag (e.g. `single_threaded`)")
+    })?;
+    if id == "single_threaded" {
+        return Ok(InterfaceTag::SingleThreaded);
+    }
+    Err(syn::Error::new_spanned(
+        id,
+        format!(
+            "unknown interface tag `{id}` — the only #[fluessig(…)] tag on an exported \
+             `impl` block is #[fluessig(single_threaded)] (the thread-confined handle \
+             opt-in). Op markers (ctor / stream / async / readonly / …) ride the \
+             METHODS, not the impl"
+        ),
+    ))
 }
 
 /// The `OpDescriptor { … }` tokens for one method: its snake_case name, doc, op

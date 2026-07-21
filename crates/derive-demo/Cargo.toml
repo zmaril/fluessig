@@ -41,3 +41,7 @@ path = "src/bin/fluessig-emit-api-catalog.rs"
 [[bin]]
 name = "fluessig-emit-api"
 path = "src/bin/fluessig-emit-api.rs"
+
+[[bin]]
+name = "fluessig-emit-single-threaded"
+path = "src/bin/fluessig-emit-single-threaded.rs"

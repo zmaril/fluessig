@@ -70,7 +70,9 @@ struct Fixture {
 /// one parametrized loop — a per-fixture copy of the body would trip
 /// straitjacket's duplication gate (and rot independently).
 fn fixtures() -> Vec<Fixture> {
-    use derive_demo::{advanced, api, fluessig_catalog as user, graph, leaf_fk, poly};
+    use derive_demo::{
+        advanced, api, fluessig_catalog as user, graph, leaf_fk, poly, single_threaded,
+    };
     vec![
         Fixture {
             label: "catalog.json (Slice 1 — scalar entity)",
@@ -133,6 +135,14 @@ fn fixtures() -> Vec<Fixture> {
             regen: api::fluessig_catalog::api_to_json,
             validate: Validate::Api {
                 sibling_catalog: api::fluessig_catalog::to_json,
+            },
+        },
+        Fixture {
+            label: "single_threaded.json (this PR — thread-confined handle op surface)",
+            path: "single_threaded.json",
+            regen: single_threaded::fluessig_catalog::api_to_json,
+            validate: Validate::Api {
+                sibling_catalog: single_threaded::fluessig_catalog::to_json,
             },
         },
     ]

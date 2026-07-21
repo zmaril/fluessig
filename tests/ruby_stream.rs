@@ -160,6 +160,7 @@ fn event_mode_api() -> ApiDoc {
         interfaces: vec![ApiInterface {
             name: "Clock".into(),
             doc: None,
+            single_threaded: false,
             ops: vec![
                 ApiOp {
                     name: "start".into(),

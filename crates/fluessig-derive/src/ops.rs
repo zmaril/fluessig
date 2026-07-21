@@ -308,6 +308,8 @@ pub fn build_api_typed(
         models,
         unions,
         interfaces: api_interfaces,
+        // This derive path has no top-level const surface today.
+        consts: Vec::new(),
     }
 }
 

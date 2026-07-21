@@ -13,7 +13,10 @@
 use std::collections::BTreeSet;
 
 use fluessig::api::{load_api, ApiType, Shape};
-use fluessig::bindgen::{node_binding, python_binding, EnumDesc};
+use fluessig::bindgen::{
+    java_binding, java_sources, node_binding, php_binding, python_binding, ruby_binding,
+    wasm_binding, EnumDesc,
+};
 use fluessig::load_catalog;
 
 /// The Rust type name a (possibly nullable/list) op type ultimately references,
@@ -238,5 +241,563 @@ fn bindgen_projects_the_op_surface() {
     assert!(
         py.contains("fn pull_requests"),
         "python should bind the stream op"
+    );
+
+    // ── wasm: the `Db` interface (ctor) → a handle struct; streams are skipped
+    // honestly (no broken code); manual ops are recorded but not auto-bound; a
+    // plain unary op binds under a wasm-bindgen `js_name`. ──
+    let wasm = wasm_binding(&api, &enums, None);
+    // the wasm-bindgen surface exists
+    assert!(
+        wasm.contains("#[wasm_bindgen]"),
+        "wasm should emit a #[wasm_bindgen] surface"
+    );
+    // the ctor interface projects to a handle struct with a constructor
+    assert!(
+        wasm.contains("pub struct Db {") && wasm.contains("#[wasm_bindgen(constructor)]"),
+        "wasm ctor interface should become a handle struct with a constructor"
+    );
+    // a plain unary op binds under its lowerCamel js_name
+    assert!(
+        wasm.contains("js_name = \"pullRequestCount\"")
+            && wasm.contains("pub fn pull_request_count"),
+        "wasm should bind the unary op under a js_name"
+    );
+    // the stream op is skipped honestly, not emitted as broken code
+    assert!(
+        wasm.contains("// stream op `pullRequests` is not yet supported by the wasm backend"),
+        "wasm should skip the stream op with an honest note"
+    );
+    // the manual op is recorded but hand-written, not auto-bound
+    assert!(
+        wasm.contains("// @manual: watch"),
+        "wasm should record `watch` as @manual, not auto-bind it"
+    );
+
+    // ── java (JNI): the stream op becomes a poll cursor, the ctor a native
+    // handle, the manual op is recorded (in the Java class) but not auto-bound ──
+    let java = java_binding(&api, &enums, None);
+    // the stateful `Db` interface's ctor `open` → a native init handle.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Db_init<'local>"),
+        "java ctor → a native init handle fn"
+    );
+    // the stream op → a poll-cursor extern fn over the shared PollStream.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_PullRequests_poll<'local>")
+            && java.contains("PollStream<PullRequest>"),
+        "java stream op → a poll cursor over PollStream<PullRequest>"
+    );
+    // an async unary op → a blocking `native<Pascal>` JNI extern fn (the Java
+    // class wraps it in a CompletableFuture).
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Db_nativePullRequestCount<'local>"),
+        "java async unary op should bind as a blocking native extern fn"
+    );
+    // the manual op is recorded in the Java class surface, not auto-bound.
+    let sources = java_sources(&api, &enums);
+    let db_java = sources
+        .iter()
+        .find(|(p, _)| p == "fluessig/Db.java")
+        .map(|(_, s)| s.clone())
+        .expect("Db.java emitted");
+    assert!(
+        db_java.contains("// @manual: Db.watch"),
+        "java should record `watch` as @manual, not auto-bind it:\n{db_java}"
+    );
+}
+
+/// The sync-by-default authoring surface this PR lands, against the `native`
+/// demo schema (kept apart from the four-kind `Db`/`GitHelpers` demo so the
+/// sync/async/pin concept doesn't leak into that pedagogy):
+///
+///   * a DEFAULT op is SYNCHRONOUS — no `async` field in `api.json` (synchronous
+///     is the GLOBAL default; there is no catalog-level lever). Infallible when
+///     the Rust return is a bare `T` (no `Result` seam; the shared core-trait
+///     method is `fn … -> T`), fallible when it is a `Result<T>`.
+///   * `#[fluessig(async)]` is the OPT-IN: `is_async == true` → the async
+///     projection. It is the ONE place async-ness is decided, everywhere.
+///   * `#[fluessig(name = "…")]` pins the export name across every backend.
+#[test]
+fn native_api_carries_sync_default_and_pin_flags() {
+    let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json())
+        .expect("native api.json must load clean");
+    let iface = api.interfaces.iter().find(|i| i.name == "Native").unwrap();
+    let op = |n: &str| iface.ops.iter().find(|o| o.name == n).unwrap();
+
+    // DEFAULT sync (no `async` marker) + infallible + name-pinned: the atilla
+    // `atillaNativeVersion` shape.
+    let nv = op("nativeVersion");
+    assert_eq!(nv.shape, Shape::Unary);
+    assert!(
+        !nv.is_async,
+        "a default op is synchronous (no `async` marker)"
+    );
+    assert!(nv.infallible, "a bare-String return is infallible");
+    assert!(matches!(&nv.returns, ApiType::Scalar(s) if s == "string"));
+    for lang in ["node", "python", "php", "ruby"] {
+        assert_eq!(
+            nv.bindings.get(lang).and_then(|b| b.name.as_deref()),
+            Some("atillaNativeVersion"),
+            "the op export-name pin lands under the {lang} binding"
+        );
+    }
+
+    // DEFAULT sync but FALLIBLE (Result<T> return): no marker, infallible NOT set.
+    let cr = op("checkedRoot");
+    assert!(!cr.is_async, "checkedRoot is a default (sync) op");
+    assert!(!cr.infallible, "a Result<T> return keeps the error seam");
+
+    // opt-IN: `#[fluessig(async)]` marks async; never infallible; unpinned.
+    let sc = op("slowCount");
+    assert!(sc.is_async, "slowCount is #[fluessig(async)]");
+    assert!(
+        !sc.infallible,
+        "slowCount resolves async (never infallible)"
+    );
+    assert!(sc.bindings.is_empty(), "an unpinned op has no bindings");
+}
+
+/// The node backend emits the DEFAULT synchronous/infallible + `js_name` shape,
+/// and the `#[fluessig(async)]` op keeps the async projection — the concrete
+/// generated-code proof. Compare `native_version`'s emission to atilla's
+/// hand-written `crates/atilla-napi/src/lib.rs` export (byte-comparable modulo
+/// the core-seam body): `#[napi(js_name = "atillaNativeVersion")] pub fn …() -> String`.
+#[test]
+fn node_emits_sync_default_and_pinned_shapes() {
+    let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json()).unwrap();
+    let enums: Vec<EnumDesc> = Vec::new();
+    let node = node_binding(&api, &enums, None);
+
+    // DEFAULT sync + infallible + pinned → a plain `#[napi] fn` returning
+    // `String`, under the pinned js_name, with no Promise/AsyncTask/Result.
+    assert!(
+        node.contains(
+            "#[napi(js_name = \"atillaNativeVersion\")]\npub fn native_version() -> String {"
+        ),
+        "sync+infallible+pinned op must emit a plain `#[napi(js_name=…)] fn -> String`\n{node}"
+    );
+    // the infallible core seam is a direct value passthrough — no `.map_err`, no Result.
+    assert!(
+        node.contains("pub fn native_version() -> String {\n    <crate::core_impl::NativeImpl as NativeCore>::native_version()\n}"),
+        "infallible sync op must call the core directly with no Result seam"
+    );
+    // the shared core trait drops the Result wrapper for the infallible op.
+    assert!(
+        node.contains("fn native_version() -> String;"),
+        "the infallible op's core-trait method must be `fn … -> String`"
+    );
+
+    // Default sync, fallible variant: `Result<T>` → `napi::Result`, still no AsyncTask.
+    assert!(
+        node.contains("#[napi]\npub fn checked_root(path: String) -> Result<String> {"),
+        "sync+fallible op must emit `-> Result<String>` (throws), no AsyncTask"
+    );
+
+    // Opt-OUT / no regression: the `#[fluessig(async)]` op keeps the async projection.
+    assert!(
+        node.contains("#[napi(ts_return_type = \"Promise<number>\")]\npub fn slow_count(path: String) -> AsyncTask<SlowCountTask> {"),
+        "the #[fluessig(async)] op must stay the async `Promise<number>`"
+    );
+
+    // A sync op produces NO per-op Task struct (only the async `slow_count` does).
+    assert!(
+        !node.contains("struct NativeVersionTask") && !node.contains("struct CheckedRootTask"),
+        "a sync op must not generate an off-thread Task"
+    );
+    assert!(
+        node.contains("pub struct SlowCountTask"),
+        "the async op still generates its Task"
+    );
+}
+
+/// The SAME sync-default + infallible + name-pin shape in python, php, and ruby —
+/// proving the projection is not node-only. python/php/ruby unary ops are already
+/// synchronous, so the observable default-inversion effect is INFALLIBILITY (drop
+/// the raise/throw seam) plus the export-name pin.
+#[test]
+fn python_php_ruby_emit_sync_infallible_and_pinned_shapes() {
+    let api = load_api(&derive_demo::native::fluessig_catalog::api_to_json()).unwrap();
+    let enums: Vec<EnumDesc> = Vec::new();
+
+    // ── python: `#[pyo3(name = "…")]` + a plain `-> String` (no PyResult) ──
+    let py = python_binding(&api, &enums, None);
+    assert!(
+        py.contains("#[pyo3(name = \"atillaNativeVersion\")]"),
+        "python pins the op name via #[pyo3(name = …)]\n{py}"
+    );
+    assert!(
+        py.contains("fn native_version(py: Python<'_>) -> String {"),
+        "python infallible op drops PyResult → `-> String`\n{py}"
+    );
+    // fallible default op keeps PyResult; the async op stays a plain method too.
+    assert!(
+        py.contains("fn checked_root(py: Python<'_>, path: String) -> PyResult<String> {"),
+        "python fallible op keeps the PyResult seam\n{py}"
+    );
+
+    // ── php: ext-php-rs `#[rename("…")]` + a plain `-> String` (no PhpResult) ──
+    let php = php_binding(&api, &enums, None);
+    assert!(
+        php.contains("#[rename(\"atillaNativeVersion\")]"),
+        "php pins the op name via #[rename(…)]\n{php}"
+    );
+    assert!(
+        php.contains("pub fn native_version() -> String {"),
+        "php infallible op drops PhpResult → `-> String`\n{php}"
+    );
+    assert!(
+        php.contains("pub fn checked_root(path: String) -> PhpResult<String> {"),
+        "php fallible op keeps the PhpResult seam\n{php}"
+    );
+
+    // ── ruby: the pinned singleton-method name + a plain `-> String` (no Result) ──
+    let ruby = ruby_binding(&api, &enums, None);
+    assert!(
+        ruby.contains(
+            "define_singleton_method(\"atillaNativeVersion\", function!(native_version, 0))"
+        ),
+        "ruby exposes the pinned method name; the Rust fn stays snake\n{ruby}"
+    );
+    assert!(
+        ruby.contains("fn native_version() -> String {"),
+        "ruby zero-arg infallible op drops the Result seam → `-> String`\n{ruby}"
+    );
+    assert!(
+        ruby.contains("fn checked_root(path: String) -> Result<String, Error> {"),
+        "ruby fallible op keeps the Result seam\n{ruby}"
+    );
+
+    // ── java (JNI): the SAME sync-default + infallible + name-pin grid across
+    // both artifacts — the Rust glue and the Java class ──
+    let java = java_binding(&api, &enums, None);
+    // sync + infallible + pinned: the JNI extern fn is named by the pin
+    // (`atillaNativeVersion`), routes the core DIRECTLY (no throw seam), and the
+    // core-trait method drops its Result wrapper.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Native_atillaNativeVersion<'local>"),
+        "java infallible+pinned op is named by the pin\n{java}"
+    );
+    assert!(
+        java.contains("<crate::core_impl::NativeImpl as NativeCore>::native_version()"),
+        "java infallible op calls the core directly\n{java}"
+    );
+    assert!(
+        java.contains("fn native_version() -> String;"),
+        "java infallible op's core-trait method drops Result → `-> String`\n{java}"
+    );
+    // sync + fallible: keeps the throw seam.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Native_checkedRoot<'local>")
+            && java.contains("fn checked_root(path: String) -> anyhow::Result<String>;"),
+        "java fallible op keeps the anyhow::Result core seam + throws\n{java}"
+    );
+    // #[fluessig(async)]: the native stays a blocking symbol, wrapped Java-side.
+    assert!(
+        java.contains("pub extern \"system\" fn Java_fluessig_Native_nativeSlowCount<'local>"),
+        "java async op keeps a blocking native symbol\n{java}"
+    );
+    let native_java = java_sources(&api, &enums)
+        .into_iter()
+        .find(|(p, _)| p == "fluessig/Native.java")
+        .map(|(_, s)| s)
+        .expect("Native.java emitted");
+    // stateless class: the sync ops are public static natives (pinned name); the
+    // async op is a static CompletableFuture wrapper over the private native.
+    assert!(
+        native_java.contains("public static native String atillaNativeVersion();"),
+        "java stateless sync op → a public static native under the pin\n{native_java}"
+    );
+    assert!(
+        native_java.contains("public static CompletableFuture<Long> slowCount(String path)")
+            && native_java.contains("private static native long nativeSlowCount(String path);"),
+        "java async op → a static CompletableFuture wrapper over a private blocking native\n{native_java}"
+    );
+}
+
+/// The napi-2 unblock (pidgin critical path): the node backend's streaming/async
+/// prelude is CONDITIONAL on the surface's actual op kinds. A pure sync-infallible
+/// surface must NOT emit the napi-3-ONLY `AsyncGenerator` / `AsyncTask` symbols
+/// (they do not exist in `napi = "2"`, so their unconditional import made a pure
+/// sync binding fail to compile against a napi-2-pinned crate) — its prelude
+/// reduces to exactly `use napi_derive::napi;`. A surface that DOES use
+/// async/stream/ctor/fallible ops still emits the full prelude.
+#[test]
+fn node_prelude_is_conditional_on_op_kinds() {
+    // Build a one-interface node surface from a `models` + `ops` JSON fragment,
+    // so the api skeleton lives in ONE place (the two surfaces below differ only
+    // in their ops/models).
+    let node_of = |models: &str, ops: &str| -> String {
+        let api = load_api(&format!(
+            r#"{{"fluessig":{{"format":1}},"models":[{models}],"unions":[],"interfaces":[{{"name":"Svc","ops":[{ops}]}}]}}"#
+        ))
+        .expect("api fragment loads");
+        node_binding(&api, &[], None)
+    };
+
+    // ── a PURE sync-infallible surface: one stateless, synchronous, infallible,
+    // stream-less, ctor-less op → the napi-3-free minimal prelude. ──
+    let node = node_of(
+        "",
+        r#"{"name":"version","shape":"unary","infallible":true,"params":[],"returns":"string"}"#,
+    );
+    // the prelude reduces to EXACTLY `use napi_derive::napi;` (napi-2-compatible).
+    assert!(
+        node.contains(
+            "// The fixed prelude — generated code uses fully-qualified paths elsewhere.\nuse napi_derive::napi;\n"
+        ),
+        "a pure sync-infallible surface's prelude must be exactly `use napi_derive::napi;`\n{node}"
+    );
+    // none of the napi-3-only / throwing / streaming symbols appear.
+    for banned in [
+        "AsyncGenerator",
+        "AsyncTask",
+        "napi::bindgen_prelude::",
+        "use napi::{Env, Task};",
+        "use std::future::Future;",
+        "use std::sync::Arc;",
+        "use std::time::Duration;",
+        "fn err(",
+    ] {
+        assert!(
+            !node.contains(banned),
+            "pure sync-infallible surface must not emit `{banned}`\n{node}"
+        );
+    }
+    // belt-and-suspenders banner is present on the reduced surface.
+    assert!(
+        node.contains("#![allow(unused_imports)]"),
+        "a reduced surface carries the belt-and-suspenders unused-imports banner\n{node}"
+    );
+
+    // ── a FULL surface: ctor + stream + async + sync-fallible ops → every prelude
+    // item is still emitted, byte-for-byte with the historical prelude. ──
+    let node = node_of(
+        r#"{"name":"Chunk","fields":[{"name":"seq","type":"int32","nullable":false}]}"#,
+        r#"{"name":"open","shape":"ctor","params":[],"returns":{"model":"Chunk"}},
+           {"name":"watch","shape":"stream","params":[],"returns":{"model":"Chunk"}},
+           {"name":"run","shape":"unary","async":true,"params":[],"returns":"int32"},
+           {"name":"peek","shape":"unary","params":[],"returns":"int32"}"#,
+    );
+    // one of each: AsyncGenerator (stream), AsyncTask (async/stream), Result +
+    // `err` (fallible), Arc (ctor/stream), Future/Duration + the runtime import.
+    for needed in [
+        "use napi::bindgen_prelude::{AsyncGenerator, AsyncTask, Result};",
+        "use napi::{Env, Task};",
+        "use napi_derive::napi;",
+        "use std::future::Future;",
+        "use std::sync::Arc;",
+        "use std::time::Duration;",
+        "use fluessig_runtime::{Poll, PollStream};",
+        "fn err(",
+    ] {
+        assert!(
+            node.contains(needed),
+            "a full async/stream/ctor/fallible surface must still emit `{needed}`\n{node}"
+        );
+    }
+    // a full surface never carried the unused-imports banner — keeps its golden
+    // byte-identical.
+    assert!(
+        !node.contains("#![allow(unused_imports)]"),
+        "a full surface must NOT gain the unused-imports banner (golden byte-identity)\n{node}"
+    );
+}
+
+/// The node-backend "tail" features this PR lands, against the `binary` demo
+/// (kept apart from the pedagogy demos): position-aware **binary spelling** and
+/// the **`#[fluessig(result)]` result envelope**.
+///
+///   * a `bytes` PARAM lowers to the scalar `bytes` and `optional` rides as
+///     before — the node divergence (`Uint8Array` vs `Buffer`) is a projection
+///     detail, invisible in `api.json`;
+///   * `#[fluessig(result)]` lowers to `result_error: "<Record>"` on the op, and
+///     pulls that record into `api.json`'s `models` even though it is in no
+///     param/return position.
+#[test]
+fn binary_api_carries_bytes_and_result_envelope() {
+    let api = load_api(&derive_demo::binary::fluessig_catalog::api_to_json())
+        .expect("binary api.json must load clean");
+    let iface = api.interfaces.iter().find(|i| i.name == "NodeIo").unwrap();
+    let op = |n: &str| iface.ops.iter().find(|o| o.name == n).unwrap();
+
+    // a `bytes` param op: the param lowers to the `bytes` scalar (the Uint8Array
+    // spelling is a node projection detail, not part of the op surface).
+    let detect = op("detectSupportedImageMimeType");
+    assert_eq!(detect.shape, Shape::Unary);
+    assert!(!detect.is_async, "a default op is synchronous");
+    assert!(matches!(&detect.params[0].ty, ApiType::Scalar(s) if s == "bytes"));
+    assert!(detect.result_error.is_none(), "detect is not a result op");
+
+    // bytes-in + bytes-out, infallible.
+    let digest = op("digest");
+    assert!(matches!(&digest.params[0].ty, ApiType::Scalar(s) if s == "bytes"));
+    assert!(matches!(&digest.returns, ApiType::Scalar(s) if s == "bytes"));
+    assert!(digest.infallible, "a bare `Vec<u8>` return is infallible");
+
+    // the `#[fluessig(result)]` op: result_error names the explicit error record,
+    // it is NOT infallible (a Result return keeps a seam), and the OK value is the
+    // unwrapped `bytes` return.
+    let rbf = op("readBinaryFile");
+    assert_eq!(
+        rbf.result_error.as_deref(),
+        Some("FileError"),
+        "#[fluessig(result)] captures the explicit error record type"
+    );
+    assert!(!rbf.infallible, "a result-envelope op is not infallible");
+    assert!(
+        !rbf.is_async,
+        "the result envelope is a synchronous value return"
+    );
+    assert!(matches!(&rbf.returns, ApiType::Scalar(s) if s == "bytes"));
+
+    // FileError joins `models` purely via the result_error reference.
+    assert!(
+        api.models.iter().any(|m| m.name == "FileError"),
+        "the result op's error record must be materialised into api.json models"
+    );
+}
+
+/// The node backend emits the position-aware binary spelling (`Uint8Array` param,
+/// `Buffer` return) and the `{ ok, value } | { ok, error }` result envelope — the
+/// concrete generated-code proof, byte-for-byte with pi/pidgin's shapes.
+#[test]
+fn node_emits_binary_spelling_and_result_envelope() {
+    let api = load_api(&derive_demo::binary::fluessig_catalog::api_to_json()).unwrap();
+    let enums: Vec<EnumDesc> = Vec::new();
+    let node = node_binding(&api, &enums, None);
+
+    // ── Feature 1: a `bytes` PARAM is spelled `Uint8Array` ──
+    assert!(
+        node.contains(
+            "pub fn detect_supported_image_mime_type(\n    buffer: napi::bindgen_prelude::Uint8Array,\n) -> Option<String> {"
+        ),
+        "a bytes param must be spelled Uint8Array\n{node}"
+    );
+    // ── Feature 1: a `bytes` RETURN is spelled `Buffer`; both in one op ──
+    assert!(
+        node.contains(
+            "pub fn digest(data: napi::bindgen_prelude::Uint8Array) -> napi::bindgen_prelude::Buffer {"
+        ),
+        "a bytes-in/bytes-out op must be Uint8Array -> Buffer\n{node}"
+    );
+    // the shared core trait agrees: Uint8Array param, Buffer return.
+    assert!(
+        node.contains(
+            "fn digest(data: napi::bindgen_prelude::Uint8Array) -> napi::bindgen_prelude::Buffer;"
+        ),
+        "the core-trait method must spell the same Uint8Array/Buffer split\n{node}"
+    );
+
+    // ── Feature 2: the `{ ok, value } | { ok, error }` envelope arms ──
+    assert!(
+        node.contains("pub struct ReadBinaryFileOk {")
+            && node.contains("pub value: napi::bindgen_prelude::Buffer,"),
+        "the ok arm must carry `value: Buffer`\n{node}"
+    );
+    assert!(
+        node.contains("pub struct ReadBinaryFileErr {") && node.contains("pub error: FileError,"),
+        "the error arm must carry the FileError record\n{node}"
+    );
+    // the method returns the discriminated Either, building the error AS A VALUE.
+    assert!(
+        node.contains(
+            "pub fn read_binary_file(\n    path: String,\n) -> napi::bindgen_prelude::Either<ReadBinaryFileOk, ReadBinaryFileErr> {"
+        ),
+        "the result op must return Either<Ok, Err>, not throw\n{node}"
+    );
+    assert!(
+        node.contains("Err(error) => napi::bindgen_prelude::Either::B(ReadBinaryFileErr { ok: false, error }),"),
+        "the error arm is built from the core Result's Err VALUE\n{node}"
+    );
+    // the core trait returns the EXPLICIT error record, not anyhow.
+    assert!(
+        node.contains(
+            "fn read_binary_file(\n        path: String,\n    ) -> ::core::result::Result<napi::bindgen_prelude::Buffer, FileError>;"
+        ),
+        "the result op's core-trait method returns Result<T, FileError>\n{node}"
+    );
+    // the FileError record struct is emitted.
+    assert!(
+        node.contains("pub struct FileError {") && node.contains("pub code: String,"),
+        "the FileError record must be emitted as a napi object\n{node}"
+    );
+}
+
+/// The result envelope is node-ONLY and opt-in: the other backends treat a
+/// `#[fluessig(result)]` op as an ordinary fallible op (throw/raise), their core
+/// traits keep the `anyhow`/generic seam, and their `bytes` spelling is unchanged.
+#[test]
+fn result_envelope_is_node_only_and_opt_in() {
+    let api = load_api(&derive_demo::binary::fluessig_catalog::api_to_json()).unwrap();
+    let enums: Vec<EnumDesc> = Vec::new();
+
+    // python treats readBinaryFile as a normal fallible op — no Either envelope,
+    // and its core trait keeps the anyhow seam.
+    let py = python_binding(&api, &enums, None);
+    assert!(
+        !py.contains("ReadBinaryFileOk") && !py.contains("bindgen_prelude::Either"),
+        "python must not emit the node-only envelope\n{py}"
+    );
+    // the core trait keeps the anyhow seam (the op is an ordinary fallible op here).
+    assert!(
+        py.contains("fn read_binary_file(path: String) -> anyhow::Result<Bytes>;"),
+        "python's core trait keeps the anyhow seam for a result op\n{py}"
+    );
+    // ruby likewise stays on its normal fallible projection.
+    let ruby = ruby_binding(&api, &enums, None);
+    assert!(
+        !ruby.contains("ReadBinaryFileOk"),
+        "ruby must not emit the node-only envelope\n{ruby}"
+    );
+}
+
+/// The `#[fluessig(single_threaded)]` authoring path (this PR): the derive-emitted
+/// `api.json` for the `single_threaded` demo carries the interface flag, and the
+/// node backend projects it into a THREAD-CONFINED handle over the genuinely
+/// `!Send` `Tui` core — NO `Arc`, NO `Send`/`Sync` bound, core held in a
+/// `RefCell`. This ties the macro parse → api.json → node emission end to end
+/// (the byte goldens live in the top-level `tests/single_threaded.rs`).
+#[test]
+fn single_threaded_marker_lowers_and_projects_a_thread_confined_handle() {
+    let api = load_api(&derive_demo::single_threaded::fluessig_catalog::api_to_json()).unwrap();
+    let tui = api.interfaces.iter().find(|i| i.name == "Tui").unwrap();
+
+    // the marker lowered onto the interface, and the interface is sync-only.
+    assert!(tui.single_threaded, "Tui must carry single_threaded:true");
+    assert!(
+        tui.ops
+            .iter()
+            .all(|o| !o.is_async && o.shape != Shape::Stream),
+        "a single_threaded interface must be sync-only"
+    );
+
+    // node projects the thread-confined handle.
+    let node = node_binding(&api, &[], None);
+    assert!(
+        node.contains("pub trait TuiCore: Sized + 'static {"),
+        "single_threaded core trait must drop Send + Sync:\n{node}"
+    );
+    assert!(
+        node.contains("pub(crate) core: RefCell<crate::core_impl::TuiImpl>,"),
+        "single_threaded handle must hold the core in a RefCell (no Arc):\n{node}"
+    );
+    assert!(
+        !node.contains("Arc<crate::core_impl::TuiImpl>") && !node.contains("use std::sync::Arc;"),
+        "single_threaded handle must not use Arc at all:\n{node}"
+    );
+    assert!(
+        node.contains("self.core.borrow_mut().tick()"),
+        "single_threaded &self methods reach the core via borrow_mut():\n{node}"
+    );
+
+    // an ordinary (async-capable) interface is UNCHANGED — the demo `Db` still
+    // holds its core as `Arc<Impl>` with a `Send + Sync` trait.
+    let db_api = load_api(&derive_demo::api::fluessig_catalog::api_to_json()).unwrap();
+    let db_node = node_binding(&db_api, &[], None);
+    assert!(
+        db_node.contains("pub(crate) core: Arc<crate::core_impl::DbImpl>,")
+            && db_node.contains("pub trait DbCore: Sized + Send + Sync + 'static {"),
+        "an ordinary handle must still hold Arc<Impl> with a Send+Sync core trait:\n{db_node}"
     );
 }

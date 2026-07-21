@@ -27,8 +27,8 @@ fn php_doc_ty(t: &ApiType) -> String {
         ApiType::Scalar(s) => match s.as_str() {
             "string" | "Json" => "string",
             "boolean" => "bool",
-            "int32" | "int64" => "int",
-            "float64" => "float",
+            "int32" | "int64" | "uint8" | "uint16" | "uint32" => "int",
+            "float32" | "float64" | "float" => "float",
             "bytes" => "string",
             "void" => "void",
             _ => "string",
@@ -38,7 +38,8 @@ fn php_doc_ty(t: &ApiType) -> String {
         ApiType::Enum { .. } => "string".to_string(),
         ApiType::List { .. } => "array".to_string(),
         ApiType::Nullable { nullable } => format!("?{}", php_doc_ty(nullable)),
-        ApiType::Union { .. } => "string".to_string(),
+        // a union envelope and a foreign handle both ride the string carrier here
+        ApiType::Union { .. } | ApiType::Foreign { .. } => "string".to_string(),
     }
 }
 
@@ -63,6 +64,12 @@ fn php_sig_note(iface: &str, op: &crate::api::ApiOp) -> String {
 /// handle with a `__construct`, or a stateless class of static methods),
 /// `next()`-null stream cursors, and the `#[php_module]` registrar.
 pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -> String {
+    // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
+    // today; the ext-php-rs `#[php_class]` glue requires `Send`, so php cannot bind
+    // a `!Send` core. Split it out (emit nothing) + append an honest skip-note
+    // rather than a silent `Send`-assuming handle. No such interface ⇒ empty note.
+    let (api_owned, st_note) = crate::bindgen::split_single_threaded(api, "php");
+    let api = &api_owned;
     // The shared streaming-contract import flows through the use-emitter
     // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
     // generated `use` line has one emission path; renders byte-identically.
@@ -288,12 +295,32 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                             Ok(Self { core: Arc::new(<$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)?) })
                         }
                     },
-                    Shape::Unary => quote_in! { methods =>
-                        $['\r']
-                        pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&ret)> {
-                            self.core.$(&name)($(&names)).map_err(err)
+                    Shape::Unary => {
+                        // An op export-name pin lands as ext-php-rs `#[rename("…")]`
+                        // (un-pinned ⇒ no attr, byte-identical). PHP is ALREADY
+                        // synchronous (the async/sync default is a node-only
+                        // projection), so the only default-inversion effect here is
+                        // INFALLIBILITY: a bare-`T` core drops the `PhpResult`/throw
+                        // seam entirely.
+                        if let Some(nm) = pinned_name(&op.bindings, LANG) {
+                            quote_in! { methods => $['\r']$(format!("#[rename({nm:?})]")) };
                         }
-                    },
+                        if op.infallible {
+                            quote_in! { methods =>
+                                $['\r']
+                                pub fn $(&name)(&self$sep$(&ps)) -> $(&ret) {
+                                    self.core.$(&name)($(&names))
+                                }
+                            }
+                        } else {
+                            quote_in! { methods =>
+                                $['\r']
+                                pub fn $(&name)(&self$sep$(&ps)) -> PhpResult<$(&ret)> {
+                                    self.core.$(&name)($(&names)).map_err(err)
+                                }
+                            }
+                        }
+                    }
                     Shape::Stream => {
                         let class = pascal(&op.name);
                         quote_in! { methods =>
@@ -355,10 +382,24 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                     .collect::<Vec<_>>()
                     .join(", ");
                 let (ret, _) = ty(api, &op.returns);
-                quote_in! { methods =>
-                    $['\r']
-                    pub fn $(&name)($(&ps)) -> PhpResult<$(&ret)> {
-                        <$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)
+                // op export-name pin ⇒ `#[rename("…")]`; infallible ⇒ drop the
+                // `PhpResult`/throw seam (see the method arm above).
+                if let Some(nm) = pinned_name(&op.bindings, LANG) {
+                    quote_in! { methods => $['\r']$(format!("#[rename({nm:?})]")) };
+                }
+                if op.infallible {
+                    quote_in! { methods =>
+                        $['\r']
+                        pub fn $(&name)($(&ps)) -> $(&ret) {
+                            <$(&impl_path) as $(&trait_name)>::$(&name)($(&names))
+                        }
+                    }
+                } else {
+                    quote_in! { methods =>
+                        $['\r']
+                        pub fn $(&name)($(&ps)) -> PhpResult<$(&ret)> {
+                            <$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)
+                        }
                     }
                 }
             }
@@ -394,8 +435,9 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
 
     let src = api.source.as_deref().unwrap_or("the fluessig catalog");
     let body = t.to_file_string().expect("rust renders");
-    crate::rustfmt::format(format!(
+    let out = crate::rustfmt::format(format!(
         "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}#![allow(clippy::all)]\n#![allow(unused_imports)]\n\n{body}",
         note_line(banner_note)
-    ))
+    ));
+    format!("{out}{st_note}")
 }

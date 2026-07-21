@@ -100,7 +100,45 @@ fn either_arities(api: &ApiDoc, opts: &NodeOptions) -> std::collections::BTreeSe
 /// mode `node_ty` delegates to `ty`, so the output is byte-identical to the
 /// language default.
 fn emit_core_traits_node(t: &mut rust::Tokens, api: &ApiDoc, opts: &NodeOptions) {
-    emit_core_traits_with(t, api, |op| node_ty(api, opts, &op.returns).0);
+    emit_core_traits_full(
+        t,
+        api,
+        |op| node_ty(api, opts, &op.returns).0,
+        node_param_sig,
+        |op| op.result_error.clone(),
+    );
+}
+
+/// Node's param `(name, rust_type)` list — the shared [`param_sig`] with ONE
+/// divergence: a `bytes` PARAM is spelled `Uint8Array` (Feature 1 — pi/pidgin's
+/// binary-input convention, byte-exact with pi's `.d.ts`), matching the handle
+/// methods, free functions, and task fields so the core call type-checks. Every
+/// non-bytes param delegates to the shared [`ty`], so it is byte-identical.
+fn node_param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
+    param_sig_with(op, |t| node_param_ty(api, t).0)
+}
+
+/// The IN half of node's position-aware `bytes` spelling: a `bytes` param crosses
+/// in as `napi::bindgen_prelude::Uint8Array` (a read-only view over the JS bytes),
+/// which napi's `.d.ts` generator names `Uint8Array`. Non-bytes types delegate to
+/// the shared [`ty`] (params never carry a structured union — they ride the
+/// envelope `String`), so the spelling is byte-identical for everything else.
+fn node_param_ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
+    match t {
+        ApiType::Scalar(s) if s == "bytes" => (
+            "napi::bindgen_prelude::Uint8Array".into(),
+            "Uint8Array".into(),
+        ),
+        ApiType::List { list } => {
+            let (r, s) = node_param_ty(api, list);
+            (format!("Vec<{r}>"), format!("{s}[]"))
+        }
+        ApiType::Nullable { nullable } => {
+            let (r, s) = node_param_ty(api, nullable);
+            (format!("Option<{r}>"), format!("{s} | null"))
+        }
+        _ => ty(api, t),
+    }
 }
 
 /// The node `(rust, ts)` spelling of a type, applying structured union
@@ -109,6 +147,15 @@ fn emit_core_traits_node(t: &mut rust::Tokens, api: &ApiDoc, opts: &NodeOptions)
 /// the historical output.
 fn node_ty(api: &ApiDoc, opts: &NodeOptions, t: &ApiType) -> (String, String) {
     match (t, &opts.union_projection) {
+        // Feature 1 — a `bytes` value crosses OUT (a return / a DTO field) as a
+        // napi `Buffer` (an owned byte buffer), the JS idiom for binary output and
+        // byte-exact with pi/pidgin. Spelled with the fully-qualified napi type so
+        // napi's `.d.ts` generator names it `Buffer` directly (no alias to resolve,
+        // no `ts_return_type` hint). `bytes` PARAMS are spelled `Uint8Array` by
+        // [`node_param_sig`]; this is the OUT half of that position-aware split.
+        (ApiType::Scalar(s), _) if s == "bytes" => {
+            ("napi::bindgen_prelude::Buffer".into(), "Buffer".into())
+        }
         (ApiType::Union { union }, UnionProjection::Structured { .. }) => {
             match structured_union(api, union) {
                 Some(u) => {
@@ -203,6 +250,59 @@ fn emit_union_variants(t: &mut rust::Tokens, api: &ApiDoc, opts: &NodeOptions) {
     }
 }
 
+/// The two `#[napi(object)]` arm names of a `#[fluessig(result)]` op's envelope,
+/// keyed off the op name: `readBinaryFile` → (`ReadBinaryFileOk`,
+/// `ReadBinaryFileErr`). The struct emission and the method return type read this
+/// same helper so they always agree.
+fn result_envelope_names(op_name: &str) -> (String, String) {
+    let p = pascal(op_name);
+    (format!("{p}Ok"), format!("{p}Err"))
+}
+
+/// Feature 2 — emit the two `#[napi(object)]` arms of every `#[fluessig(result)]`
+/// op's envelope: `<Op>Ok { ok, value: T }` and `<Op>Err { ok, error: E }`. The
+/// op's handle method / free function returns `Either<<Op>Ok, <Op>Err>`, which
+/// napi renders `<Op>Ok | <Op>Err`; the `ok` bool discriminates the arms. Nothing
+/// is emitted when no op is marked, so historical output is byte-identical.
+///
+/// NOTE: napi collapses a bool field to `ok: boolean` in its generated `.d.ts`
+/// (the same limitation the structured-union `type: string` tags hit) — the exact
+/// discriminated `ok: true` / `ok: false` literals are an external-`.d.ts`
+/// concern, out of scope here. The structural `{ ok, value } | { ok, error }`
+/// shape is exact.
+fn emit_result_envelopes(t: &mut rust::Tokens, api: &ApiDoc, opts: &NodeOptions) {
+    for i in &api.interfaces {
+        for op in &i.ops {
+            let Some(err_rec) = &op.result_error else {
+                continue;
+            };
+            let (ok_name, err_name) = result_envelope_names(&op.name);
+            let (val_ty, _) = node_ty(api, opts, &op.returns);
+            quote_in! { *t =>
+                $['\r']
+                $(format!("/// The `ok` arm of `{}.{}`'s result envelope — `{{ ok: true, value }}`.", i.name, op.name))
+                #[napi(object)]
+                #[derive(Clone)]
+                pub struct $(&ok_name) {
+                    $("/// Always `true` — discriminates the envelope's success arm.")
+                    pub ok: bool,
+                    $(format!("pub value: {val_ty},"))
+                }
+                $(format!("/// The `error` arm of `{}.{}`'s result envelope — `{{ ok: false, error }}`,", i.name, op.name))
+                $(format!("/// the `{err_rec}` record handed back AS A VALUE (never thrown)."))
+                #[napi(object)]
+                #[derive(Clone)]
+                pub struct $(&err_name) {
+                    $("/// Always `false` — discriminates the envelope's error arm.")
+                    pub ok: bool,
+                    $(format!("pub error: {err_rec},"))
+                }
+                $['\n']
+            };
+        }
+    }
+}
+
 /// The `#[napi(ts_return_type = "…")]` attribute line for a return position, or
 /// an empty string when the external-`.d.ts` mode suppresses it for a union.
 fn ts_return_attr(
@@ -216,6 +316,128 @@ fn ts_return_attr(
     }
     let (_, ts) = node_ty(api, opts, ret);
     format!("#[napi(ts_return_type = {:?})]", wrap(&ts))
+}
+
+/// Inject an op-level export-name pin (Feature B — `#[fluessig(name = "…")]`,
+/// read as `bindings["node"].name`) into a unary op's `#[napi(…)]` attribute as
+/// a `js_name`. `pin` `None` ⇒ `attr` is returned VERBATIM, so an unpinned op is
+/// byte-identical to before this authoring path existed. When the async
+/// `ts_return_type` hint is suppressed (an external-`.d.ts` union return, giving
+/// an empty `attr`) a pinned op still gets a lone `#[napi(js_name = "…")]`.
+fn with_js_name(attr: String, pin: Option<&str>) -> String {
+    let Some(js) = pin else { return attr };
+    let js = format!("js_name = {js:?}");
+    match attr.strip_prefix("#[napi(") {
+        Some(rest) => format!("#[napi({js}, {rest}"),
+        None => format!("#[napi({js})]"),
+    }
+}
+
+/// The `#[napi(…)]` attribute for a SYNCHRONOUS (`#[fluessig(sync)]`) unary op:
+/// `#[napi(js_name = "…")]` when name-pinned, else the bare `#[napi]`. A sync op
+/// carries no `ts_return_type` — its emitted return type IS the value (no
+/// `AsyncTask` wrapper for napi to see through).
+fn sync_napi_attr(pin: Option<&str>) -> String {
+    match pin {
+        Some(js) => format!("#[napi(js_name = {js:?})]"),
+        None => "#[napi]".to_string(),
+    }
+}
+
+/// Which prelude items a surface's ops actually pull in — the gate that keeps a
+/// pure sync-infallible binding free of the napi-3-ONLY streaming/async symbols
+/// (`AsyncGenerator` / `AsyncTask`) so it compiles against `napi = "2"`. The
+/// prior code emitted the whole streaming/async prelude UNCONDITIONALLY, so a
+/// stream-less, ctor-less, sync-infallible surface failed with `unresolved
+/// import napi::bindgen_prelude::AsyncGenerator` (that symbol does not exist in
+/// napi 2). Each import is therefore gated on the op kinds that use it; a full
+/// (stream/async/ctor/fallible) surface still emits every item, so its bytes are
+/// unchanged.
+struct NodePrelude {
+    /// Any `stream` op → `AsyncGenerator` + `Future`/`Duration` + the shared
+    /// `Poll`/`PollStream` runtime import (all streaming-only, napi-3 for the
+    /// generator trait).
+    stream: bool,
+    /// `AsyncTask` + `napi::{Env, Task}` — an async unary op OR a stream (whose
+    /// retained `next()` cursor is itself an `AsyncTask`).
+    async_task: bool,
+    /// `Arc` — an ORDINARY handle (ctor) surface or a stream (both hold `Arc<…>`).
+    /// A `single_threaded` handle does NOT hold `Arc` (it is thread-confined), so a
+    /// surface whose only ctor interfaces are single_threaded (and no stream)
+    /// leaves this `false` and never imports `Arc`.
+    arc: bool,
+    /// `std::cell::RefCell` — a `single_threaded` handle holds its core as
+    /// `RefCell<…Impl>` (thread-confined interior mutability, no `Send`), so any
+    /// single_threaded ctor interface turns this on.
+    single_threaded: bool,
+    /// `napi::bindgen_prelude::Result` + the `err` fn — any op/getter that throws
+    /// on `Err`: an async task, a stream, a ctor `new`, a sync-FALLIBLE op, or an
+    /// Arrow-payload IPC getter. `Result` and `err` are always co-present (every
+    /// throwing site both spells `Result<…>` and calls `.map_err(err)`), so one
+    /// flag gates both.
+    result: bool,
+}
+
+impl NodePrelude {
+    fn of(api: &ApiDoc) -> Self {
+        let stream = api
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Stream);
+        let async_unary = api
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Unary && o.is_async);
+        let ctor = api
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Ctor);
+        // an ORDINARY (async-capable) handle holds `Arc<Impl>`; a `single_threaded`
+        // handle does NOT (it is thread-confined, `RefCell<Impl>`). So `Arc` is
+        // needed only for a NON-single_threaded ctor interface (or a stream).
+        let ordinary_ctor = api
+            .interfaces
+            .iter()
+            .filter(|i| !i.single_threaded)
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Ctor);
+        // any `single_threaded` ctor interface → the handle holds `RefCell<Impl>`.
+        let single_threaded = api
+            .interfaces
+            .iter()
+            .filter(|i| i.single_threaded)
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Ctor);
+        // a DEFAULT sync unary op that is NOT infallible keeps a `Result<T>` seam
+        // and throws → `Result` + `err`.
+        let sync_fallible = api
+            .interfaces
+            .iter()
+            .flat_map(|i| &i.ops)
+            .any(|o| o.shape == Shape::Unary && !o.is_async && !o.infallible);
+        // an Arrow-payload DTO's IPC getter returns `Result<Bytes>` + `.map_err(err)`.
+        let arrow = api.models.iter().any(|m| arrow_field(m).is_some());
+        Self {
+            stream,
+            async_task: async_unary || stream,
+            arc: ordinary_ctor || stream,
+            single_threaded,
+            // the ctor of a single_threaded handle still throws (`.map_err(err)?`),
+            // so it too needs `Result` + `err` — `ctor` (any ctor) already covers it.
+            result: async_unary || stream || ctor || sync_fallible || arrow,
+        }
+    }
+
+    /// True when the surface emits the FULL historical prelude (every streaming/
+    /// async/fallible item). Only a REDUCED surface gets the belt-and-suspenders
+    /// `#![allow(unused_imports)]` banner line — this keeps a full surface's
+    /// committed golden byte-identical (it never carried that line).
+    fn is_full(&self) -> bool {
+        self.stream && self.async_task && self.arc && self.result
+    }
 }
 
 /// Generate the napi (Node) binding with default options: structured
@@ -236,36 +458,76 @@ pub fn node_binding_with_options(
     banner_note: Option<&str>,
     opts: &NodeOptions,
 ) -> String {
+    // The CONDITIONAL streaming/async prelude. Each `use` is gated on the op
+    // kinds that use it ([`NodePrelude`]); a pure sync-infallible surface reduces
+    // to just `use napi_derive::napi;` (napi-2-compatible). A full surface still
+    // emits every item, and since rustfmt reorders the imports the emission order
+    // here is immaterial — the formatted bytes match the historical prelude.
+    let needs = NodePrelude::of(api);
     // Structured projection emits bare `Either{N}<…>` in DTO fields, op returns,
     // and `Task::Output`; napi's prelude glob is NOT imported, so the exact
     // arities used must be named here (a real napi compile fails E0425 otherwise).
-    // Envelope mode produces no `Either`, so the set is empty and the import line
-    // is byte-identical to before.
-    let either_import: String = either_arities(api, opts)
-        .iter()
-        .map(|&n| format!(", {}", either_name(n)))
-        .collect();
-    let prelude_import =
-        format!("use napi::bindgen_prelude::{{AsyncGenerator, AsyncTask, Result{either_import}}};");
-    // The shared streaming-contract import flows through the use-emitter
-    // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
-    // generated `use` line has one emission path; renders byte-identically.
-    let runtime_import = RUNTIME_STREAM_IMPORT.render();
+    // Envelope mode produces no `Either`, so the set is empty.
+    let either = either_arities(api, opts);
     let mut t: rust::Tokens = quote! {
         $("// The fixed prelude — generated code uses fully-qualified paths elsewhere.")
-        use std::future::Future;
-        use std::sync::Arc;
-        use std::time::Duration;
-        $(&prelude_import)
-        use napi::{Env, Task};
-        use napi_derive::napi;
-        $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
-        $(&runtime_import)
-
-        fn err(e: impl std::fmt::Display) -> napi::Error {
-            napi::Error::from_reason(e.to_string())
-        }
     };
+    // `use napi::bindgen_prelude::{…}` — only the items actually used, in the
+    // historical order (AsyncGenerator, AsyncTask, Result, then Either arities).
+    // Omitted entirely for a pure sync-infallible surface (napi-3-free).
+    let mut bp: Vec<String> = Vec::new();
+    if needs.stream {
+        bp.push("AsyncGenerator".to_string());
+    }
+    if needs.async_task {
+        bp.push("AsyncTask".to_string());
+    }
+    if needs.result {
+        bp.push("Result".to_string());
+    }
+    bp.extend(either.iter().map(|&n| either_name(n)));
+    if !bp.is_empty() {
+        let line = format!("use napi::bindgen_prelude::{{{}}};", bp.join(", "));
+        quote_in! { t => $['\r'] $(&line) };
+    }
+    if needs.async_task {
+        // `Env`/`Task` back every `AsyncTask` (an async unary op or a stream's
+        // retained poll cursor).
+        quote_in! { t => $['\r'] use napi::{Env, Task}; };
+    }
+    // ALWAYS — the one napi-2-compatible import every surface needs.
+    quote_in! { t => $['\r'] use napi_derive::napi; };
+    if needs.stream {
+        quote_in! { t => $['\r'] use std::future::Future; };
+    }
+    if needs.arc {
+        quote_in! { t => $['\r'] use std::sync::Arc; };
+    }
+    if needs.single_threaded {
+        // a `single_threaded` handle holds its `!Send` core as `RefCell<…Impl>` —
+        // thread-confined interior mutability, no `Arc`, no `Send`/`Sync`.
+        quote_in! { t => $['\r'] use std::cell::RefCell; };
+    }
+    if needs.stream {
+        // the shared streaming-contract import flows through the use-emitter
+        // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
+        // generated `use` line has one emission path; renders byte-identically.
+        let runtime_import = RUNTIME_STREAM_IMPORT.render();
+        quote_in! { t =>
+            $['\r'] use std::time::Duration;
+            $['\r'] $("// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.")
+            $['\r'] $(&runtime_import)
+        };
+    }
+    if needs.result {
+        // the shared `Err`→`napi::Error` mapper, called at every throwing site.
+        quote_in! { t =>
+            $['\n']
+            fn err(e: impl std::fmt::Display) -> napi::Error {
+                napi::Error::from_reason(e.to_string())
+            }
+        };
+    }
     if api_uses_bytes(api) {
         quote_in! { t =>
             $['\n']
@@ -408,6 +670,10 @@ pub fn node_binding_with_options(
 
     // per-variant tagged structs (+ literal-set conversions) for structured unions
     emit_union_variants(&mut t, api, opts);
+
+    // Feature 2 — the `{ ok, value } | { ok, error }` envelope arm structs for
+    // every `#[fluessig(result)]` op (nothing emitted when none is marked).
+    emit_result_envelopes(&mut t, api, opts);
 
     emit_core_traits_node(&mut t, api, opts);
 
@@ -722,16 +988,22 @@ pub fn node_binding_with_options(
             }
         }
 
-        // unary op tasks
-        for op in i.ops.iter().filter(|o| o.shape == Shape::Unary) {
+        // unary op tasks — a SYNCHRONOUS op (the default; `#[fluessig(async)]`
+        // opts back into async) needs NO off-thread Task (it is emitted as a plain
+        // `#[napi] fn`), so only the async unary ops generate one here.
+        for op in i
+            .ops
+            .iter()
+            .filter(|o| o.shape == Shape::Unary && o.is_async)
+        {
             let task = format!("{}Task", pascal(&op.name));
             let name = snake(&op.name);
             let (ret, _) = node_ty(api, opts, &op.returns);
-            let fields: Vec<String> = param_sig(api, op)
+            let fields: Vec<String> = node_param_sig(api, op)
                 .iter()
                 .map(|(n, r)| format!("{n}: {r},"))
                 .collect();
-            let args = param_sig(api, op)
+            let args = node_param_sig(api, op)
                 .iter()
                 .map(|(n, _)| format!("self.{n}.clone()"))
                 .collect::<Vec<_>>()
@@ -767,7 +1039,25 @@ pub fn node_binding_with_options(
         }
 
         if has_ctor {
-            // the handle class
+            // the handle class. A `single_threaded` interface diverges from the
+            // ordinary (async-capable) handle: it holds its core by plain
+            // ownership inside a `RefCell` — NO `Arc`, NO `Send`/`Sync` — so a
+            // `!Send` core (pidgin's `TuiCore`: `Rc<RefCell<…>>` + non-Send
+            // closures) can be GENERATED as a thread-confined napi class. A napi
+            // class instance never crosses threads, so it needs no `Send` bound;
+            // `&self` methods reach `&mut` through `RefCell::borrow_mut()` (the
+            // core trait's ops are `&mut self` for a single_threaded interface).
+            // The loader + derive macro guarantee such an interface carries only
+            // synchronous ops, so the async/stream arms below never fire here.
+            let st = i.single_threaded;
+            // How a handle method reaches the core to CALL an op: an ordinary
+            // handle derefs its `Arc<Impl>` directly (`self.core`); a
+            // single_threaded handle takes a `&mut` through the `RefCell`.
+            let core_recv = if st {
+                "self.core.borrow_mut()"
+            } else {
+                "self.core"
+            };
             let mut methods: rust::Tokens = quote!();
             for op in &i.ops {
                 let name = snake(&op.name);
@@ -778,33 +1068,85 @@ pub fn node_binding_with_options(
                         }
                     }
                 }
-                let params: Vec<String> = param_sig(api, op)
+                let params: Vec<String> = node_param_sig(api, op)
                     .iter()
                     .map(|(n, r)| format!("{n}: {r}"))
                     .collect();
                 let ps = params.join(", ");
-                let names = param_sig(api, op)
+                let names = node_param_sig(api, op)
                     .iter()
                     .map(|(n, _)| n.clone())
                     .collect::<Vec<_>>()
                     .join(", ");
                 match op.shape {
-                    Shape::Ctor => quote_in! { methods =>
-                        $['\r']
-                        #[napi(constructor)]
-                        pub fn new($(&ps)) -> Result<Self> {
-                            Ok(Self { core: Arc::new(<$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)?) })
-                        }
-                    },
-                    Shape::Unary => {
-                        let task = format!("{}Task", pascal(&op.name));
-                        let attr =
-                            ts_return_attr(api, opts, &op.returns, |ts| format!("Promise<{ts}>"));
+                    Shape::Ctor => {
+                        // ordinary → `Arc::new(…)`; single_threaded → `RefCell::new(…)`.
+                        let wrap = if st { "RefCell::new" } else { "Arc::new" };
                         quote_in! { methods =>
                             $['\r']
-                            $attr
-                            pub fn $(&name)(&self, $(&ps)) -> AsyncTask<$(&task)> {
-                                AsyncTask::new($(&task) { core: self.core.clone(), $(&names) })
+                            #[napi(constructor)]
+                            pub fn new($(&ps)) -> Result<Self> {
+                                Ok(Self { core: $(wrap)(<$(&impl_path) as $(&trait_name)>::$(&name)($(&names)).map_err(err)?) })
+                            }
+                        }
+                    }
+                    Shape::Unary => {
+                        let pin = pinned_name(&op.bindings, LANG);
+                        let pin = pin.as_deref();
+                        if op.result_error.is_some() {
+                            // Feature 2 — the result-envelope method: return
+                            // `Either<Ok, Err>` (`{ ok, value } | { ok, error }`),
+                            // building the error arm from the core's `Result<T, E>`
+                            // VALUE instead of throwing. Always synchronous.
+                            let (ok_name, err_name) = result_envelope_names(&op.name);
+                            let attr = sync_napi_attr(pin);
+                            quote_in! { methods =>
+                                $['\r']
+                                $attr
+                                pub fn $(&name)(&self, $(&ps)) -> napi::bindgen_prelude::Either<$(&ok_name), $(&err_name)> {
+                                    match $(core_recv).$(&name)($(&names)) {
+                                        Ok(value) => napi::bindgen_prelude::Either::A($(&ok_name) { ok: true, value }),
+                                        Err(error) => napi::bindgen_prelude::Either::B($(&err_name) { ok: false, error }),
+                                    }
+                                }
+                            }
+                        } else if !op.is_async {
+                            // DEFAULT: a synchronous method — no `AsyncTask`, no
+                            // `Promise`. Infallible (bare-`T` core) passes the value
+                            // straight through; fallible (`Result<T>` core) throws.
+                            let (ret, _) = node_ty(api, opts, &op.returns);
+                            let attr = sync_napi_attr(pin);
+                            if op.infallible {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    $attr
+                                    pub fn $(&name)(&self, $(&ps)) -> $(&ret) {
+                                        $(core_recv).$(&name)($(&names))
+                                    }
+                                }
+                            } else {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    $attr
+                                    pub fn $(&name)(&self, $(&ps)) -> Result<$(&ret)> {
+                                        $(core_recv).$(&name)($(&names)).map_err(err)
+                                    }
+                                }
+                            }
+                        } else {
+                            let task = format!("{}Task", pascal(&op.name));
+                            let attr = with_js_name(
+                                ts_return_attr(api, opts, &op.returns, |ts| {
+                                    format!("Promise<{ts}>")
+                                }),
+                                pin,
+                            );
+                            quote_in! { methods =>
+                                $['\r']
+                                $attr
+                                pub fn $(&name)(&self, $(&ps)) -> AsyncTask<$(&task)> {
+                                    AsyncTask::new($(&task) { core: self.core.clone(), $(&names) })
+                                }
                             }
                         }
                     }
@@ -841,12 +1183,21 @@ pub fn node_binding_with_options(
                     quote_in! { t => $['\r']$(format!("/// {line}")) };
                 }
             }
+            // The core-holding field: an ordinary handle shares its core across
+            // AsyncTask workers via `Arc<Impl>` (⇒ `Impl: Send + Sync`); a
+            // single_threaded handle owns it thread-confined in a `RefCell<Impl>`
+            // (no `Arc`, no `Send`/`Sync` bound — a `!Send` core compiles).
+            let core_field = if st {
+                format!("RefCell<{impl_path}>")
+            } else {
+                format!("Arc<{impl_path}>")
+            };
             quote_in! { t =>
                 $['\r']
                 #[napi]
                 pub struct $(&i.name) {
                     $("// pub(crate): the @manual ops in lib.rs extend this class and need the core")
-                    pub(crate) core: Arc<$(&impl_path)>,
+                    pub(crate) core: $(&core_field),
                 }
 
                 #[napi]
@@ -863,14 +1214,12 @@ pub fn node_binding_with_options(
                     quote_in! { t => $['\r']$(format!("// @manual: {}.{} — hand-written in lib.rs.", i.name, op.name)) };
                     continue;
                 }
-                let task = format!("{}Task", pascal(&op.name));
-                let attr = ts_return_attr(api, opts, &op.returns, |ts| format!("Promise<{ts}>"));
-                let params: Vec<String> = param_sig(api, op)
+                let params: Vec<String> = node_param_sig(api, op)
                     .iter()
                     .map(|(n, r)| format!("{n}: {r}"))
                     .collect();
                 let ps = params.join(", ");
-                let names = param_sig(api, op)
+                let names = node_param_sig(api, op)
                     .iter()
                     .map(|(n, _)| n.clone())
                     .collect::<Vec<_>>()
@@ -880,14 +1229,68 @@ pub fn node_binding_with_options(
                         quote_in! { t => $['\r']$(format!("/// {line}")) };
                     }
                 }
-                quote_in! { t =>
-                    $['\r']
-                    $attr
-                    pub fn $(&name)($(&ps)) -> AsyncTask<$(&task)> {
-                        AsyncTask::new($(&task) { $(&names) })
+                let pin = pinned_name(&op.bindings, LANG);
+                let pin = pin.as_deref();
+                if op.result_error.is_some() {
+                    // Feature 2 — the result-envelope free function: return
+                    // `Either<Ok, Err>` (`{ ok, value } | { ok, error }`), building
+                    // the error arm from the core's `Result<T, E>` VALUE instead of
+                    // throwing. Always synchronous.
+                    let (ok_name, err_name) = result_envelope_names(&op.name);
+                    let attr = sync_napi_attr(pin);
+                    let call = format!("<{impl_path} as {trait_name}>::{name}({names})");
+                    quote_in! { t =>
+                        $['\r']
+                        $attr
+                        pub fn $(&name)($(&ps)) -> napi::bindgen_prelude::Either<$(&ok_name), $(&err_name)> {
+                            match $(&call) {
+                                Ok(value) => napi::bindgen_prelude::Either::A($(&ok_name) { ok: true, value }),
+                                Err(error) => napi::bindgen_prelude::Either::B($(&err_name) { ok: false, error }),
+                            }
+                        }
+                        $['\n']
+                    };
+                } else if !op.is_async {
+                    // DEFAULT: a synchronous free function — a direct call into
+                    // the core trait, no `AsyncTask`/`Promise`. Infallible returns
+                    // the value; fallible throws on `Err`.
+                    let (ret, _) = node_ty(api, opts, &op.returns);
+                    let attr = sync_napi_attr(pin);
+                    let call = format!("<{impl_path} as {trait_name}>::{name}({names})");
+                    if op.infallible {
+                        quote_in! { t =>
+                            $['\r']
+                            $attr
+                            pub fn $(&name)($(&ps)) -> $(&ret) {
+                                $(&call)
+                            }
+                            $['\n']
+                        };
+                    } else {
+                        quote_in! { t =>
+                            $['\r']
+                            $attr
+                            pub fn $(&name)($(&ps)) -> Result<$(&ret)> {
+                                $(&call).map_err(err)
+                            }
+                            $['\n']
+                        };
                     }
-                    $['\n']
-                };
+                } else {
+                    let task = format!("{}Task", pascal(&op.name));
+                    let attr = with_js_name(
+                        ts_return_attr(api, opts, &op.returns, |ts| format!("Promise<{ts}>")),
+                        pin,
+                    );
+                    quote_in! { t =>
+                        $['\r']
+                        $attr
+                        pub fn $(&name)($(&ps)) -> AsyncTask<$(&task)> {
+                            AsyncTask::new($(&task) { $(&names) })
+                        }
+                        $['\n']
+                    };
+                }
             }
         }
     }
@@ -903,9 +1306,23 @@ pub fn node_binding_with_options(
         ),
         None => String::new(),
     };
+    // Belt-and-suspenders against any residual unused-import warning on a REDUCED
+    // (non-full) surface, mirroring the php backend's banner. Emitted ONLY when
+    // the prelude was trimmed: a FULL surface never carried this line, so its
+    // committed golden stays byte-identical (gating it here is what keeps the
+    // async/stream `node.golden` unchanged). It sits BEFORE `#![allow(clippy::all)]`
+    // so that line stays the LAST prologue attribute — the fan-out import splice
+    // ([`splice_imports`]) inserts `use crate::…` right after it, which must land
+    // after every inner attribute or rustc rejects the module.
+    let unused = if needs.is_full() {
+        String::new()
+    } else {
+        "#![allow(unused_imports)]\n".to_string()
+    };
     crate::rustfmt::format(format!(
-        "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}{}#![allow(clippy::all)]\n\n{body}",
+        "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}{}{}#![allow(clippy::all)]\n\n{body}",
         note_line(banner_note),
-        ext_note
+        ext_note,
+        unused
     ))
 }

@@ -179,6 +179,7 @@
           "name": "emit",
           "doc": null,
           "shape": "unary",
+          "async": true,
           "params": [
             {
               "name": "payload",
@@ -193,6 +194,7 @@
           "name": "clear",
           "doc": "Drop every recorded event.",
           "shape": "unary",
+          "async": true,
           "destructive": true,
           "params": [],
           "returns": "int64"
@@ -201,6 +203,7 @@
           "name": "run",
           "doc": "One run, flat: relations ride as their FK fields.",
           "shape": "unary",
+          "async": true,
           "readonly": true,
           "params": [
             {

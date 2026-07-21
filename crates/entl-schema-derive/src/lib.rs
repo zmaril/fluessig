@@ -732,34 +732,40 @@ pub struct Git;
 #[export]
 impl Git {
     /// Diff two commits (`base...head` when threeDot).
+    #[fluessig(async)]
     pub fn diff_commits(repo_path: &str, base: &str, head: &str, three_dot: bool) -> Vec<FileDiff> {
         let _ = (repo_path, base, head, three_dot);
         Vec::new()
     }
 
     /// A file's content at a commit — None when absent or binary.
+    #[fluessig(async)]
     pub fn file_at(repo_path: &str, commit: &str, path: &str) -> Option<String> {
         let _ = (repo_path, commit, path);
         None
     }
 
+    #[fluessig(async)]
     pub fn branch_exists(repo_path: &str, name: &str) -> bool {
         let _ = (repo_path, name);
         false
     }
 
+    #[fluessig(async)]
     pub fn current_branch(repo_path: &str) -> String {
         let _ = repo_path;
         String::new()
     }
 
     /// Commit subjects+bodies along a branch (JSON).
+    #[fluessig(async)]
     pub fn commit_bodies(repo_path: &str, branch: &str) -> String {
         let _ = (repo_path, branch);
         String::new()
     }
 
     /// Remote branch names matching a pattern (trailing-`*` glob). Fetches first.
+    #[fluessig(async)]
     pub fn ls_remote_heads(repo_path: &str, pattern: &str) -> Vec<String> {
         let _ = (repo_path, pattern);
         Vec::new()
@@ -781,36 +787,42 @@ impl Entl {
     }
 
     /// Load git history from `repoPath` (one-way, incremental).
+    #[fluessig(async)]
     pub fn load_git(&self, repo_path: &str) -> GitStats {
         let _ = repo_path;
         unimplemented!()
     }
 
     /// Load GitHub data (events/PRs/issues/Actions). Needs a token.
+    #[fluessig(async)]
     pub fn load_github(&self, repo_path: &str) -> GithubStats {
         let _ = repo_path;
         unimplemented!()
     }
 
     /// Run a SQL query; JSON rows back.
+    #[fluessig(async)]
     pub fn query(&self, sql: &str) -> String {
         let _ = sql;
         String::new()
     }
 
     /// Run a SQL query; the result as one Arrow IPC stream (the dataframe on-ramp).
+    #[fluessig(async)]
     pub fn query_arrow(&self, sql: &str) -> Vec<u8> {
         let _ = sql;
         Vec::new()
     }
 
     /// Pull `repoPath` and sync it into a target store, in one call.
+    #[fluessig(async)]
     pub fn sink(&self, repo_path: &str, options: SinkOptions) -> SinkStats {
         let _ = (repo_path, options);
         unimplemented!()
     }
 
     /// Read a store back into canonical rows (JSON; oids hex, timestamps RFC3339).
+    #[fluessig(async)]
     pub fn extract(&self, options: ExtractOptions) -> String {
         let _ = options;
         String::new()
@@ -838,6 +850,7 @@ impl Entl {
     }
 
     /// Reconstruct a git repo from a store (needs objects: true at sink time). Returns commits rebuilt.
+    #[fluessig(async)]
     pub fn rebuild(&self, options: RebuildOptions) -> i64 {
         let _ = options;
         0

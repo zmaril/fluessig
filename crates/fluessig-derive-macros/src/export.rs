@@ -19,6 +19,11 @@ pub(crate) fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStr
     let iface_span = span_tokens(iface_ident.span());
     let iface_doc = option_str(doc_string(&item.attrs).as_deref());
 
+    // Interface-level `#[fluessig(single_threaded)]` on the `impl` block — lower to
+    // a THREAD-CONFINED handle class (node-only today). Parsed from the impl's own
+    // attributes (the op markers ride the methods; this one rides the impl).
+    let single_threaded = interface_meta(&item.attrs)?.single_threaded;
+
     // Build the op descriptors from the ORIGINAL methods (op-kind tags + docs
     // intact), then re-emit the impl with the `#[fluessig(…)]` tags stripped so
     // the methods still compile.
@@ -26,9 +31,37 @@ pub(crate) fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStr
     let mut cleaned = item.clone();
     for it in &mut cleaned.items {
         let ImplItem::Fn(f) = it else { continue };
+        // A single_threaded interface may carry ONLY synchronous ops: an async or
+        // stream op needs a `Send` core for the threadpool, incompatible with a
+        // thread-confined `!Send` handle. Reject at the offending method's span.
+        if single_threaded {
+            let meta = method_meta(&f.attrs)?;
+            if meta.is_async == Some(true) {
+                return Err(syn::Error::new(
+                    f.sig.ident.span(),
+                    "#[fluessig(single_threaded)] interface: an async op is not allowed — a \
+                     thread-confined `!Send` handle cannot serve an async op (the async \
+                     projection clones the core onto a threadpool worker, which requires a \
+                     `Send` core). Drop #[fluessig(async)], or drop #[fluessig(single_threaded)]",
+                ));
+            }
+            if matches!(meta.kind, OpKindChoice::Stream) {
+                return Err(syn::Error::new(
+                    f.sig.ident.span(),
+                    "#[fluessig(single_threaded)] interface: a stream op is not allowed — a \
+                     thread-confined `!Send` handle cannot serve a stream op (streams poll off \
+                     a threadpool worker, which requires a `Send` core). Drop #[fluessig(stream)], \
+                     or drop #[fluessig(single_threaded)]",
+                ));
+            }
+        }
         ops.push(op_descriptor_tokens(f)?);
         f.attrs.retain(|a| !a.path().is_ident("fluessig"));
     }
+    // The impl block itself must also shed a `#[fluessig(single_threaded)]` attr so
+    // the re-emitted impl compiles (the op-kind attrs are stripped per-method
+    // above; this strips the interface-level one).
+    cleaned.attrs.retain(|a| !a.path().is_ident("fluessig"));
 
     Ok(quote! {
         #cleaned
@@ -38,11 +71,77 @@ pub(crate) fn expand_export(item: ItemImpl) -> syn::Result<proc_macro2::TokenStr
                 &::fluessig_derive::InterfaceDescriptor {
                     name: #iface_name,
                     doc: #iface_doc,
+                    single_threaded: #single_threaded,
                     ops: &[ #( #ops ),* ],
                     span: #iface_span,
                 };
         }
     })
+}
+
+/// The interface-level tags on the exported `impl` block. Today the only one is
+/// `#[fluessig(single_threaded)]` (the thread-confined handle opt-in); the doc
+/// comment is read separately. Kept its own struct so more interface markers can
+/// join without reshaping the call site.
+struct InterfaceMeta {
+    single_threaded: bool,
+}
+
+/// Parse the interface-level `#[fluessig(…)]` attributes on an `impl` block. Only
+/// `#[fluessig(single_threaded)]` is understood; anything else is an authoring
+/// error (an op-only tag riding the impl instead of a method is a common slip, so
+/// the message spells the one legal interface tag).
+fn interface_meta(attrs: &[Attribute]) -> syn::Result<InterfaceMeta> {
+    let mut single_threaded = false;
+    for a in attrs {
+        if !a.path().is_ident("fluessig") {
+            continue;
+        }
+        let tags = a.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        )?;
+        // Each tag is classified by [`interface_tag`] (the error construction lives
+        // there, keeping this loop flat); today the only legal one flips the flag.
+        for m in &tags {
+            match interface_tag(m)? {
+                InterfaceTag::SingleThreaded => single_threaded = true,
+            }
+        }
+    }
+    Ok(InterfaceMeta { single_threaded })
+}
+
+/// The one recognised interface-level tag. Its own enum (rather than a bare bool)
+/// so a second interface marker can join without reshaping [`interface_meta`].
+enum InterfaceTag {
+    SingleThreaded,
+}
+
+/// Classify one `#[fluessig(…)]` interface tag, or error. Split out of
+/// [`interface_meta`] so the error paths don't deepen that loop's nesting.
+fn interface_tag(m: &syn::Meta) -> syn::Result<InterfaceTag> {
+    let syn::Meta::Path(p) = m else {
+        return Err(syn::Error::new_spanned(
+            m,
+            "unexpected interface tag — the only #[fluessig(…)] tag on an exported \
+             `impl` block is #[fluessig(single_threaded)]",
+        ));
+    };
+    let id = p.get_ident().ok_or_else(|| {
+        syn::Error::new_spanned(p, "expected a bare interface tag (e.g. `single_threaded`)")
+    })?;
+    if id == "single_threaded" {
+        return Ok(InterfaceTag::SingleThreaded);
+    }
+    Err(syn::Error::new_spanned(
+        id,
+        format!(
+            "unknown interface tag `{id}` — the only #[fluessig(…)] tag on an exported \
+             `impl` block is #[fluessig(single_threaded)] (the thread-confined handle \
+             opt-in). Op markers (ctor / stream / async / readonly / …) ride the \
+             METHODS, not the impl"
+        ),
+    ))
 }
 
 /// The `OpDescriptor { … }` tokens for one method: its snake_case name, doc, op
@@ -52,8 +151,42 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
     let doc = option_str(doc_string(&f.attrs).as_deref());
     let meta = method_meta(&f.attrs)?;
     let kind_tokens = meta.kind.tokens();
+    // The per-op async marker (`#[fluessig(async)]` ⇒ `Some(true)`,
+    // `#[fluessig(sync)]` ⇒ `Some(false)`, neither ⇒ `None`). Synchronous is the
+    // global default; `Some(false)` and `None` both lower to a sync binding.
+    let is_async = match meta.is_async {
+        Some(true) => quote! { ::core::option::Option::Some(true) },
+        Some(false) => quote! { ::core::option::Option::Some(false) },
+        None => quote! { ::core::option::Option::None },
+    };
+    // Fallibility is read off the Rust return type: a `Result<T>` return is
+    // fallible (keeps the error seam), a bare `T` is infallible. Only consulted
+    // for a SYNCHRONOUS op (async ops always cross the `Result` seam).
+    let fallible = returns_result(&f.sig);
+    let name_pin = option_str(meta.name_pin.as_deref());
     let readonly = meta.readonly;
     let destructive = meta.destructive;
+    // `#[fluessig(result)]` opts into the node result-envelope: capture the
+    // explicit error record `E` from the op's `Result<T, E>` return. The macro
+    // guarantees (in `method_meta`) that `result` rides a plain synchronous unary
+    // op; here it must also carry a `Result<T, E>` with a NAMED error type.
+    let result_error =
+        if meta.result {
+            match result_error_ident(&f.sig) {
+                Some(id) => {
+                    let s = id.to_string();
+                    quote! { ::core::option::Option::Some(#s) }
+                }
+                None => return Err(syn::Error::new_spanned(
+                    &f.sig,
+                    "#[fluessig(result)] requires a `Result<T, E>` return whose error type `E` is \
+                     a NAMED record (a `#[derive(Record)]`, e.g. `FileError`) — it becomes the \
+                     `{ ok: false, error: E }` arm of the envelope",
+                )),
+            }
+        } else {
+            quote! { ::core::option::Option::None }
+        };
     let params = param_descriptors(&f.sig)?;
     let returns = return_descriptor(meta.kind, &f.sig)?;
     let span = span_tokens(f.sig.ident.span());
@@ -62,13 +195,49 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
             name: #name,
             doc: #doc,
             kind: #kind_tokens,
+            is_async: #is_async,
+            fallible: #fallible,
+            name_pin: #name_pin,
             readonly: #readonly,
             destructive: #destructive,
+            result_error: #result_error,
             params: &[ #( #params ),* ],
             returns: #returns,
             span: #span,
         }
     })
+}
+
+/// Whether a method's declared return type is a `Result<…>` (fallible) — the
+/// sync path uses this to decide between an infallible `-> T` node seam and a
+/// throwing `-> napi::Result<T>` one. A bare `T` (or no return) is infallible.
+fn returns_result(sig: &syn::Signature) -> bool {
+    let ReturnType::Type(_, ty) = &sig.output else {
+        return false;
+    };
+    let Type::Path(tp) = &**ty else { return false };
+    tp.path
+        .segments
+        .last()
+        .map(|s| s.ident == "Result")
+        .unwrap_or(false)
+}
+
+/// The NAMED error type `E` of a `Result<T, E>` return — the record a
+/// `#[fluessig(result)]` op hands back as the `{ ok: false, error: E }` arm.
+/// `None` when the return is not a two-arg `Result<T, E>` with a single-segment
+/// (named) error type. `anyhow::Result<T>` (one type arg) yields `None`, so the
+/// marker legitimately rejects the default anyhow error channel.
+fn result_error_ident(sig: &syn::Signature) -> Option<Ident> {
+    let ReturnType::Type(_, ty) = &sig.output else {
+        return None;
+    };
+    let err = *result_type_args(ty)?.get(1)?;
+    let Type::Path(etp) = err else { return None };
+    if etp.qself.is_some() || etp.path.segments.len() != 1 {
+        return None;
+    }
+    Some(etp.path.segments[0].ident.clone())
 }
 
 /// The op-shaping tags on a method: its kind (`ctor` / plain unary / `stream` /
@@ -79,58 +248,209 @@ fn op_descriptor_tokens(f: &syn::ImplItemFn) -> syn::Result<proc_macro2::TokenSt
 /// way. At most one KIND; the flags default off.
 struct MethodMeta {
     kind: OpKindChoice,
+    /// The per-op async marker — `Some(true)` = `#[fluessig(async)]` (opt into the
+    /// async projection), `Some(false)` = `#[fluessig(sync)]` (the redundant
+    /// explicit-synchronous marker), `None` = the global default. Legal only on a
+    /// plain unary op. Synchronous is the global default, so an untagged op is
+    /// `None`.
+    is_async: Option<bool>,
     readonly: bool,
     destructive: bool,
+    /// `#[fluessig(name = "…")]` — an explicit op export-name pin.
+    name_pin: Option<String>,
+    /// `#[fluessig(result)]` — opt the op into the node result-envelope
+    /// projection (error-as-value). A projection modifier legal on a plain
+    /// synchronous unary op only, like `#[fluessig(sync)]`.
+    result: bool,
+}
+
+/// One parsed tag inside a `#[fluessig(…)]` op attribute. The `async` keyword is
+/// a Rust keyword and does NOT parse as a `syn::Meta::Path` (bare-ident) tag, so
+/// it is peeled off explicitly; everything else (`sync` / `readonly` / kinds /
+/// the `name = "…"` pin) rides the general `Meta` grammar.
+enum OpTag {
+    /// The `async` keyword — force the async projection.
+    Async(proc_macro2::Span),
+    /// Any other tag: a bare flag / kind (`Meta::Path`) or the pin (`NameValue`).
+    /// Boxed — `syn::Meta` dwarfs the `Span`, and the clippy size gate would
+    /// otherwise flag the variant imbalance.
+    Meta(Box<syn::Meta>),
+}
+
+impl syn::parse::Parse for OpTag {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        if input.peek(syn::Token![async]) {
+            let kw = input.parse::<syn::Token![async]>()?;
+            Ok(OpTag::Async(kw.span))
+        } else {
+            Ok(OpTag::Meta(Box::new(input.parse()?)))
+        }
+    }
 }
 
 fn method_meta(attrs: &[Attribute]) -> syn::Result<MethodMeta> {
     let mut kind: Option<OpKindChoice> = None;
+    // `is_async` = the resolved per-op override; `async_span` marks whichever of
+    // `sync`/`async` set it, for the "unary-only" / "conflicting" diagnostics.
+    let mut is_async: Option<bool> = None;
+    let mut async_span: Option<proc_macro2::Span> = None;
     let mut readonly = false;
     let mut destructive = false;
+    let mut name_pin: Option<String> = None;
+    let mut result = false;
+    let mut result_span: Option<proc_macro2::Span> = None;
     for a in attrs {
         if !a.path().is_ident("fluessig") {
             continue;
         }
-        // one attr may carry several comma-separated tags: `#[fluessig(readonly, stream)]`.
+        // One attr may carry several comma-separated tags: bare flags
+        // (`#[fluessig(readonly, stream)]`), the `async` keyword, and/or the
+        // name-value pin (`#[fluessig(name = "…")]`). `async` is a keyword, so the
+        // list is parsed through [`OpTag`] rather than the raw `Meta` grammar.
         let tags = a.parse_args_with(
-            syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated,
+            syn::punctuated::Punctuated::<OpTag, syn::Token![,]>::parse_terminated,
         )?;
-        for id in tags {
-            match id.to_string().as_str() {
-                "readonly" => readonly = true,
-                "destructive" => destructive = true,
-                kind_tag @ ("ctor" | "stream" | "manual") => {
-                    if kind.is_some() {
+        for tag in tags {
+            let m = match tag {
+                OpTag::Async(span) => {
+                    if let Some(prev) = is_async {
+                        if !prev {
+                            return Err(syn::Error::new(
+                                span,
+                                "#[fluessig(async)] conflicts with #[fluessig(sync)] — an op \
+                                 forces at most one projection",
+                            ));
+                        }
+                    }
+                    is_async = Some(true);
+                    async_span = Some(span);
+                    continue;
+                }
+                OpTag::Meta(m) => *m,
+            };
+            match m {
+                syn::Meta::Path(p) => {
+                    let id = p.get_ident().ok_or_else(|| {
+                        syn::Error::new_spanned(&p, "expected a bare op tag (e.g. `sync`)")
+                    })?;
+                    match id.to_string().as_str() {
+                        "sync" => {
+                            if is_async == Some(true) {
+                                return Err(syn::Error::new(
+                                    id.span(),
+                                    "#[fluessig(sync)] conflicts with #[fluessig(async)] — an op \
+                                     forces at most one projection",
+                                ));
+                            }
+                            is_async = Some(false);
+                            async_span = Some(id.span());
+                        }
+                        "readonly" => readonly = true,
+                        "destructive" => destructive = true,
+                        "result" => {
+                            result = true;
+                            result_span = Some(id.span());
+                        }
+                        kind_tag @ ("ctor" | "stream" | "manual") => {
+                            if kind.is_some() {
+                                return Err(syn::Error::new_spanned(
+                                    id,
+                                    "an exported method has at most one op kind \
+                                     (ctor / stream / manual)",
+                                ));
+                            }
+                            kind = Some(match kind_tag {
+                                "ctor" => OpKindChoice::Ctor,
+                                "stream" => OpKindChoice::Stream,
+                                _ => OpKindChoice::Manual,
+                            });
+                        }
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                id,
+                                format!(
+                                    "unknown op tag `{other}` — an exported method is tagged with \
+                                     an op kind (#[fluessig(ctor)] / #[fluessig(stream)] / \
+                                     #[fluessig(manual)], or untagged for a plain unary op), the \
+                                     projection overrides #[fluessig(async)] / #[fluessig(sync)] \
+                                     (synchronous is the default), the node result-envelope \
+                                     opt-in #[fluessig(result)], the flags \
+                                     #[fluessig(readonly)] / #[fluessig(destructive)], and/or the \
+                                     export-name pin #[fluessig(name = \"…\")]"
+                                ),
+                            ))
+                        }
+                    }
+                }
+                syn::Meta::NameValue(nv) => {
+                    if !nv.path.is_ident("name") {
                         return Err(syn::Error::new_spanned(
-                            &id,
-                            "an exported method has at most one op kind \
-                             (ctor / stream / manual)",
+                            &nv.path,
+                            "unknown op name-value tag — the only one is \
+                             #[fluessig(name = \"…\")] (the export-name pin)",
                         ));
                     }
-                    kind = Some(match kind_tag {
-                        "ctor" => OpKindChoice::Ctor,
-                        "stream" => OpKindChoice::Stream,
-                        _ => OpKindChoice::Manual,
-                    });
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = &nv.value
+                    else {
+                        return Err(syn::Error::new_spanned(
+                            &nv.value,
+                            "#[fluessig(name = \"…\")] expects a string literal",
+                        ));
+                    };
+                    name_pin = Some(s.value());
                 }
-                other => {
+                syn::Meta::List(l) => {
                     return Err(syn::Error::new_spanned(
-                        &id,
-                        format!(
-                            "unknown op tag `{other}` — an exported method is tagged with an \
-                             op kind (#[fluessig(ctor)] / #[fluessig(stream)] / \
-                             #[fluessig(manual)], or untagged for a plain unary op) and/or the \
-                             flags #[fluessig(readonly)] / #[fluessig(destructive)]"
-                        ),
+                        l,
+                        "unexpected nested list in an op tag",
                     ))
                 }
             }
         }
     }
+    // `sync` / `async` compose only with a plain unary op — a ctor is always a
+    // synchronous constructor, a stream is always async-iterable, a manual op is
+    // hand-written, so none has a projection to flip. Pairing them is an
+    // authoring error.
+    if is_async.is_some() && kind.is_some() {
+        let span = async_span.unwrap_or_else(proc_macro2::Span::call_site);
+        return Err(syn::Error::new(
+            span,
+            "#[fluessig(sync)] / #[fluessig(async)] apply only to a plain unary op \
+             (not a ctor / stream / manual)",
+        ));
+    }
+    // `#[fluessig(result)]` is the node result-envelope projection — a SYNCHRONOUS
+    // unary op that returns its error AS A VALUE. It flips the error seam, so like
+    // sync/async it composes only with a plain unary op, and never with the async
+    // projection (the envelope is a synchronous value return).
+    if result {
+        let span = result_span.unwrap_or_else(proc_macro2::Span::call_site);
+        if kind.is_some() {
+            return Err(syn::Error::new(
+                span,
+                "#[fluessig(result)] applies only to a plain unary op \
+                 (not a ctor / stream / manual)",
+            ));
+        }
+        if is_async == Some(true) {
+            return Err(syn::Error::new(
+                span,
+                "#[fluessig(result)] is a synchronous value-return envelope — it does not \
+                 compose with #[fluessig(async)]",
+            ));
+        }
+    }
     Ok(MethodMeta {
         kind: kind.unwrap_or(OpKindChoice::Unary),
+        is_async,
         readonly,
         destructive,
+        name_pin,
+        result,
     })
 }
 
@@ -285,23 +605,32 @@ fn api_scalar_name(ident: &str) -> Option<&'static str> {
 /// channel, so the `Result` wrapper is transparent); any other type is returned
 /// unchanged.
 fn unwrap_result(ty: &Type) -> &Type {
-    let Type::Path(tp) = ty else { return ty };
-    let Some(seg) = tp.path.segments.last() else {
-        return ty;
-    };
+    result_type_args(ty)
+        .and_then(|a| a.into_iter().next())
+        .unwrap_or(ty)
+}
+
+/// The type arguments of a `Result<…>` type, in order, or `None` when `ty` is not
+/// a `Result<…>`. The shared extraction behind both [`unwrap_result`] (the OK type
+/// `T`) and [`result_error_ident`] (the error type `E`).
+fn result_type_args(ty: &Type) -> Option<Vec<&Type>> {
+    let Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
     if seg.ident != "Result" {
-        return ty;
+        return None;
     }
     let PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return ty;
+        return None;
     };
-    args.args
-        .iter()
-        .find_map(|a| match a {
-            GenericArgument::Type(t) => Some(t),
-            _ => None,
-        })
-        .unwrap_or(ty)
+    Some(
+        args.args
+            .iter()
+            .filter_map(|a| match a {
+                GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// `impl Iterator<Item = T>` → `T`. A `#[fluessig(stream)]` op must return an

@@ -1,0 +1,35 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "fluessig-derive/0.1.0"
+  },
+  "source": "cpp_demo",
+  "scalars": [],
+  "unions": [],
+  "enums": [],
+  "entities": [
+    {
+      "name": "Marker",
+      "table": "markers",
+      "key": [
+        "id"
+      ],
+      "doc": "A marker entity so `catalog!` has an entity root; the ops reference nothing\nfrom it (the demo's data plane is the in-memory map in `core_impl`).",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "The marker id.",
+          "key": true
+        }
+      ]
+    }
+  ],
+  "relationProperties": [],
+  "valueStructs": []
+}

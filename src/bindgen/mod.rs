@@ -14,29 +14,39 @@
 //! engine. Generated code references `crate::core_impl::{GitImpl, EntlImpl}` by
 //! convention.
 
+mod cpp;
+mod cpp_header;
+mod cpp_hpp;
 mod fanout;
+mod java;
 mod mcp;
 mod node;
 mod php;
 mod python;
 mod ruby;
+mod rust_core;
+mod wasm;
 
+pub use cpp::{cpp_binding, cpp_header, cpp_hpp};
 pub use fanout::{
     common_path_for, external_refs, fan_out_crate, group_module_path, group_table, render_mod_tree,
     render_use_block, resolve_module_paths, ExternalImport, ExternalRef, FanOutSpec, FannedCrate,
     GroupKey, GroupTable, ModEntry, COMMON_MOD, RUNTIME_STREAM_IMPORT,
 };
+pub use java::{java_binding, java_sources};
 pub use mcp::{manifest as mcp_manifest, mcp_module};
 pub use node::{node_binding, node_binding_with_options, NodeOptions};
 pub use php::php_binding;
 pub use python::{python_binding, python_binding_with_options, PythonOptions};
 pub use ruby::{ruby_binding, ruby_binding_with_options, RubyOptions};
+pub use rust_core::rust_core_binding;
+pub use wasm::{wasm_binding, wasm_binding_with_options, WasmOptions};
 
 use std::collections::BTreeMap;
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, ForeignType, Shape};
 
 /// How a backend lowers a tagged discriminated union crossing the FFI. Shared by
 /// every structured-capable backend (node/python/ruby); the default is
@@ -272,6 +282,9 @@ pub fn fan_out(api: &ApiDoc, lang: &str, pattern: &str) -> Vec<(String, ApiDoc)>
                 // Interfaces/ops are not fanned out (see KNOWN LIMITATION): a
                 // group file is the DTO surface, so the op layer stays empty.
                 interfaces: Vec::new(),
+                // Top-level consts are a whole-document concern, not a per-group
+                // DTO; a fanned-out sub-document carries none.
+                consts: Vec::new(),
             };
             (fan_out_path(pattern, &g), sub)
         })
@@ -356,7 +369,12 @@ fn ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
             "boolean" => ("bool".into(), "boolean".into()),
             "int32" => ("i32".into(), "number".into()),
             "int64" => ("i64".into(), "number".into()),
-            "float64" => ("f64".into(), "number".into()),
+            "uint8" => ("u8".into(), "number".into()),
+            "uint16" => ("u16".into(), "number".into()),
+            "uint32" => ("u32".into(), "number".into()),
+            "float32" => ("f32".into(), "number".into()),
+            // `float` is TypeSpec's f64 alias; both spell an f64 → `number`.
+            "float64" | "float" => ("f64".into(), "number".into()),
             "Json" => ("String".into(), "string".into()), // JSON text payload
             "bytes" => ("Bytes".into(), "Buffer".into()),
             "void" => ("()".into(), "void".into()),
@@ -381,14 +399,59 @@ fn ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
         // a tagged union crosses the FFI as its JSON envelope text
         // `{"kind": tag, "payload": body}` — the same carrier as `Json`
         ApiType::Union { .. } => ("String".into(), "string".into()),
+        // a truly-foreign type lowers to its generated per-type OPAQUE HANDLE
+        // (rust-core emits the handle struct) — NOT a silent `String`/Json. The
+        // handle name is derived deterministically from the source type name, so
+        // every reference site and the emitted struct agree. The same name serves
+        // the ts half (an opaque nominal type).
+        ApiType::Foreign { foreign } => {
+            let h = foreign_handle_name(foreign);
+            (h.clone(), h)
+        }
     }
 }
 
+/// The deterministic opaque-handle type name for a truly-foreign type, e.g.
+/// `http.Server` → `HttpServerHandle`, `ChildProcess` → `ChildProcessHandle`,
+/// `fs.ReadStream` → `FsReadStreamHandle`. Derived PURELY from the source
+/// [`ForeignType::name`] (split on any non-alphanumeric boundary, each segment
+/// initial-upper-cased with its internal casing preserved, `Handle` appended) so
+/// the reference sites (via [`ty`]) and the emitted struct (rust-core) always
+/// agree, and two occurrences of the same foreign type collapse to ONE handle.
+/// A name that would not start with a letter is prefixed `Foreign`.
+pub(super) fn foreign_handle_name(f: &ForeignType) -> String {
+    let mut out = String::new();
+    for seg in f.name.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let mut cs = seg.chars();
+        if let Some(first) = cs.next() {
+            out.push(first.to_ascii_uppercase());
+            out.push_str(cs.as_str());
+        }
+    }
+    if !out.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        out.insert_str(0, "Foreign");
+    }
+    out.push_str("Handle");
+    out
+}
+
 fn param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
+    param_sig_with(op, |t| ty(api, t).0)
+}
+
+/// The `(name, rust_type)` param list, spelling each param type via `ty_of` and
+/// wrapping an `optional` param in `Option<…>`. The shared spine behind both the
+/// default [`param_sig`] (via the shared [`ty`]) and node's `node_param_sig`
+/// (which spells a `bytes` param `Uint8Array`); factoring it here keeps the two
+/// from being flagged as a duplicated loop body.
+pub(super) fn param_sig_with(
+    op: &ApiOp,
+    mut ty_of: impl FnMut(&ApiType) -> String,
+) -> Vec<(String, String)> {
     op.params
         .iter()
         .map(|p| {
-            let (r, _) = ty(api, &p.ty);
+            let r = ty_of(&p.ty);
             let r = if p.optional == Some(true) {
                 format!("Option<{r}>")
             } else {
@@ -397,6 +460,34 @@ fn param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
             (snake(&p.name), r)
         })
         .collect()
+}
+
+/// Split a `#[fluessig(single_threaded)]` interface out of the surface a NON-node
+/// backend emits. A thread-confined `!Send` handle is node-only today: every
+/// other backend's handle wrapper (`#[pyclass]`, `#[php_class]`,
+/// `#[wasm_bindgen]`, the JNI/C++ glue) would hold the core in a form that
+/// requires `Send`, so a `!Send` core cannot be bound. Per the honest-capability-
+/// edge doctrine, such a backend must NOT silently emit a `Send`-assuming handle
+/// (which would break the consumer's build with a confusing downstream error) —
+/// it emits an explicit skip-note and binds NOTHING for the interface (no trait,
+/// no handle). Returns `(filtered_api, skip_note)`: run the backend's normal
+/// emission over `filtered_api`, then append `skip_note` (a block of `//`
+/// comments, empty when no interface is single_threaded ⇒ output byte-identical).
+pub(super) fn split_single_threaded(api: &ApiDoc, lang: &str) -> (ApiDoc, String) {
+    let mut note = String::new();
+    for i in &api.interfaces {
+        if i.single_threaded {
+            note.push_str(&format!(
+                "// interface `{}` is #[fluessig(single_threaded)] (a thread-confined `!Send` \
+                 handle) — not supported by the {lang} backend (node-only today); no binding \
+                 emitted.\n",
+                i.name
+            ));
+        }
+    }
+    let mut filtered = api.clone();
+    filtered.interfaces.retain(|i| !i.single_threaded);
+    (filtered, note)
 }
 
 /// Emit the `<Interface>Core` traits, resolving each op's return type via
@@ -410,37 +501,97 @@ fn param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {
 pub(super) fn emit_core_traits_with(
     t: &mut rust::Tokens,
     api: &ApiDoc,
+    ret_ty: impl FnMut(&ApiOp) -> String,
+) {
+    // The shared default: params via [`param_sig`], and no result-envelope error
+    // channel (every backend but node throws on a fallible op). Node reaches the
+    // fuller [`emit_core_traits_full`] to spell its `bytes` params `Uint8Array`
+    // and give a `#[fluessig(result)]` op a `Result<T, E>` core signature.
+    emit_core_traits_full(t, api, ret_ty, param_sig, |_| None)
+}
+
+/// The core-trait spine with two extra seams node needs (both no-ops for the
+/// other backends, so their output is byte-identical): `param_sig_fn` spells the
+/// trait method params (node overrides only `bytes` → `Uint8Array`), and
+/// `result_err` returns `Some(E)` for a `#[fluessig(result)]` op so its core
+/// method is `fn … -> Result<T, E>` (error-as-value) rather than the default
+/// `anyhow::Result<T>` (throw). Passing `param_sig` + `|_| None` reproduces the
+/// historical signature exactly.
+pub(super) fn emit_core_traits_full(
+    t: &mut rust::Tokens,
+    api: &ApiDoc,
     mut ret_ty: impl FnMut(&ApiOp) -> String,
+    param_sig_fn: impl Fn(&ApiDoc, &ApiOp) -> Vec<(String, String)>,
+    result_err: impl Fn(&ApiOp) -> Option<String>,
 ) {
     for i in &api.interfaces {
         let trait_name = format!("{}Core", i.name);
         let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
+        // A `single_threaded` interface lowers to a THREAD-CONFINED handle: the
+        // generated node class holds the core in a `RefCell` and reaches it via
+        // `borrow_mut()`, so its handle-bound ops take `&mut self` (not `&self`),
+        // and the trait sheds its `Send + Sync` supertraits — the whole point is
+        // that a `!Send` core can implement it. Guaranteed sync-only + ctor-having
+        // by the derive macro + loader, so only the `has_ctor` `&self` arms flip.
+        let st = i.single_threaded;
+        let recv = if st { "&mut self" } else { "&self" };
         let mut methods: Vec<rust::Tokens> = Vec::new();
         for op in &i.ops {
             if op.shape == Shape::Manual {
                 continue;
             }
             let name = snake(&op.name);
-            let ps = param_sig(api, op)
+            let ps = param_sig_fn(api, op)
                 .iter()
                 .map(|(n, r)| format!("{n}: {r}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let ret = ret_ty(op);
+            let re = result_err(op);
             let sig = match op.shape {
                 Shape::Ctor => format!("fn {name}({ps}) -> anyhow::Result<Self>"),
                 Shape::Stream => {
                     format!("fn {name}(&self, {ps}) -> anyhow::Result<Box<dyn PollStream<{ret}>>>")
                 }
-                _ if has_ctor => format!("fn {name}(&self, {ps}) -> anyhow::Result<{ret}>"),
+                // A `#[fluessig(result)]` op returns its error AS A VALUE: the core
+                // method is `Result<T, E>` with the EXPLICIT error record `E`, so
+                // the binding can build the `{ ok, value } | { ok, error }` envelope
+                // instead of throwing. Rides the same `has_ctor` receiver split.
+                _ if re.is_some() && has_ctor => {
+                    format!(
+                        "fn {name}({recv}, {ps}) -> ::core::result::Result<{ret}, {}>",
+                        re.as_deref().unwrap()
+                    )
+                }
+                _ if re.is_some() => {
+                    format!(
+                        "fn {name}({ps}) -> ::core::result::Result<{ret}, {}>",
+                        re.as_deref().unwrap()
+                    )
+                }
+                // An infallible (`#[fluessig(sync)]` + bare-`T` return) unary op
+                // drops the `Result` seam entirely — the core method IS the value.
+                // `infallible` is only ever set on a unary op, so this rides the
+                // same `has_ctor` receiver split as the fallible unary arms below.
+                _ if has_ctor && op.infallible => format!("fn {name}({recv}, {ps}) -> {ret}"),
+                _ if op.infallible => format!("fn {name}({ps}) -> {ret}"),
+                _ if has_ctor => format!("fn {name}({recv}, {ps}) -> anyhow::Result<{ret}>"),
                 _ => format!("fn {name}({ps}) -> anyhow::Result<{ret}>"),
             };
             methods.push(quote!($sig;));
         }
+        // A single_threaded core is thread-confined — it must NOT require
+        // `Send + Sync` (that is the wall this variant tears down); an ordinary
+        // async-capable core keeps them (its `Arc<Impl>` crosses to a worker).
+        let bounds = if st {
+            "Sized + 'static"
+        } else {
+            "Sized + Send + Sync + 'static"
+        };
         quote_in! { *t =>
             $['\r']
             $(format!("/// The `{}` contract — implement over the engine in `crate::core_impl`.", i.name))
-            pub trait $(&trait_name): Sized + Send + Sync + $("'static") {
+            pub trait $(&trait_name): $(bounds) {
                 $(for m in &methods join ($['\r']) => $m)
             }
             $['\n']

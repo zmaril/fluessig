@@ -590,47 +590,49 @@ impl Disponent {
         Disponent { _private: () }
     }
 
-    #[fluessig(readonly)]
+    #[fluessig(readonly, async)]
     pub fn environments(&self) -> Vec<Environment> {
         Vec::new()
     }
 
+    #[fluessig(async)]
     pub fn refresh(&self, env_slug: Option<String>) -> Vec<Environment> {
         let _ = env_slug;
         Vec::new()
     }
 
     /// The offerings table: every env × agent × model the catalog knows.
-    #[fluessig(readonly)]
+    #[fluessig(readonly, async)]
     pub fn offerings(&self) -> Vec<Offering> {
         Vec::new()
     }
 
     /// Per-env capabilities: what each environment can do, one row per (env, capability).
-    #[fluessig(readonly)]
+    #[fluessig(readonly, async)]
     pub fn capabilities(&self) -> Vec<EnvCapability> {
         Vec::new()
     }
 
+    #[fluessig(async)]
     pub fn dispatch(&self, spec: DispatchSpec) -> Session {
         let _ = spec;
         unimplemented!()
     }
 
-    #[fluessig(readonly)]
+    #[fluessig(readonly, async)]
     pub fn session(&self, uid: SessionUid) -> Option<Session> {
         let _ = uid;
         None
     }
 
-    #[fluessig(readonly)]
+    #[fluessig(readonly, async)]
     pub fn sessions(&self, filter: Option<SessionFilter>) -> Vec<Session> {
         let _ = filter;
         Vec::new()
     }
 
     /// Return an editor link (VS Code deep link) into the session's working directory.
-    #[fluessig(readonly)]
+    #[fluessig(readonly, async)]
     pub fn workspace_link(&self, session_uid: SessionUid) -> WorkspaceLink {
         let _ = session_uid;
         unimplemented!()
@@ -643,6 +645,7 @@ impl Disponent {
     }
 
     /// The one messaging primitive: a Manager `to` names a tagged worker subset or the user.
+    #[fluessig(async)]
     pub fn send(
         &self,
         body: String,
@@ -655,34 +658,37 @@ impl Disponent {
     }
 
     /// Acknowledge a message you received: stamps `ackedAt`. Idempotent.
+    #[fluessig(async)]
     pub fn ack(&self, message_id: MessageId) {
         let _ = message_id;
     }
 
     /// Read Messages, filtered.
-    #[fluessig(readonly)]
+    #[fluessig(readonly, async)]
     pub fn messages(&self, filter: Option<MessagesFilter>) -> Vec<Message> {
         let _ = filter;
         Vec::new()
     }
 
-    #[fluessig(destructive)]
+    #[fluessig(destructive, async)]
     pub fn cancel(&self, session_uid: SessionUid) -> Session {
         let _ = session_uid;
         unimplemented!()
     }
 
+    #[fluessig(async)]
     pub fn resume(&self, session_uid: SessionUid) -> Session {
         let _ = session_uid;
         unimplemented!()
     }
 
-    #[fluessig(destructive)]
+    #[fluessig(destructive, async)]
     pub fn reap(&self, session_uid: SessionUid) -> Session {
         let _ = session_uid;
         unimplemented!()
     }
 
+    #[fluessig(async)]
     pub fn reconcile(&self) -> ReconcileReport {
         unimplemented!()
     }

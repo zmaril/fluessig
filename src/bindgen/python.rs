@@ -453,6 +453,12 @@ pub fn python_binding_with_options(
     banner_note: Option<&str>,
     opts: &PythonOptions,
 ) -> String {
+    // A `single_threaded` interface is a thread-confined `!Send` handle — node-only
+    // today; `#[pyclass]` requires `Send`, so python cannot bind a `!Send` core.
+    // Split it out (emit nothing for it) + append an honest skip-note rather than a
+    // silent `Send`-assuming handle. No such interface ⇒ empty note, byte-identical.
+    let (api_owned, st_note) = crate::bindgen::split_single_threaded(api, "python");
+    let api = &api_owned;
     // The shared streaming-contract import flows through the use-emitter
     // ([`RUNTIME_STREAM_IMPORT`]) rather than a hardcoded string, so every
     // generated `use` line has one emission path; renders byte-identically.
@@ -892,15 +898,40 @@ pub fn python_binding_with_options(
                             Ok(Self { core: Arc::new(<$(&impl_path) as $(&trait_name)>::$(&name)($(&args)).map_err(err)?) })
                         }
                     },
-                    Shape::Unary => quote_in! { methods =>
-                        $['\r']
-                        #[pyo3(signature = ($(&signature)))]
-                        fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> PyResult<$(&ret)> {
-                            $prelude
-                            let core = self.core.clone();
-                            py.detach(move || core.$(&name)($(&args))).map_err(err)
+                    Shape::Unary => {
+                        // An op export-name pin lands as `#[pyo3(name = "…")]`
+                        // (the Rust fn ident stays snake); un-pinned ⇒ no attr,
+                        // byte-identical. A python unary op is ALREADY a plain
+                        // synchronous method (`py.detach` releases the GIL for the
+                        // blocking core call) — the async/sync default is a
+                        // node-only projection — so the only default-inversion
+                        // effect here is INFALLIBILITY: a bare-`T` core drops the
+                        // `PyResult`/raise seam entirely.
+                        if let Some(nm) = pinned_name(&op.bindings, LANG) {
+                            quote_in! { methods => $['\r']$(format!("#[pyo3(name = {nm:?})]")) };
                         }
-                    },
+                        if op.infallible {
+                            quote_in! { methods =>
+                                $['\r']
+                                #[pyo3(signature = ($(&signature)))]
+                                fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> $(&ret) {
+                                    $prelude
+                                    let core = self.core.clone();
+                                    py.detach(move || core.$(&name)($(&args)))
+                                }
+                            }
+                        } else {
+                            quote_in! { methods =>
+                                $['\r']
+                                #[pyo3(signature = ($(&signature)))]
+                                fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> PyResult<$(&ret)> {
+                                    $prelude
+                                    let core = self.core.clone();
+                                    py.detach(move || core.$(&name)($(&args))).map_err(err)
+                                }
+                            }
+                        }
+                    }
                     Shape::Stream => {
                         let class = pascal(&op.name);
                         // The `closed` latch field exists only in event-mode
@@ -965,16 +996,33 @@ pub fn python_binding_with_options(
                         quote_in! { t => $['\r']$(format!("/// {line}")) };
                     }
                 }
-                quote_in! { t =>
-                    $['\r']
-                    #[pyfunction]
-                    #[pyo3(signature = ($(&signature)))]
-                    fn $(&name)(py: Python<$("'_")>, $(&fn_params)) -> PyResult<$(&ret)> {
-                        $prelude
-                        py.detach(move || <$(&impl_path) as $(&trait_name)>::$(&name)($(&args))).map_err(err)
-                    }
-                    $['\n']
-                };
+                // op export-name pin ⇒ `#[pyo3(name = "…")]` (after `#[pyfunction]`);
+                // infallible ⇒ drop the `PyResult`/raise seam (see the method arm).
+                quote_in! { t => $['\r'] #[pyfunction] };
+                if let Some(nm) = pinned_name(&op.bindings, LANG) {
+                    quote_in! { t => $['\r']$(format!("#[pyo3(name = {nm:?})]")) };
+                }
+                if op.infallible {
+                    quote_in! { t =>
+                        $['\r']
+                        #[pyo3(signature = ($(&signature)))]
+                        fn $(&name)(py: Python<$("'_")>, $(&fn_params)) -> $(&ret) {
+                            $prelude
+                            py.detach(move || <$(&impl_path) as $(&trait_name)>::$(&name)($(&args)))
+                        }
+                        $['\n']
+                    };
+                } else {
+                    quote_in! { t =>
+                        $['\r']
+                        #[pyo3(signature = ($(&signature)))]
+                        fn $(&name)(py: Python<$("'_")>, $(&fn_params)) -> PyResult<$(&ret)> {
+                            $prelude
+                            py.detach(move || <$(&impl_path) as $(&trait_name)>::$(&name)($(&args))).map_err(err)
+                        }
+                        $['\n']
+                    };
+                }
             }
         }
     }
@@ -1000,8 +1048,9 @@ pub fn python_binding_with_options(
 
     let src = api.source.as_deref().unwrap_or("the fluessig catalog");
     let body = t.to_file_string().expect("rust renders");
-    crate::rustfmt::format(format!(
+    let out = crate::rustfmt::format(format!(
         "//! GENERATED by fluessig bindgen from {src} (api layer). Do not edit.\n{}#![allow(clippy::all)]\n\n{body}",
         note_line(banner_note)
-    ))
+    ));
+    format!("{out}{st_note}")
 }

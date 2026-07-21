@@ -24,6 +24,7 @@ mod java_callback;
 mod mcp;
 mod node;
 mod php;
+mod php_callback;
 mod python;
 mod ruby;
 mod ruby_callback;

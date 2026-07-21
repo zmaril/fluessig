@@ -19,6 +19,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       cpp: ${{ steps.filter.outputs.cpp }}
       java: ${{ steps.filter.outputs.java }}
+      callback: ${{ steps.filter.outputs.callback }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -53,6 +54,21 @@ jobs:
               - 'crates/java-demo/**'
               - 'crates/java-demo-schema/**'
               - 'tests/java_catalog.rs'
+              - '.github/workflows/ci.yml'
+            # The node + python callback round-trip legs run only when the
+            # node/python backends, the shared type-map/gen, the callback demo
+            # crates, or the harness itself change.
+            callback:
+              - 'src/bindgen/node.rs'
+              - 'src/bindgen/python.rs'
+              - 'src/bindgen/mod.rs'
+              - 'src/bin/fluessig-gen.rs'
+              - 'crates/callback-demo-node/**'
+              - 'crates/callback-demo-py/**'
+              - 'crates/fluessig-runtime/**'
+              - 'tests/callback_lowering.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -126,3 +142,45 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: bash crates/java-demo/run.sh
+
+  # ── node (napi) callback round-trip ──────────────────────────────────────────
+  # Additive, independent leg: builds the fluessig-generated napi surface into a
+  # real .node addon and drives it from a JS consumer, asserting a host closure is
+  # invoked from Rust with [0, 1, 2] via a napi ThreadsafeFunction. NOT in the
+  # branch ruleset's required-checks list, so it does not block merges (like
+  # java-roundtrip). Its own job block so a rebase alongside sibling legs keeps both.
+  callback-node:
+    name: node callback round-trip
+    needs: changes
+    if: needs.changes.outputs.callback == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: bash crates/callback-demo-node/run.sh
+
+  # ── python (pyo3) callback round-trip ────────────────────────────────────────
+  # Additive, independent leg: builds the fluessig-generated pyo3 surface into an
+  # importable extension module and drives it from a Python consumer, asserting a
+  # host callable is invoked from Rust with [0, 1, 2] inline under the GIL. NOT in
+  # the branch ruleset's required-checks list, so it does not block merges (like
+  # java-roundtrip).
+  callback-python:
+    name: python callback round-trip
+    needs: changes
+    if: needs.changes.outputs.callback == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: bash crates/callback-demo-py/run.sh

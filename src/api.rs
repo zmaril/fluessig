@@ -239,6 +239,33 @@ pub enum ApiType {
     Union {
         union: String,
     },
+    /// A TRULY-FOREIGN type — an external/host value the schema references but
+    /// fluessig has no model for (Node's `http.Server`, a `ChildProcess`, an OS
+    /// file descriptor, …). Rather than silently collapsing it to a `String`/JSON
+    /// carrier, it lowers to a generated, per-type OPAQUE HANDLE the boundary can
+    /// carry without needing the real external type in scope. `name` is the source
+    /// type name (e.g. `http.Server`); `rust_path` is a best-effort Rust path/label
+    /// for the handle (used as documentation, not required to resolve). Serializes
+    /// as `{"foreign": {"name": "…", "rustPath": "…"}}`, mirroring the single
+    /// distinguishing-key convention of the sibling variants (`model`, `enum`,
+    /// `list`, `nullable`, `union`).
+    Foreign {
+        foreign: ForeignType,
+    },
+}
+
+/// The payload of an [`ApiType::Foreign`]: the source type `name` and a
+/// best-effort `rust_path` label for the generated opaque handle. Kept as a
+/// dedicated struct so the variant reads as a single `{"foreign": {…}}` key,
+/// matching how the other `ApiType` variants each carry exactly one tag word.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForeignType {
+    /// The source-language type name, e.g. `http.Server`, `ChildProcess`.
+    pub name: String,
+    /// A best-effort Rust path/label for the opaque handle (documentation only;
+    /// the handle type name is derived deterministically from `name`).
+    pub rust_path: String,
 }
 
 /// Parse `api.json` (with the same format-version gate as the catalog).
@@ -287,4 +314,35 @@ pub fn load_api_file(path: impl AsRef<std::path::Path>) -> Result<ApiDoc, String
     let json = std::fs::read_to_string(path.as_ref())
         .map_err(|e| format!("read {}: {e}", path.as_ref().display()))?;
     load_api(&json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Locks the on-wire shape of [`ApiType::Foreign`] so the converter that
+    /// emits it (and the sibling variants' single-distinguishing-key convention)
+    /// stay in agreement: `{"foreign": {"name": …, "rustPath": …}}`, with
+    /// `rust_path` camelCased to `rustPath`. Round-trips byte-for-byte.
+    #[test]
+    fn foreign_serializes_as_single_foreign_key() {
+        let ty = ApiType::Foreign {
+            foreign: ForeignType {
+                name: "http.Server".into(),
+                rust_path: "http::Server".into(),
+            },
+        };
+        let json = serde_json::to_string(&ty).unwrap();
+        assert_eq!(
+            json,
+            r#"{"foreign":{"name":"http.Server","rustPath":"http::Server"}}"#
+        );
+        // Deserializes back to the same variant (untagged, distinguished by the
+        // `foreign` key — no collision with model/enum/list/nullable/union).
+        let back: ApiType = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, ApiType::Foreign { foreign } if foreign.name == "http.Server"
+            && foreign.rust_path == "http::Server")
+        );
+    }
 }

@@ -19,7 +19,7 @@
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, Shape};
+use crate::api::{ApiDoc, ApiType, ForeignType, Shape};
 
 use super::*;
 
@@ -69,6 +69,9 @@ pub fn rust_core_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&
         };
     }
 
+    // ── foreign opaque handles: one newtype per distinct foreign type ──
+    emit_foreign_handles(&mut t, api);
+
     // ── models: plain DTO structs ──
     for m in &api.models {
         let fields: Vec<String> = m
@@ -114,6 +117,77 @@ fn api_has_stream(api: &ApiDoc) -> bool {
         .iter()
         .flat_map(|i| &i.ops)
         .any(|op| op.shape == Shape::Stream)
+}
+
+/// Emit one plain-Rust OPAQUE HANDLE struct per DISTINCT foreign type the surface
+/// references. A truly-foreign type (Node's `http.Server`, a `ChildProcess`, an OS
+/// file descriptor, …) is one fluessig has no model for; instead of silently
+/// collapsing it to a `String`/JSON carrier, rust-core generates a typed handle the
+/// boundary can carry WITHOUT the real external type in scope.
+///
+/// Representation: a newtype over an engine-assigned `u64` token — the honest
+/// "engine-owned integer handle" idiom the cpp/java backends already use for
+/// stateful values. The real foreign value lives behind the boundary; the core
+/// only carries the token and never interprets it (hence OPAQUE). The handle type
+/// name is derived deterministically from the source type name (see
+/// [`foreign_handle_name`]), so a foreign type used at N sites collapses to exactly
+/// ONE struct and every reference (via the shared [`ty`]) resolves to it.
+fn emit_foreign_handles(t: &mut rust::Tokens, api: &ApiDoc) {
+    for (name, f) in foreign_handles(api) {
+        let doc = format!(
+            "Opaque handle for the foreign type `{}` (Rust path: `{}`).",
+            f.name, f.rust_path
+        );
+        quote_in! { *t =>
+            $(format!("/// {doc}"))
+            $("/// Engine-owned: the real foreign value lives behind the boundary; the")
+            $("/// core carries this handle as an opaque token and never inspects it.")
+            #[derive(Debug, Clone)]
+            pub struct $(&name)(pub u64);
+            $['\n']
+        };
+    }
+}
+
+/// The DISTINCT foreign types the surface references, as `(handle name, foreign)`
+/// pairs in first-appearance order, deduped by handle name. Walks every reference
+/// site — model fields and op params/returns, recursing through `List`/`Nullable`.
+fn foreign_handles(api: &ApiDoc) -> Vec<(String, ForeignType)> {
+    let mut refs: Vec<&ForeignType> = Vec::new();
+    for m in &api.models {
+        for field in &m.fields {
+            collect_foreign(&field.ty, &mut refs);
+        }
+    }
+    for i in &api.interfaces {
+        for op in &i.ops {
+            collect_foreign(&op.returns, &mut refs);
+            for p in &op.params {
+                collect_foreign(&p.ty, &mut refs);
+            }
+        }
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<(String, ForeignType)> = Vec::new();
+    for f in refs {
+        let name = foreign_handle_name(f);
+        if !seen.contains(&name) {
+            seen.push(name.clone());
+            out.push((name, f.clone()));
+        }
+    }
+    out
+}
+
+/// Collect every [`ForeignType`] reachable from `t`, recursing through the
+/// `List`/`Nullable` wrappers (the only shapes that nest a type).
+fn collect_foreign<'a>(t: &'a ApiType, out: &mut Vec<&'a ForeignType>) {
+    match t {
+        ApiType::Foreign { foreign } => out.push(foreign),
+        ApiType::List { list } => collect_foreign(list, out),
+        ApiType::Nullable { nullable } => collect_foreign(nullable, out),
+        _ => {}
+    }
 }
 
 /// A field name as a valid Rust ident: raw-escape a keyword (`type` → `r#type`),
@@ -228,5 +302,91 @@ mod tests {
         assert_eq!(field_ident("type"), "r#type");
         assert_eq!(field_ident("self"), "self_");
         assert_eq!(field_ident("normal"), "normal");
+    }
+
+    /// The handle type name is derived deterministically from the source name:
+    /// dotted/mixed-case foreign names collapse to one PascalCase `…Handle` ident.
+    #[test]
+    fn foreign_handle_names_are_deterministic() {
+        let mk = |name: &str| ForeignType {
+            name: name.to_string(),
+            rust_path: String::new(),
+        };
+        assert_eq!(foreign_handle_name(&mk("http.Server")), "HttpServerHandle");
+        assert_eq!(
+            foreign_handle_name(&mk("ChildProcess")),
+            "ChildProcessHandle"
+        );
+        assert_eq!(
+            foreign_handle_name(&mk("fs.ReadStream")),
+            "FsReadStreamHandle"
+        );
+    }
+
+    /// A `Foreign` type in an op param, an op return, AND a model field all lower
+    /// to the SAME generated opaque handle — emitted once, referenced everywhere,
+    /// and never silently collapsed to `String`/`Json`. This is the orchestrator's
+    /// driving case: `startIpcServer` returns Node's `http.Server`.
+    #[test]
+    fn foreign_type_lowers_to_opaque_handle() {
+        let json = r#"{
+          "fluessig": {"format": 1, "emitter": "t", "compiler": "t"},
+          "models": [
+            {"name": "IpcServer", "fields": [
+              {"name": "server", "type": {"foreign": {"name": "http.Server", "rustPath": "http::Server"}}, "nullable": false}
+            ]}
+          ],
+          "unions": [],
+          "interfaces": [
+            {"name": "Ipc", "ops": [
+              {"name": "startServer", "shape": "unary",
+               "params": [{"name": "existing", "type": {"foreign": {"name": "http.Server", "rustPath": "http::Server"}}}],
+               "returns": {"foreign": {"name": "http.Server", "rustPath": "http::Server"}}}
+            ]}
+          ]
+        }"#;
+        let api = load_api(json).unwrap();
+        let out = rust_core_binding(&api, &[], None);
+
+        // The opaque handle struct is emitted — a typed newtype, not a String/Json.
+        assert!(out.contains("pub struct HttpServerHandle(pub u64);"));
+        // Emitted EXACTLY once even though the foreign type appears at three sites.
+        assert_eq!(out.matches("pub struct HttpServerHandle").count(), 1);
+        // The model field references the handle, NOT a String/Json carrier.
+        assert!(out.contains("pub server: HttpServerHandle"));
+        assert!(!out.contains("pub server: String"));
+        assert!(!out.contains("pub server: Json"));
+        // The core trait method takes and returns the handle — no String seam.
+        assert!(out.contains(
+            "fn start_server(existing: HttpServerHandle) -> anyhow::Result<HttpServerHandle>"
+        ));
+        // The foreign type name/path is carried into the handle's doc comment.
+        assert!(out.contains("Opaque handle for the foreign type `http.Server`"));
+    }
+
+    /// Distinct foreign types each get their own handle struct — the mechanism is
+    /// general, not hardcoded to `http.Server`.
+    #[test]
+    fn distinct_foreign_types_get_distinct_handles() {
+        let json = r#"{
+          "fluessig": {"format": 1, "emitter": "t", "compiler": "t"},
+          "models": [],
+          "unions": [],
+          "interfaces": [
+            {"name": "Proc", "ops": [
+              {"name": "spawn", "shape": "unary", "params": [],
+               "returns": {"foreign": {"name": "ChildProcess", "rustPath": "std::process::Child"}}},
+              {"name": "listen", "shape": "unary", "params": [],
+               "returns": {"list": {"foreign": {"name": "http.Server", "rustPath": "http::Server"}}}}
+            ]}
+          ]
+        }"#;
+        let api = load_api(json).unwrap();
+        let out = rust_core_binding(&api, &[], None);
+
+        assert!(out.contains("pub struct ChildProcessHandle(pub u64);"));
+        assert!(out.contains("pub struct HttpServerHandle(pub u64);"));
+        // Nested through `List`, the return is `Vec<HttpServerHandle>`, not `Vec<String>`.
+        assert!(out.contains("-> anyhow::Result<Vec<HttpServerHandle>>"));
     }
 }

@@ -202,7 +202,9 @@ fn collect_type_refs(api: &ApiDoc, t: &ApiType, out: &mut Vec<String>) {
         }
         ApiType::List { list } => collect_type_refs(api, list, out),
         ApiType::Nullable { nullable } => collect_type_refs(api, nullable, out),
-        ApiType::Scalar(_) | ApiType::Union { .. } => {}
+        // A foreign type's opaque handle is generated locally (rust-core) and
+        // references no model/enum, so it makes no cross-group dependency.
+        ApiType::Scalar(_) | ApiType::Union { .. } | ApiType::Foreign { .. } => {}
     }
 }
 

@@ -52,7 +52,7 @@ fn mentions_binary(api: &ApiDoc, t: &ApiType, seen: &mut Vec<String>) -> bool {
             .iter()
             .find(|u| &u.name == union)
             .is_some_and(|u| u.variants.iter().any(|v| mentions_binary(api, &v.ty, seen))),
-        ApiType::Enum { .. } => false,
+        ApiType::Enum { .. } | ApiType::Foreign { .. } => false,
     }
 }
 
@@ -173,6 +173,9 @@ fn schema_of(
             sch.insert("oneOf".into(), Value::Array(branches));
             Value::Object(sch)
         }
+        // A foreign type has no JSON projection MCP can speak — an opaque handle
+        // lives only in rust-core — so it surfaces as an opaque description.
+        ApiType::Foreign { .. } => json!({"description": "opaque handle"}),
     }
 }
 
@@ -273,6 +276,8 @@ fn rust_ty(t: &ApiType) -> String {
         ApiType::Nullable { nullable } => format!("Option<{}>", rust_ty(nullable)),
         // the JSON envelope {"kind": tag, "payload": body}, as a Value
         ApiType::Union { .. } => "serde_json::Value".into(),
+        // a foreign handle has no MCP projection; carried as its string form
+        ApiType::Foreign { .. } => "String".into(),
     }
 }
 

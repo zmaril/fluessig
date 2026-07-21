@@ -15,6 +15,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dogfood catalogs).
 
 ### Added
+- Java (JNI) bindgen backend (`src/bindgen/java.rs`): projects the op surface
+  into Java classes backed by a Rust JNI `cdylib`. Emits two artifacts — the Rust
+  JNI glue (`Java_fluessig_<Class>_<method>` extern fns + `<Interface>Core`
+  traits) and the `.java` classes (package `fluessig`, `System.loadLibrary`). Op
+  shapes map: sync infallible → direct blocking native; sync fallible → a
+  `RuntimeException` throw seam; `#[fluessig(async)]` → `CompletableFuture` via
+  `supplyAsync`; stream → a poll cursor exposing `Optional<Item> next()`. Enums
+  ride as their wire `String` (+ a generated `enum` class), unions as their JSON
+  envelope `String`, `ArrowBatch` as `byte[]`, models as first-class Java
+  objects. JNI (the `jni` crate) was chosen over Panama/FFM: synchronous (matches
+  sync-default + the php/ruby precedent), constructs Java objects directly, and
+  runs on every JDK vs FFM needing 22+. A real javac/JVM round-trip
+  (`crates/java-demo{,-schema}`, `crates/java-demo/run.sh`) and an additive,
+  non-required `java-roundtrip` CI leg prove it end to end. See
+  `notes/java-backend.md`.
 - Node backend: a per-stream-op error model. The DEFAULT (unannotated) is
   idiomatic native TS — a mid-stream core failure REJECTS the pull, so the
   `for await` loop throws (safe by default, no silent-swallow). Opting a stream

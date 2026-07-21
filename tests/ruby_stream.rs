@@ -157,9 +157,11 @@ fn event_mode_api() -> ApiDoc {
             bindings: Default::default(),
         }],
         unions: Vec::new(),
+        consts: Vec::new(),
         interfaces: vec![ApiInterface {
             name: "Clock".into(),
             doc: None,
+            single_threaded: false,
             ops: vec![
                 ApiOp {
                     name: "start".into(),
@@ -170,6 +172,7 @@ fn event_mode_api() -> ApiDoc {
                     readonly: false,
                     destructive: false,
                     stream_error: None,
+                    result_error: None,
                     params: vec![],
                     returns: ApiType::Scalar("void".into()),
                     bindings: Default::default(),
@@ -183,6 +186,7 @@ fn event_mode_api() -> ApiDoc {
                     readonly: true,
                     destructive: false,
                     stream_error: Some(StreamErrorShape::default()),
+                    result_error: None,
                     params: vec![],
                     returns: ApiType::Model {
                         model: "Tick".into(),

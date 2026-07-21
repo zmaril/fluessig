@@ -42,6 +42,22 @@ pub mod leaf_fk;
 /// proven against the node backend in `tests/api_gate.rs`.
 pub mod native;
 
+/// Node-backend "tail" features (this PR): position-aware binary spelling
+/// (`bytes` param → `Uint8Array`, return → `Buffer`) and the `#[fluessig(result)]`
+/// `{ ok, value } | { ok, error }` envelope, proven in `tests/api_gate.rs`.
+pub mod binary;
+
+/// Regression demo: the unsigned + float scalars (`uint8`/`uint16`/`uint32`/
+/// `float32`/`float64`) that used to fall through bindgen's `ty()` catchall and
+/// emit as `String`. Proven per-backend in `tests/numeric_gate.rs`.
+pub mod numeric;
+
+/// `#[fluessig(single_threaded)]` (this PR): a THREAD-CONFINED handle over a
+/// genuinely `!Send` core (pidgin's `TuiCore` shape). The node backend generates
+/// it holding the core in a `RefCell` without `Arc`/`Send`/`Sync`; proven in
+/// `tests/single_threaded.rs`.
+pub mod single_threaded;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

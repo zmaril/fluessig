@@ -1,0 +1,32 @@
+[package]
+name = "cpp-demo"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "C/C++ bindgen backend demo: a stateful key/value Store whose generated extern \"C\" ABI layer is compiled into a cdylib and driven by a real C and C++ consumer round-trip (the compile+run gate for the cpp backend)."
+repository = "https://github.com/zmaril/fluessig"
+publish = false
+
+# A cdylib so the C/C++ consumers can link the generated `extern "C"` surface;
+# an rlib too so the emit bins (which print catalog.json/api.json from the
+# derive-authored schema) can depend on the crate.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The derive front end authors the op surface (src/schema.rs); the emit bins
+# print its catalog.json / api.json.
+fluessig-derive = { path = "../fluessig-derive" }
+# The shared streaming contract the generated ABI layer imports
+# (`use fluessig_runtime::{Poll, PollStream};`).
+fluessig-runtime = { path = "../fluessig-runtime" }
+# The core traits return `anyhow::Result<T>`; core_impl uses anyhow for errors.
+anyhow = "1"
+
+[[bin]]
+name = "cpp-demo-emit-catalog"
+path = "src/bin/emit-catalog.rs"
+
+[[bin]]
+name = "cpp-demo-emit-api"
+path = "src/bin/emit-api.rs"

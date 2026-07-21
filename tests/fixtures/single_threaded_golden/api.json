@@ -1,0 +1,18 @@
+{
+  "fluessig": {"format": 1},
+  "source": "single_threaded_demo",
+  "models": [],
+  "unions": [],
+  "interfaces": [
+    {
+      "name": "Tui",
+      "doc": "A thread-confined TUI renderer over a `!Send` core (pidgin's `TuiCore`).",
+      "single_threaded": true,
+      "ops": [
+        {"name": "open", "shape": "ctor", "doc": "Build a renderer over an in-memory terminal of `cols` x `rows`.", "params": [{"name": "cols", "type": "int64"}, {"name": "rows", "type": "int64"}], "returns": "void"},
+        {"name": "tick", "shape": "unary", "doc": "Render one frame; return the number of bytes written.", "infallible": true, "params": [], "returns": "int64"},
+        {"name": "set_size", "shape": "unary", "doc": "Resize the terminal the next render reads (fallible).", "params": [{"name": "cols", "type": "int64"}, {"name": "rows", "type": "int64"}], "returns": "boolean"}
+      ]
+    }
+  ]
+}

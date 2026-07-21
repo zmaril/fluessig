@@ -7,7 +7,24 @@ website = "off"
 conventional-commits = "required"
 
 [scripts]
-# Deliberate keeper: the publish crate's dry-run verifier lives beside the
-# crate's tests (not scripts/) so `cargo test` and the README reference it in
-# place.
-allow = ["crates/fluessig-publish/tests/verify_dry_run.sh"]
+# Deliberate keepers that live beside the code they serve, not in scripts/:
+#   - the publish crate's dry-run verifier sits by its tests so `cargo test`
+#     and the README reference it in place;
+#   - the cpp-demo crate's regen.sh / run.sh regenerate and exercise the
+#     committed C/C++ bindgen artifacts in the crate they belong to;
+#   - the java-demo crate's run.sh builds & runs the committed JNI round-trip.
+allow = [
+    "crates/fluessig-publish/tests/verify_dry_run.sh",
+    "crates/cpp-demo/regen.sh",
+    "crates/cpp-demo/run.sh",
+    "crates/java-demo/run.sh",
+]
+
+[stray-todos]
+# Deliberate, issue-tracked markers: the cpp bindgen backend emits a
+# `TODO(#69)` note on infallible ops, and that note is baked into the
+# committed cpp-demo generated output. Both are tracked by issue #69.
+ignore = [
+    "src/bindgen/cpp.rs",
+    "crates/cpp-demo/src/generated.rs",
+]

@@ -131,9 +131,11 @@ pub(super) fn classify(api: &ApiDoc, t: &ApiType) -> Cross {
         // UTF-8 string carrier (the honest default the scalar catchall also uses).
         // The typed opaque handle is a rust-core concern (see `rust_core`).
         ApiType::Foreign { .. } => Cross::Str,
-        // cpp callback lowering is a follow-up (see notes/callback-function-types.md);
-        // no committed fixture feeds cpp a callback, so the string carrier is a
-        // reachable-only-in-future placeholder that keeps `classify` total.
+        // A `Callback` param is lowered position-aware to a C fn-ptr + `void* ctx`
+        // pair (see [`rust_callback_in`] / [`cpp_header`] / [`cpp_hpp`]), NOT a
+        // by-value crossing — the param renderers intercept it before classifying.
+        // This arm keeps `classify` total for the rare in-a-DTO/return position no
+        // backend wraps yet; the string carrier is the honest placeholder there.
         ApiType::Callback { .. } => Cross::Str,
     }
 }
@@ -490,6 +492,17 @@ pub fn cpp_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
     if uses_bytes {
         s.push('\n');
         s.push_str(RUST_BYTES_PRELUDE);
+    }
+    // The callback context newtype (whenever a callback param appears; a
+    // subscription op always carries one) + the opaque Subscription handle. Both
+    // gated, so a callback/subscription-free schema stays byte-identical.
+    if crate::bindgen::api_uses_callback(api) {
+        s.push('\n');
+        s.push_str(super::cpp_callback::RUST_CALLBACK_PRELUDE);
+    }
+    if crate::bindgen::api_uses_subscription(api) {
+        s.push('\n');
+        s.push_str(super::cpp_callback::RUST_SUBSCRIPTION_PRELUDE);
     }
 
     // ── enums: plain Rust (int-backed) with from_c/wire (the core speaks these;
@@ -886,15 +899,23 @@ fn member_free(c: &Cross, name: &str) -> Option<String> {
 
 /// Render an op's IN params: the Rust extern decls, the C→Rust conversion
 /// statements, and the ordered call-site names.
-fn rust_in_params(api: &ApiDoc, op: &ApiOp) -> (Vec<String>, Vec<String>, Vec<String>) {
+pub(super) fn rust_in_params(api: &ApiDoc, op: &ApiOp) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut decls = Vec::new();
     let mut conv = Vec::new();
     let mut names = Vec::new();
     for p in &op.params {
         let name = snake(&p.name);
-        let c = classify_param(api, p);
-        rust_in_one(&c, &name, &mut decls, &mut conv);
-        names.push(name);
+        // A callback param crosses in as a C fn-ptr + `void* ctx` pair, wrapped
+        // into the uniform core `Box<dyn Fn(..) + Send + Sync>`; every other param
+        // rides the by-value crossing.
+        if let ApiType::Callback { callback } = &p.ty {
+            super::cpp_callback::rust_callback_in(api, callback, &name, &mut decls, &mut conv);
+            names.push(format!("{name}_cb"));
+        } else {
+            let c = classify_param(api, p);
+            rust_in_one(&c, &name, &mut decls, &mut conv);
+            names.push(name);
+        }
     }
     (decls, conv, names)
 }
@@ -1064,12 +1085,11 @@ fn emit_interface(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
                     s.push_str(&emit_unary(api, &i.name, op, &impl_path, &trait_name, true))
                 }
                 Shape::Stream => s.push_str(&emit_stream_open(api, &i.name, op, &impl_path)),
-                // Full Subscription (register/unsubscribe) lowering is deferred to a
-                // follow-up PR for cpp; emit a skip-note so the op is recorded but
-                // not auto-bound, keeping the crate compiling.
-                Shape::Subscription => s.push_str(&format!(
-                    "// subscription {}::{} — register/unsubscribe lowering deferred (node/python only today).\n",
-                    i.name, op.name
+                // A subscription op REGISTERS the listener (its one callback param)
+                // and returns an opaque `Subscription*` handle owning the core's
+                // unsubscribe closure. Always `&self` (validated stateful).
+                Shape::Subscription => s.push_str(&super::cpp_callback::emit_subscription(
+                    api, &i.name, op, &impl_path,
                 )),
                 Shape::Manual => s.push_str(&format!(
                     "// @manual {}::{} — hand-written by the consumer.\n",

@@ -1,12 +1,15 @@
 // A real C++ round-trip through the generated RAII wrapper (`cpp_demo.hpp`),
 // linked against the same cdylib. Drives the `fluessig::Store` class with
 // std::string / std::vector, catches `fluessig::Error` on the reachable error
-// path, and asserts every result. Prints `C++ consumer OK`, returns 0 on
-// success (nonzero on any mismatch).
+// path, and asserts every result. Then the Ticker callback + subscription
+// round-trip: a C++ lambda is registered via the RAII `Subscription` wrapper and
+// fired FROM RUST. Prints `C++ consumer OK`, returns 0 on success (nonzero on any
+// mismatch).
 
 #include "cpp_demo.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -52,7 +55,30 @@ int main() {
     }
     assert(threw && "a missing key must throw fluessig::Error");
 
-    // the destructor calls Store_free — nothing to do here.
+    // ── Ticker: the callback + subscription round-trip via the RAII wrapper ──
+    fluessig::Ticker ticker;
+    std::vector<int32_t> seen;
+    {
+        // Register a C++ lambda (captured into std::function); on_tick returns an
+        // RAII Subscription whose destructor removes the listener.
+        fluessig::Subscription sub =
+            ticker.on_tick([&](int32_t v) { seen.push_back(v); });
+
+        // tick twice: the lambda fires from Rust with the incrementing counter.
+        ticker.tick();
+        ticker.tick();
+        assert((seen == std::vector<int32_t>{0, 1}));
+
+        // unsubscribe, then tick again: the listener is gone.
+        sub.unsubscribe();
+        ticker.tick();
+        assert((seen == std::vector<int32_t>{0, 1}));
+    } // sub destructor frees the subscription (idempotent)
+
+    std::printf("C++ callback fired with [%d, %d] then stayed silent after unsubscribe\n",
+                seen[0], seen[1]);
+
+    // the destructors call Store_free / Ticker_free — nothing to do here.
     std::printf("C++ consumer OK\n");
     return 0;
 }

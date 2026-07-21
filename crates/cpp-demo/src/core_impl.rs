@@ -1,17 +1,18 @@
 //! The hand-written engine behind the demo op surface: an in-memory key/value
-//! `Store` implementing the generated `StoreCore` trait. This is the ONE module
-//! a consumer writes by hand (the house-style "generated surface + hand-written
-//! `core_impl`" split); everything else in the crate is generated.
+//! `Store` implementing the generated `StoreCore` trait, plus a `Ticker`
+//! implementing `TickerCore` (the callback + subscription slice). This is the ONE
+//! module a consumer writes by hand (the house-style "generated surface +
+//! hand-written `core_impl`" split); everything else in the crate is generated.
 //!
 //! The core is synchronous and holds its state behind a `Mutex` so the trait's
 //! `&self` methods can mutate it while satisfying `Send + Sync`.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail};
 
-use crate::generated::StoreCore;
+use crate::generated::{StoreCore, TickerCore};
 
 /// An in-memory key/value store with a fixed capacity. A `BTreeMap` keeps `keys`
 /// deterministically sorted.
@@ -69,5 +70,61 @@ impl StoreCore for StoreImpl {
 
     fn contains(&self, key: String) -> bool {
         self.map.lock().unwrap().contains_key(&key)
+    }
+}
+
+/// The registry of live listeners: an id + the uniform boxed closure the binding
+/// hands us (it never learns the callback came from C or C++). Shared behind an
+/// `Arc` so each `on_tick` unsubscribe closure can capture a clone and remove its
+/// own entry.
+type Registry = Arc<Mutex<Vec<(u64, Box<dyn Fn(i32) + Send + Sync>)>>>;
+
+/// A stateful ticker: `on_tick` registers a listener and returns an unsubscribe
+/// closure; `tick` fires every live listener with an incrementing counter.
+pub struct TickerImpl {
+    listeners: Registry,
+    next_id: Mutex<u64>,
+    counter: Mutex<i32>,
+}
+
+impl TickerCore for TickerImpl {
+    fn new() -> anyhow::Result<Self> {
+        Ok(TickerImpl {
+            listeners: Arc::new(Mutex::new(Vec::new())),
+            next_id: Mutex::new(0),
+            counter: Mutex::new(0),
+        })
+    }
+
+    fn on_tick(
+        &self,
+        listener: Box<dyn Fn(i32) + Send + Sync>,
+    ) -> anyhow::Result<Box<dyn Fn() + Send + Sync>> {
+        let id = {
+            let mut n = self.next_id.lock().unwrap();
+            let id = *n;
+            *n += 1;
+            id
+        };
+        self.listeners.lock().unwrap().push((id, listener));
+        // The unsubscribe closure captures an Arc clone of the registry + this
+        // listener's id, so dropping/unsubscribing removes exactly this entry.
+        let registry = Arc::clone(&self.listeners);
+        Ok(Box::new(move || {
+            registry.lock().unwrap().retain(|(lid, _)| *lid != id);
+        }))
+    }
+
+    fn tick(&self) {
+        let v = {
+            let mut c = self.counter.lock().unwrap();
+            let v = *c;
+            *c += 1;
+            v
+        };
+        let listeners = self.listeners.lock().unwrap();
+        for (_, listener) in listeners.iter() {
+            listener(v);
+        }
     }
 }

@@ -132,6 +132,20 @@ pub struct ApiInterface {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
+    /// `#[fluessig(single_threaded)]` on the exported `impl` — the interface
+    /// lowers to a THREAD-CONFINED handle class (node-only today). Its generated
+    /// napi handle holds the core by plain ownership inside a `RefCell` WITHOUT
+    /// `Arc`/`Send`/`Sync`, so a `!Send` core (`Rc<RefCell<…>>` + non-Send
+    /// closures, e.g. pidgin's `TuiCore`) can be GENERATED — a napi class instance
+    /// never crosses threads, so it needs no `Send` bound. The trade: a
+    /// single_threaded interface may carry ONLY synchronous ops (an async/stream
+    /// op needs a `Send` core for the threadpool), enforced by the derive macro
+    /// (a spanned compile error) and re-checked here by [`load_api`]. Non-node
+    /// backends cannot express a thread-confined handle, so they emit an honest
+    /// skip-note rather than a silently `Send`-assuming handle. Serialized ONLY
+    /// when `true`, so an ordinary (async-capable) interface stays byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub single_threaded: bool,
     pub ops: Vec<ApiOp>,
 }
 
@@ -320,6 +334,21 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
                 return Err(format!(
                     "op `{}.{}`: stream_error (@streamError) is only valid on a stream op, but its shape is {:?}",
                     i.name, op.name, op.shape
+                ));
+            }
+            // a `single_threaded` interface lowers to a THREAD-CONFINED handle
+            // holding a `!Send` core — which is incompatible with the async
+            // projection (an async/stream op clones the core onto a threadpool
+            // worker, so the core MUST be `Send`). The derive macro rejects this
+            // at authoring time with a spanned compile error; this re-checks the
+            // hand-written / lowered `api.json` path so a bad surface can never
+            // reach a backend. Keep the message aligned with the macro's.
+            if i.single_threaded && (op.is_async || op.shape == Shape::Stream) {
+                return Err(format!(
+                    "op `{}.{}`: a #[fluessig(single_threaded)] interface may carry only \
+                     synchronous ops — an async or stream op needs a `Send` core for the \
+                     threadpool, which is incompatible with a thread-confined `!Send` handle",
+                    i.name, op.name
                 ));
             }
         }

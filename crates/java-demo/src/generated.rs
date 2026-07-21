@@ -8,7 +8,7 @@
 
 use fluessig_runtime::{Poll, PollStream};
 use jni::objects::{JByteArray, JClass, JObject, JString, JValue};
-use jni::sys::{jboolean, jbyteArray, jdouble, jint, jlong, jobject, jstring};
+use jni::sys::{jboolean, jbyteArray, jdouble, jfloat, jint, jlong, jobject, jstring};
 use jni::JNIEnv;
 use std::sync::Arc;
 use std::time::Duration;

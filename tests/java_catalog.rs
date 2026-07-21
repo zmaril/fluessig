@@ -41,6 +41,7 @@ fn m0_api() -> ApiDoc {
         interfaces: vec![ApiInterface {
             name: "Atilla".into(),
             doc: None,
+            single_threaded: false,
             ops: vec![ApiOp {
                 name: "version".into(),
                 doc: Some("The atilla engine version.".into()),

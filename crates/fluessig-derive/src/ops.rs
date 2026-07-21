@@ -92,6 +92,10 @@ pub struct OpDescriptor {
     /// `None` ⇒ the default (a fallible op throws). A projection modifier on a
     /// SYNCHRONOUS unary op only, like `#[fluessig(sync)]`.
     pub result_error: Option<&'static str>,
+    /// `#[fluessig(worker)]` — an op safe to expose on a worker-role MCP surface
+    /// (disponent's observe-only servers); lowers to `api.json` `"worker": true` and
+    /// the MCP `workerHint`. Also a flag composing with `kind`.
+    pub worker: bool,
     /// The method params (receiver excluded), in declaration order.
     pub params: &'static [ParamDescriptor],
     /// The return type as an op-surface type. A `ctor` is always `void`; a
@@ -178,9 +182,9 @@ fn lower_api_type(t: &ApiTypeDesc, resolver: &RefResolver) -> ApiType {
 }
 
 /// Lower one captured op to an [`fluessig::api::ApiOp`]. The name + param names
-/// camelCase to the op-surface convention; `readonly`/`destructive` ride the
-/// descriptor's flags (the `#[fluessig(readonly)]` / `#[fluessig(destructive)]`
-/// op attributes); `stream_error` stays unset (a node-backend concern, not part of
+/// camelCase to the op-surface convention; `readonly`/`destructive`/`worker` ride the
+/// descriptor's flags (the `#[fluessig(readonly)]` / `#[fluessig(destructive)]` /
+/// `#[fluessig(worker)]` op attributes); `stream_error` stays unset (a node-backend concern, not part of
 /// the derive authoring surface). Op param/return types are resolved against the
 /// catalog via `resolver` (a semantic-scalar param lands as a scalar, not a model).
 fn lower_op(op: &OpDescriptor, resolver: &RefResolver) -> ApiOp {
@@ -206,6 +210,7 @@ fn lower_op(op: &OpDescriptor, resolver: &RefResolver) -> ApiOp {
         infallible,
         readonly: op.readonly,
         destructive: op.destructive,
+        worker: op.worker,
         stream_error: None,
         // `#[fluessig(result)]` carries the explicit error record `E` from the
         // op's `Result<T, E>` return; node projects it to the `{ ok, value } |

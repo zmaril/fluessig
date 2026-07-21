@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 
 use fluessig::api::{load_api, ApiType, Shape};
 use fluessig::bindgen::{
-    java_binding, java_sources, node_binding, php_binding, python_binding, ruby_binding,
-    wasm_binding, EnumDesc,
+    java_binding, java_sources, mcp_manifest, node_binding, php_binding, python_binding,
+    ruby_binding, wasm_binding, EnumDesc,
 };
 use fluessig::load_catalog;
 
@@ -64,6 +64,14 @@ fn emitted_api_loads_and_validates() {
         }
         other => panic!("repo should return nullable Repo, got {other:?}"),
     }
+    // the `#[fluessig(worker)]` FLAG composes with the (unary) kind: it sets
+    // `worker: true` and (Slice: worker op flag) lowers to the MCP `workerHint`.
+    // An untagged op defaults `worker: false`.
+    assert!(repo.worker, "repo is #[fluessig(worker)]");
+    assert!(
+        !op("pullRequestCount").worker,
+        "an untagged op defaults worker=false"
+    );
 
     // plain unary returning a scalar; snake_case name camelCased
     let count = op("pullRequestCount");
@@ -304,6 +312,31 @@ fn bindgen_projects_the_op_surface() {
     assert!(
         db_java.contains("// @manual: Db.watch"),
         "java should record `watch` as @manual, not auto-bind it:\n{db_java}"
+    );
+
+    // the `#[fluessig(worker)]` flag projects into the MCP tool annotation as
+    // `workerHint` (the sibling of readOnlyHint / destructiveHint); an untagged op
+    // carries no such hint.
+    let m = mcp_manifest(&api, &enums);
+    let tool = |name: &str| {
+        m["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("tool {name} in manifest"))
+    };
+    assert_eq!(
+        tool("db_repo")["annotations"]["workerHint"],
+        true,
+        "the #[fluessig(worker)] op lowers to workerHint"
+    );
+    assert!(
+        tool("db_pull_request_count")
+            .get("annotations")
+            .and_then(|a| a.get("workerHint"))
+            .is_none(),
+        "an untagged op emits no workerHint"
     );
 }
 

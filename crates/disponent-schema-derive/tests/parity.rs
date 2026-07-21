@@ -240,7 +240,7 @@ use fluessig::api::{load_api, ApiDoc};
 
 /// Flatten one `api.json` to sorted, self-describing line sets — ops, models, and
 /// unions — so equality is order-independent. Each op line carries its shape AND
-/// its `@readonly` / `@destructive` flags, so a missing hint is a failure.
+/// its `@readonly` / `@destructive` / `@worker` flags, so a missing hint is a failure.
 fn api_lines(api: &ApiDoc) -> (Vec<String>, Vec<String>, Vec<String>) {
     let ty = |t: &fluessig::api::ApiType| format!("{t:?}");
     let mut ops: Vec<String> = api
@@ -255,12 +255,13 @@ fn api_lines(api: &ApiDoc) -> (Vec<String>, Vec<String>, Vec<String>) {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "{}.{} [{:?}{}{}]({ps}) -> {}",
+                    "{}.{} [{:?}{}{}{}]({ps}) -> {}",
                     i.name,
                     op.name,
                     op.shape,
                     if op.readonly { " readonly" } else { "" },
                     if op.destructive { " destructive" } else { "" },
+                    if op.worker { " worker" } else { "" },
                     ty(&op.returns)
                 )
             })
@@ -329,8 +330,20 @@ fn derive_and_typespec_lower_to_the_same_ops_models_and_unions() {
     assert_eq!(readonly, 9, "expected 9 @readonly ops");
     assert_eq!(destructive, 2, "expected 2 @destructive ops");
 
+    // feature: the `#[fluessig(worker)]` op flag. disponent's schema hasn't
+    // annotated any worker ops yet (that lands in the coordinated disponent PR that
+    // gates its worker-role MCP surface), so the derive front end carries the flag
+    // but no op sets it — the count is 0 today.
+    let worker = derive
+        .interfaces
+        .iter()
+        .flat_map(|i| &i.ops)
+        .filter(|o| o.worker)
+        .count();
+    assert_eq!(worker, 0, "no @worker ops until disponent annotates them");
+
     println!(
-        "PARITY: {} ops ({readonly} readonly, {destructive} destructive), {} models, {} unions match",
+        "PARITY: {} ops ({readonly} readonly, {destructive} destructive, {worker} worker), {} models, {} unions match",
         d_ops.len(),
         d_models.len(),
         d_unions.len(),

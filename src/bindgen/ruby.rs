@@ -6,7 +6,7 @@
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, CallbackSig, Shape};
 
 use super::*;
 
@@ -149,6 +149,10 @@ struct RbParam {
     field: Option<String>,
     /// enum name to parse from String in the prelude.
     parse_enum: Option<String>,
+    /// callback signature, when this param is an [`ApiType::Callback`] — the Ruby
+    /// method takes a `Proc` (spelled in `rust_ty`) and the prelude wraps it into
+    /// the uniform core `Box<dyn Fn>` via [`super::ruby_callback::rust_callback_conv`].
+    callback: Option<CallbackSig>,
 }
 
 /// A flattened group: (model, var, skipped-fields).
@@ -197,9 +201,23 @@ fn rb_flatten(api: &ApiDoc, op: &ApiOp) -> (Vec<RbParam>, Vec<RbGroup>) {
                     group: Some(model.clone()),
                     field: Some(snake(&f.name)),
                     parse_enum: enum_name,
+                    callback: None,
                 });
             }
             groups.push((model.clone(), format!("{}_arg", snake(&model)), skipped));
+        } else if let ApiType::Callback { callback } = &p.ty {
+            // A callback param: the Ruby method takes a `Proc`; the prelude wraps
+            // it into the uniform core `Box<dyn Fn>` (shadowing `{name}`), which
+            // flows straight into the core call. (Never optional in pi's surface.)
+            params.push(RbParam {
+                name: snake(&p.name),
+                rust_ty: "magnus::block::Proc".to_string(),
+                optional: false,
+                group: None,
+                field: None,
+                parse_enum: None,
+                callback: Some(callback.clone()),
+            });
         } else {
             let (r, _) = ty(api, &p.ty);
             let optional = p.optional == Some(true);
@@ -210,6 +228,7 @@ fn rb_flatten(api: &ApiDoc, op: &ApiOp) -> (Vec<RbParam>, Vec<RbGroup>) {
                 group: None,
                 field: None,
                 parse_enum: None,
+                callback: None,
             });
         }
     }
@@ -306,6 +325,17 @@ fn rb_op_pieces(api: &ApiDoc, op: &ApiOp) -> RbPieces {
         None
     };
     let mut prelude = String::new();
+    // A callback param is wrapped into the uniform core `Box<dyn Fn>` first (it
+    // shadows `{name}`, which then flows into the core call); no group/enum
+    // marshaling touches it.
+    for p in flat.iter().filter(|p| p.callback.is_some()) {
+        prelude.push_str(&super::ruby_callback::rust_callback_conv(
+            api,
+            p.callback.as_ref().unwrap(),
+            &p.name,
+        ));
+        prelude.push('\n');
+    }
     for p in flat.iter().filter(|p| p.parse_enum.is_some()) {
         let e = p.parse_enum.as_ref().unwrap();
         if p.optional {
@@ -802,6 +832,30 @@ pub fn ruby_binding_with_options(
 
     emit_core_traits_ruby(&mut t, api, opts);
 
+    // The RubyCb callback wrapper (whenever a callback param appears; a
+    // subscription op always carries one) + the opaque Subscription handle class.
+    // Both gated, so a callback/subscription-free schema stays byte-identical.
+    if crate::bindgen::api_uses_callback(api) {
+        quote_in! { t =>
+            $['\r']
+            $(super::ruby_callback::RUBY_CALLBACK_PRELUDE)
+        };
+    }
+    if crate::bindgen::api_uses_subscription(api) {
+        quote_in! { t =>
+            $['\r']
+            $(super::ruby_callback::subscription_ruby_prelude(&module))
+        };
+        registrations.push(
+            "let subscription = class.define_class(\"Subscription\", ruby.class_object())?;"
+                .to_string(),
+        );
+        registrations.push(
+            "subscription.define_method(\"unsubscribe\", method!(Subscription::unsubscribe, 0))?;"
+                .to_string(),
+        );
+    }
+
     for m in &api.models {
         if outputs.contains(&m.name) {
             registrations.push(format!(
@@ -1114,13 +1168,39 @@ pub fn ruby_binding_with_options(
                             }
                         }
                     }
-                    // Subscription (register/unsubscribe) lowering deferred to a
-                    // follow-up PR for ruby; emit a skip-note so the op is recorded
-                    // but not bound (node/python only today).
-                    Shape::Subscription => quote_in! { methods =>
-                        $['\r']
-                        $(format!("// subscription: {} — register/unsubscribe lowering deferred (node/python only today).", op.name))
-                    },
+                    // A subscription op REGISTERS the listener (its one callback
+                    // param, wrapped by the `prelude` into the uniform `Box<dyn
+                    // Fn>`) via the core, then hands back an owning `Subscription`
+                    // handle holding the core's returned unsubscribe closure. The
+                    // Ruby method name honours an op export-name pin (`rb_name`);
+                    // the Rust fn ident stays snake. Always `&self` (a subscription
+                    // op requires a stateful interface — enforced by the loader).
+                    Shape::Subscription => {
+                        let rb_name =
+                            pinned_name(&op.bindings, LANG).unwrap_or_else(|| name.clone());
+                        registrations.push(format!(
+                            "class.define_method({rb_name:?}, method!({}::{name}, {arity}))?;",
+                            i.name
+                        ));
+                        // Infallible ⇒ the core returns the unsubscribe closure
+                        // straight through; fallible ⇒ throw on `Err` (the same
+                        // `rberr` seam the unary arms use). The Ruby arg marshaling
+                        // (building the `Proc` box) can still raise, so both keep
+                        // the `Result<Subscription, Error>` return.
+                        let register = if op.infallible {
+                            format!("let unsub = self.core.{name}({args});")
+                        } else {
+                            format!("let unsub = self.core.{name}({args}).map_err(rberr)?;")
+                        };
+                        quote_in! { methods =>
+                            $['\r']
+                            fn $(&name)(&self, $(&fn_params)) -> Result<Subscription, Error> {
+                                $prelude
+                                $(&register)
+                                Ok(Subscription { unsub: std::sync::Mutex::new(Some(unsub)) })
+                            }
+                        }
+                    }
                     Shape::Manual => quote_in! { methods =>
                         $['\r']
                         $(format!("// @manual: {} — hand-written in lib.rs if this binding offers it.", op.name))

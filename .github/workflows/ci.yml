@@ -26,6 +26,7 @@ jobs:
       cpp: ${{ steps.filter.outputs.cpp }}
       java: ${{ steps.filter.outputs.java }}
       callback: ${{ steps.filter.outputs.callback }}
+      ruby: ${{ steps.filter.outputs.ruby }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -73,6 +74,20 @@ jobs:
               - 'crates/callback-demo-py/**'
               - 'crates/fluessig-runtime/**'
               - 'tests/callback_lowering.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            # The Ruby (magnus) callback round-trip leg runs only when the Ruby
+            # backend, the shared type-map/gen, the ruby demo crate, or the
+            # harness itself change.
+            ruby:
+              - 'src/bindgen/ruby.rs'
+              - 'src/bindgen/ruby_callback.rs'
+              - 'src/bindgen/mod.rs'
+              - 'src/bin/fluessig-gen.rs'
+              - 'crates/callback-demo-ruby/**'
+              - 'crates/fluessig-runtime/**'
+              - 'tests/ruby_callback_lowering.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -190,3 +205,28 @@ jobs:
         with:
           python-version: "3.11"
       - run: bash crates/callback-demo-py/run.sh
+
+  # ── Ruby (magnus) callback + subscription round-trip ─────────────────────────
+  # Additive, independent leg: builds the fluessig-generated magnus surface into a
+  # real loadable Ruby extension and drives it from a Ruby consumer, asserting a
+  # host `Proc` is invoked from Rust under the GVL with [0, 1] and removed on
+  # unsubscribe. NOT in the branch ruleset's required-checks list, so it does not
+  # block merges (like java-roundtrip). Its own job block so a rebase alongside
+  # sibling legs keeps both. rb-sys drives `bindgen`, so libclang must be present.
+  callback-ruby:
+    name: ruby callback round-trip
+    needs: changes
+    if: needs.changes.outputs.ruby == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      # rb-sys builds the ruby bindings through `bindgen`, which dlopens libclang.
+      - name: install libclang (for rb-sys' bindgen)
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - run: bash crates/callback-demo-ruby/run.sh

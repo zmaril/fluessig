@@ -14,7 +14,9 @@ conventional-commits = "required"
 #     committed C/C++ bindgen artifacts in the crate they belong to;
 #   - the java-demo crate's run.sh builds & runs the committed JNI round-trip;
 #   - the callback-demo-node / -py crates' regen.sh / run.sh regenerate and
-#     exercise the committed napi / pyo3 callback round-trips in place.
+#     exercise the committed napi / pyo3 callback round-trips in place;
+#   - the callback-demo-ruby crate's regen.sh / run.sh regenerate and exercise
+#     the committed magnus callback round-trip in place.
 allow = [
     "crates/fluessig-publish/tests/verify_dry_run.sh",
     "crates/cpp-demo/regen.sh",
@@ -24,6 +26,8 @@ allow = [
     "crates/callback-demo-node/run.sh",
     "crates/callback-demo-py/regen.sh",
     "crates/callback-demo-py/run.sh",
+    "crates/callback-demo-ruby/regen.sh",
+    "crates/callback-demo-ruby/run.sh",
 ]
 
 [stray-todos]

@@ -359,9 +359,9 @@ pub(super) fn api_uses_subscription(api: &ApiDoc) -> bool {
 }
 
 /// Does any op in the surface take an [`ApiType::Callback`] param? Gates the C
-/// backend's callback prelude (the `CbCtx` newtype + `c_void` import), so a
-/// callback-free surface emits ZERO new lines and its golden stays byte-identical.
-/// (node keeps its own private predicate to gate its napi imports.)
+/// backend's callback prelude (the `CbCtx` newtype + `c_void` import) and node's
+/// napi `threadsafe_function` imports, so a callback-free surface emits ZERO new
+/// lines and its golden stays byte-identical. Shared by cpp and node.
 pub(super) fn api_uses_callback(api: &ApiDoc) -> bool {
     api.interfaces.iter().flat_map(|i| &i.ops).any(|op| {
         op.params

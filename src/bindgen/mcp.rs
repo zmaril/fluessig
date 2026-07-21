@@ -54,6 +54,8 @@ fn mentions_binary(api: &ApiDoc, t: &ApiType, seen: &mut Vec<String>) -> bool {
             .find(|u| &u.name == union)
             .is_some_and(|u| u.variants.iter().any(|v| mentions_binary(api, &v.ty, seen))),
         ApiType::Enum { .. } | ApiType::Foreign { .. } => false,
+        // a callback is not a binary carrier (MCP callback lowering is a follow-up).
+        ApiType::Callback { .. } => false,
     }
 }
 
@@ -177,6 +179,10 @@ fn schema_of(
         // A foreign type has no JSON projection MCP can speak — an opaque handle
         // lives only in rust-core — so it surfaces as an opaque description.
         ApiType::Foreign { .. } => json!({"description": "opaque handle"}),
+        // MCP tools speak JSON and callbacks are not JSON-representable; MCP
+        // callback handling is a follow-up. No committed fixture routes a callback
+        // through the manifest, so this string placeholder keeps `schema_of` total.
+        ApiType::Callback { .. } => json!({"type": "string"}),
     }
 }
 
@@ -282,6 +288,9 @@ fn rust_ty(t: &ApiType) -> String {
         ApiType::Union { .. } => "serde_json::Value".into(),
         // a foreign handle has no MCP projection; carried as its string form
         ApiType::Foreign { .. } => "String".into(),
+        // MCP callback lowering is a follow-up; the `Value` carrier is an
+        // unreached-by-fixtures placeholder keeping `rust_ty` total.
+        ApiType::Callback { .. } => "serde_json::Value".into(),
     }
 }
 

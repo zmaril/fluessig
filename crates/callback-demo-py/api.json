@@ -1,0 +1,13 @@
+{
+  "fluessig": {"format": 1},
+  "models": [],
+  "unions": [],
+  "interfaces": [
+    {"name": "Ticker", "ops": [
+      {"name": "each_tick", "shape": "unary", "params": [
+        {"name": "count", "type": "int32"},
+        {"name": "listener", "type": {"callback": {"params": ["int32"]}}}
+      ], "returns": "void"}
+    ]}
+  ]
+}

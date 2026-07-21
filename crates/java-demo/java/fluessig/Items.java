@@ -1,3 +1,4 @@
+// straitjacket-allow-file:duplication — the generated per-interface JNI classes repeat a fixed handle/ctor/close + native-decl template by design (the language × shape grid).
 package fluessig;
 
 import java.util.Optional;

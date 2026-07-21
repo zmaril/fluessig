@@ -111,12 +111,25 @@ The hand-written `core_impl` implements the trait and just invokes the boxed `Fn
 
 ## Vertical slice (this PR)
 
-A new demo crate `crates/callback-demo/` (mirroring `crates/cpp-demo` / `crates/java-demo`, the only existing real host→Rust round-trips) with a `Ticker` interface:
-- `Shape::Ctor` `new() -> Ticker`
-- `Shape::Subscription` `on_tick(listener: Callback<(int32)>) -> Subscription`
-- `Shape::Unary` `tick(&self) -> void` — fires every live listener with an incrementing counter
+The first slice lands `ApiType::Callback` **only** — a callback param on a plain
+`Shape::Unary` op — and defers `Shape::Subscription` (see the resolved decisions
+below). New demo crates `crates/callback-demo-node/` and `crates/callback-demo-py/`
+(mirroring `crates/cpp-demo` / `crates/java-demo`, the existing real host→Rust
+round-trips) with a `Ticker` interface:
+- `Shape::Unary` `each_tick(count: int32, listener: Callback<(int32)>) -> void` —
+  synchronously invokes the host closure `count` times from Rust, once per tick,
+  passing the incrementing counter (`for i in 0..count { listener(i); }` in
+  `TickerImpl`, the hand-written core).
 
-Runnable proofs (the repo's **first** runnable node/python host consumers): a node script and a python script that subscribe a host closure, call `tick()`, assert the closure fired with the right values, then `unsubscribe()`/drop and assert it stops. Wired as `run.sh` + CI jobs mirroring the cpp/java demos.
+Runnable proofs (the repo's **first** runnable node/python host consumers): a node
+script and a python script that pass a host closure into `each_tick(3, …)` and
+assert it fired with `[0, 1, 2]` — proving a host-language closure is actually
+invoked from Rust in both node (napi `ThreadsafeFunction`, drained on the event
+loop) and python (pyo3 `PyObject`, invoked inline under the GIL). Wired as
+`run.sh` + CI jobs mirroring the cpp/java demos.
+
+`Shape::Subscription` (the `onEvent`/`onExit` register/unsubscribe shape) is the
+immediate follow-up: it builds directly on the `Callback` param this slice lands.
 
 ## Deferred / follow-ups
 
@@ -125,8 +138,27 @@ Runnable proofs (the repo's **first** runnable node/python host consumers): a no
 - The hinzu converter's `=> void` parse branch (`fluessig_api.rs`) that emits `Callback` types from pi source (coordinated with the pi-API-gap session).
 - `is_async` / `fallible` / value-returning callbacks (no pi surface needs them; would layer on the async-oneshot bridge).
 
-## Open questions for review
+## Resolved decisions (coordinator rulings)
 
-1. Variant name: `ApiType::Callback` (used here, matches the pi-gap session's naming) vs `ApiType::Function` (type-theoretic). Easy to rename before merge.
-2. `Shape::Subscription` as a first-class shape vs a plain `Callback` param on a `Unary` op that returns a hand-shaped handle. This note argues for the first-class shape (clean drop/unsubscribe lifetime, no returned-closure minting).
-3. Whether PHP's off-thread restriction should be a hard generation error, a `@manual` fallback, or a documented sync-only emission.
+These were open questions during design; the coordinator resolved them as follows.
+
+1. **Variant name = `ApiType::Callback`** (not `ApiType::Function`). `Function` is
+   deliberately reserved for a possible future value-returning / reentrant shape
+   (a callable the caller awaits a result from). `Callback` names exactly the
+   forward-only sync-void shape this design lowers, and matches the pi-gap
+   session's naming.
+2. **PHP is documented sync-only, NOT a hard generation error.** pidgin's goal is
+   that *every* language can drop in callbacks, so the generator does not refuse
+   to emit a PHP binding for a callback op. Instead it emits a
+   compile-time-visible marker (a doc comment plus naming) rather than a runtime
+   surprise, and the off-thread restriction is documented in **both** this note
+   (the Per-backend lowering summary above) and the generated PHP binding docs.
+   A background-thread callback op stays sync-same-request-thread on PHP by
+   contract, surfaced explicitly rather than silently mis-lowered.
+3. **`Shape::Subscription` stays a first-class shape in the design but is DEFERRED
+   to a follow-up.** Adding a `Shape` variant breaks every backend's exhaustive
+   `match op.shape`, so landing it in the same slice would force a wide, risky
+   change across all backends at once. The first slice therefore lands
+   `ApiType::Callback` only (a callback param on a `Unary` op); `Subscription`
+   (the `onEvent`/`onExit` register/unsubscribe shape) follows as its own slice,
+   building on the `Callback` param this one establishes.

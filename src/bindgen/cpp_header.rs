@@ -305,6 +305,15 @@ fn op_prototype(api: &ApiDoc, iface: &str, op: &ApiOp, has_ctor: bool) -> String
             format!("int {iface}_new({});\n", join(parts))
         }
         Shape::Manual => format!("/* @manual {iface}::{} */\n", op.name),
+        // Full Subscription (register/unsubscribe) lowering is deferred to a
+        // follow-up PR for the C header; emit a skip-note so the op is recorded but
+        // not declared (node/python only today).
+        Shape::Subscription => {
+            format!(
+                "/* subscription {iface}::{} — lowering deferred */\n",
+                op.name
+            )
+        }
         Shape::Stream => {
             let cur = c_stream_name(iface, op);
             let item = classify(api, &op.returns);

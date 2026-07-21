@@ -334,6 +334,13 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                             }
                         }
                     }
+                    // Subscription (register/unsubscribe) lowering deferred to a
+                    // follow-up PR for php; emit a skip-note so the op is recorded
+                    // but not auto-bound (node/python only today).
+                    Shape::Subscription => quote_in! { methods =>
+                        $['\r']
+                        $(format!("// subscription: {} — register/unsubscribe lowering deferred (node/python only today).", op.name))
+                    },
                     Shape::Manual => quote_in! { methods =>
                         $['\r']
                         $(format!("// @manual: {} — hand-written in lib.rs.", op.name))

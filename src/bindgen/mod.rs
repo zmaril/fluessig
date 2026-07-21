@@ -346,6 +346,45 @@ fn api_uses_bytes(api: &ApiDoc) -> bool {
         .any(|op| mentions_bytes(&op.returns) || op.params.iter().any(|p| mentions_bytes(&p.ty)))
 }
 
+/// Does any op in the surface have the `Shape::Subscription` shape? Gates each
+/// backend's generated `Subscription` handle class, so a surface with no
+/// subscription op emits ZERO new lines and its golden stays byte-identical.
+/// Shared by node and python (the two backends that lower it today).
+pub(super) fn api_uses_subscription(api: &ApiDoc) -> bool {
+    api.interfaces
+        .iter()
+        .flat_map(|i| &i.ops)
+        .any(|op| op.shape == Shape::Subscription)
+}
+
+/// The `(return_type, unsub_expr, ok_expr)` a `Shape::Subscription` op method
+/// splices into its template, keyed on `infallible`: a FALLIBLE op throws on `Err`
+/// (`{result_ty}<Subscription>`, `{call}.map_err(err)?`, `Ok(Subscription{..})`), an
+/// INFALLIBLE one returns the handle straight through (`Subscription`, `{call}`,
+/// `Subscription{..}`). `result_ty` is the backend's throwing-result spelling
+/// (node `Result`, python `PyResult`); `call` is the core-call expression. Shared
+/// by node and python so their register→unsubscribe lowering agrees.
+pub(super) fn subscription_method_parts(
+    infallible: bool,
+    result_ty: &str,
+    call: &str,
+) -> (String, String, String) {
+    let handle = "Subscription { unsub: std::sync::Mutex::new(Some(unsub)) }";
+    if infallible {
+        (
+            "Subscription".to_string(),
+            call.to_string(),
+            handle.to_string(),
+        )
+    } else {
+        (
+            format!("{result_ty}<Subscription>"),
+            format!("{call}.map_err(err)?"),
+            format!("Ok({handle})"),
+        )
+    }
+}
+
 /// The field carrying an Arrow `RecordBatch`, when this model is an
 /// Arrow-payload DTO (`ChangeBatch.ipc: ArrowBatch`). Such a model is generated
 /// as a class HOLDING the batch (`pub(crate) batch: entl_core::RecordBatch`)
@@ -587,6 +626,21 @@ pub(super) fn emit_core_traits_full(
                 Shape::Ctor => format!("fn {name}({ps}) -> anyhow::Result<Self>"),
                 Shape::Stream => {
                     format!("fn {name}(&self, {ps}) -> anyhow::Result<Box<dyn PollStream<{ret}>>>")
+                }
+                // A `Shape::Subscription` op REGISTERS the listener (its callback
+                // param, spelled the uniform `Box<dyn Fn(Args) + Send + Sync>` by
+                // `param_sig_fn`) and returns the UNSUBSCRIBE closure. The
+                // hand-written `core_impl` adds the listener to its set and returns a
+                // `Box::new(move || { /* deregister */ })`; each backend's generated
+                // binding wraps that closure into its `Subscription` handle class.
+                // Rides the same stateful `&self` receiver as the unary arms.
+                Shape::Subscription if op.infallible => {
+                    format!("fn {name}({recv}, {ps}) -> Box<dyn Fn() + Send + Sync>")
+                }
+                Shape::Subscription => {
+                    format!(
+                        "fn {name}({recv}, {ps}) -> anyhow::Result<Box<dyn Fn() + Send + Sync>>"
+                    )
                 }
                 // A `#[fluessig(result)]` op returns its error AS A VALUE: the core
                 // method is `Result<T, E>` with the EXPLICIT error record `E`, so

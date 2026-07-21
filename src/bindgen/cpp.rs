@@ -1064,6 +1064,13 @@ fn emit_interface(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
                     s.push_str(&emit_unary(api, &i.name, op, &impl_path, &trait_name, true))
                 }
                 Shape::Stream => s.push_str(&emit_stream_open(api, &i.name, op, &impl_path)),
+                // Full Subscription (register/unsubscribe) lowering is deferred to a
+                // follow-up PR for cpp; emit a skip-note so the op is recorded but
+                // not auto-bound, keeping the crate compiling.
+                Shape::Subscription => s.push_str(&format!(
+                    "// subscription {}::{} — register/unsubscribe lowering deferred (node/python only today).\n",
+                    i.name, op.name
+                )),
                 Shape::Manual => s.push_str(&format!(
                     "// @manual {}::{} — hand-written by the consumer.\n",
                     i.name, op.name
@@ -1090,6 +1097,13 @@ fn emit_interface(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
                     false,
                 )),
                 Shape::Stream => s.push_str(&emit_stream_open(api, &i.name, op, &impl_path)),
+                // Subscription lowering deferred to a follow-up PR for cpp (a
+                // subscription op is `&self` on a stateful interface, so it never
+                // reaches this stateless arm — recorded for completeness).
+                Shape::Subscription => s.push_str(&format!(
+                    "// subscription {}::{} — register/unsubscribe lowering deferred (node/python only today).\n",
+                    i.name, op.name
+                )),
                 Shape::Manual => s.push_str(&format!(
                     "// @manual {}::{} — hand-written by the consumer.\n",
                     i.name, op.name

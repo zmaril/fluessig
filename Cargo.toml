@@ -29,6 +29,13 @@ members = [
     # libruby) is built only by its own round-trip runner / CI leg, never by a
     # bare `cargo build`/`cargo test`.
     "crates/callback-demo-ruby",
+    # The wasm-bindgen callback round-trip demo. Member so it shares Cargo.lock
+    # and builds via `-p`, but — like the sibling demos above — DELIBERATELY
+    # excluded from `default-members`: it targets `wasm32-unknown-unknown` (js-sys
+    # / wasm-bindgen do not link for the host), built only by its own compile-proof
+    # runner / CI leg (`cargo build --target wasm32-unknown-unknown`), never by a
+    # bare host `cargo build`/`cargo test`.
+    "crates/callback-demo-wasm",
 ]
 # The root is a hybrid package+workspace; without default-members a bare
 # `cargo build`/`test` would build only the root package. List both so the

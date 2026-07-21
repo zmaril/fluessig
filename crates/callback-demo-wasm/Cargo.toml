@@ -1,0 +1,20 @@
+[package]
+name = "callback-demo-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The wasm-bindgen callback round-trip demo cdylib: fluessig-generated wasm-bindgen glue (src/generated.rs) for a Ticker interface + a hand-written core_impl, compiled to wasm32-unknown-unknown, proving a JS Function is marshalled into the uniform core Box<dyn Fn> and a Shape::Subscription op returns a #[wasm_bindgen] Subscription handle. The compile-to-wasm32 IS the proof the generated callback + subscription binding is valid wasm-bindgen code."
+
+[lib]
+# cdylib → the wasm module wasm-bindgen consumes. rlib too so the crate can also
+# be `cargo check`ed as a library on a wasm target.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# wasm-bindgen 0.2 — the generated binding uses `#[wasm_bindgen]` structs/methods,
+# `JsValue`, and `js_sys::Function` (`call1`) for the callback marshalling.
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+# The core trait returns `anyhow::Result<T>`; core_impl uses anyhow.
+anyhow = "1"

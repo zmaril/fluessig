@@ -6,7 +6,7 @@
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, CallbackSig, Shape};
 
 use super::*;
 
@@ -260,6 +260,16 @@ fn py_flatten(api: &ApiDoc, op: &ApiOp) -> Vec<PyParam> {
                     group: Some(model.clone()),
                 });
             }
+        } else if matches!(&p.ty, ApiType::Callback { .. }) {
+            // A callback param crosses in as a Python callable (`PyObject` =
+            // `Py<PyAny>`); the fn body bridges it into the uniform core
+            // `Box<dyn Fn>` under the GIL (see [`py_op_pieces`]).
+            out.push(PyParam {
+                name: py_reserved(&snake(&p.name)),
+                rust_ty: "PyObject".to_string(),
+                defaulted: false,
+                group: None,
+            });
         } else {
             let (r, _) = ty(api, &p.ty);
             let optional = p.optional == Some(true);
@@ -272,6 +282,16 @@ fn py_flatten(api: &ApiDoc, op: &ApiOp) -> Vec<PyParam> {
         }
     }
     out
+}
+
+/// Does this op take a callback param? A callback-carrying op holds the GIL for
+/// the core call (the boxed closure re-acquires it re-entrantly), so its body must
+/// NOT release the GIL via `py.detach` — otherwise the callback's `with_gil` would
+/// deadlock/re-acquire against a released GIL.
+fn py_op_has_callback(op: &ApiOp) -> bool {
+    op.params
+        .iter()
+        .any(|p| matches!(&p.ty, ApiType::Callback { .. }))
 }
 
 /// The `#[pyo3(signature = …)]` attribute + fn params + the body prelude that
@@ -329,6 +349,19 @@ fn py_op_pieces(api: &ApiDoc, op: &ApiOp) -> (String, String, String, String) {
             fields.join(", ")
         ));
     }
+    // callback bridges: wrap each `PyObject` callable into the uniform core
+    // `Box<dyn Fn>` (invoking it under the GIL). Appended after group reassembly so
+    // the wrappers precede the trait call. Nothing is appended for a callback-free
+    // op, so its prelude is byte-identical.
+    for p in &op.params {
+        if let ApiType::Callback { callback } = &p.ty {
+            prelude.push_str(&py_callback_wrapper(
+                api,
+                &py_reserved(&snake(&p.name)),
+                callback,
+            ));
+        }
+    }
     // the trait-call argument list, in the op's original param order
     let args = op
         .params
@@ -341,11 +374,39 @@ fn py_op_pieces(api: &ApiDoc, op: &ApiOp) -> (String, String, String, String) {
                     format!("{}_arg", snake(model))
                 }
             }
+            // a callback is passed as its bridged `{name}_cb` local
+            ApiType::Callback { .. } => format!("{}_cb", py_reserved(&snake(&p.name))),
             _ => py_reserved(&snake(&p.name)),
         })
         .collect::<Vec<_>>()
         .join(", ");
     (signature, fn_params, prelude, args)
+}
+
+/// The wrapper `let {name}_cb: Box<dyn Fn(..)> = { … };` bridging a Python
+/// callable (`PyObject`) into the uniform core closure: the boxed `Fn` re-acquires
+/// the GIL (`Python::with_gil`, re-entrant) and invokes the callable with the
+/// forwarded args. `clone_ref` keeps the callable alive for the closure. Single
+/// arg forwards a 1-tuple `(v,)`; N args a tuple; zero args the empty tuple.
+fn py_callback_wrapper(api: &ApiDoc, name: &str, sig: &CallbackSig) -> String {
+    let arg_tys: Vec<String> = sig.params.iter().map(|p| ty(api, p).0).collect();
+    let vars = callback_arg_vars(arg_tys.len());
+    let box_ty = format!("Box<dyn Fn({}) + Send + Sync>", arg_tys.join(", "));
+    let closure_params = vars
+        .iter()
+        .zip(&arg_tys)
+        .map(|(v, ty)| format!("{v}: {ty}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // `call1` takes a Python args tuple: a lone arg still needs the trailing comma.
+    let call_tuple = match vars.len() {
+        0 => "()".to_string(),
+        1 => format!("({},)", vars[0]),
+        _ => format!("({})", vars.join(", ")),
+    };
+    format!(
+        "let {name}_cb: {box_ty} = {{ let cb = {name}.clone_ref(py); Box::new(move |{closure_params}| {{ Python::with_gil(|py| {{ let _ = cb.call1(py, {call_tuple}); }}); }}) }};\n"
+    )
 }
 
 /// The Python projection of an Arrow-payload DTO: a pyclass holding the
@@ -910,14 +971,39 @@ pub fn python_binding_with_options(
                         if let Some(nm) = pinned_name(&op.bindings, LANG) {
                             quote_in! { methods => $['\r']$(format!("#[pyo3(name = {nm:?})]")) };
                         }
+                        // A callback-carrying op HOLDS the GIL (no `py.detach`): the
+                        // boxed closure re-acquires it re-entrantly under
+                        // `with_gil`, so the core call runs inline. A callback-free
+                        // op keeps the historical GIL-releasing `py.detach` body.
+                        let has_cb = py_op_has_callback(op);
                         if op.infallible {
+                            if has_cb {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    #[pyo3(signature = ($(&signature)))]
+                                    fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> $(&ret) {
+                                        $prelude
+                                        self.core.$(&name)($(&args))
+                                    }
+                                }
+                            } else {
+                                quote_in! { methods =>
+                                    $['\r']
+                                    #[pyo3(signature = ($(&signature)))]
+                                    fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> $(&ret) {
+                                        $prelude
+                                        let core = self.core.clone();
+                                        py.detach(move || core.$(&name)($(&args)))
+                                    }
+                                }
+                            }
+                        } else if has_cb {
                             quote_in! { methods =>
                                 $['\r']
                                 #[pyo3(signature = ($(&signature)))]
-                                fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> $(&ret) {
+                                fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> PyResult<$(&ret)> {
                                     $prelude
-                                    let core = self.core.clone();
-                                    py.detach(move || core.$(&name)($(&args)))
+                                    self.core.$(&name)($(&args)).map_err(err)
                                 }
                             }
                         } else {
@@ -1002,13 +1088,38 @@ pub fn python_binding_with_options(
                 if let Some(nm) = pinned_name(&op.bindings, LANG) {
                     quote_in! { t => $['\r']$(format!("#[pyo3(name = {nm:?})]")) };
                 }
-                if op.infallible {
+                // A callback-carrying op HOLDS the GIL (the boxed closure re-acquires
+                // it re-entrantly under `with_gil`), so the core call runs inline —
+                // no `py.detach`. A callback-free op keeps the historical
+                // GIL-releasing body byte-identical.
+                let has_cb = py_op_has_callback(op);
+                if op.infallible && has_cb {
+                    quote_in! { t =>
+                        $['\r']
+                        #[pyo3(signature = ($(&signature)))]
+                        fn $(&name)(py: Python<$("'_")>, $(&fn_params)) -> $(&ret) {
+                            $prelude
+                            <$(&impl_path) as $(&trait_name)>::$(&name)($(&args))
+                        }
+                        $['\n']
+                    };
+                } else if op.infallible {
                     quote_in! { t =>
                         $['\r']
                         #[pyo3(signature = ($(&signature)))]
                         fn $(&name)(py: Python<$("'_")>, $(&fn_params)) -> $(&ret) {
                             $prelude
                             py.detach(move || <$(&impl_path) as $(&trait_name)>::$(&name)($(&args)))
+                        }
+                        $['\n']
+                    };
+                } else if has_cb {
+                    quote_in! { t =>
+                        $['\r']
+                        #[pyo3(signature = ($(&signature)))]
+                        fn $(&name)(py: Python<$("'_")>, $(&fn_params)) -> PyResult<$(&ret)> {
+                            $prelude
+                            <$(&impl_path) as $(&trait_name)>::$(&name)($(&args)).map_err(err)
                         }
                         $['\n']
                     };

@@ -119,6 +119,10 @@ pub(super) fn classify(api: &ApiDoc, t: &ApiType) -> Cross {
         ApiType::List { list } => Cross::List(Box::new(classify(api, list))),
         ApiType::Nullable { nullable } => Cross::Nullable(Box::new(classify(api, nullable))),
         ApiType::Union { .. } => Cross::Union,
+        // A truly-foreign type has no dedicated C-ABI representation; it rides the
+        // UTF-8 string carrier (the honest default the scalar catchall also uses).
+        // The typed opaque handle is a rust-core concern (see `rust_core`).
+        ApiType::Foreign { .. } => Cross::Str,
     }
 }
 

@@ -160,7 +160,7 @@ fn java_ty(api: &ApiDoc, t: &ApiType) -> String {
         ApiType::Enum { .. } => "String".to_string(),
         ApiType::List { list } => format!("List<{}>", java_boxed(api, list)),
         ApiType::Nullable { nullable } => java_boxed(api, nullable),
-        ApiType::Union { .. } => "String".to_string(),
+        ApiType::Union { .. } | ApiType::Foreign { .. } => "String".to_string(),
     }
 }
 
@@ -183,7 +183,7 @@ fn descriptor(t: &ApiType) -> String {
         ApiType::Model { model } => format!("L{PACKAGE}/{model};"),
         ApiType::Enum { .. } => "Ljava/lang/String;".to_string(),
         ApiType::List { .. } => "Ljava/util/List;".to_string(),
-        ApiType::Union { .. } => "Ljava/lang/String;".to_string(),
+        ApiType::Union { .. } | ApiType::Foreign { .. } => "Ljava/lang/String;".to_string(),
         ApiType::Nullable { nullable } => match &**nullable {
             ApiType::Scalar(s) => match s.as_str() {
                 "boolean" => "Ljava/lang/Boolean;",
@@ -216,7 +216,9 @@ fn jni_ret_ty(t: &ApiType) -> String {
         }
         .to_string(),
         ApiType::Model { .. } | ApiType::List { .. } => "jobject".to_string(),
-        ApiType::Enum { .. } | ApiType::Union { .. } => "jstring".to_string(),
+        ApiType::Enum { .. } | ApiType::Union { .. } | ApiType::Foreign { .. } => {
+            "jstring".to_string()
+        }
         ApiType::Nullable { nullable } => {
             if is_object(nullable) {
                 jni_ret_ty(nullable)
@@ -272,7 +274,7 @@ fn to_jobject(t: &ApiType, expr: &str) -> String {
         ApiType::Enum { .. } => format!(
             "env.new_string({expr}.wire()).map(JObject::from).unwrap_or_default()"
         ),
-        ApiType::Union { .. } => format!(
+        ApiType::Union { .. } | ApiType::Foreign { .. } => format!(
             "env.new_string(&{expr}).map(JObject::from).unwrap_or_default()"
         ),
         ApiType::List { list } => format!(
@@ -311,7 +313,7 @@ fn success_expr(t: &ApiType, expr: &str) -> String {
         ApiType::Enum { .. } => format!(
             "env.new_string({expr}.wire()).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())"
         ),
-        ApiType::Union { .. } => format!(
+        ApiType::Union { .. } | ApiType::Foreign { .. } => format!(
             "env.new_string(&{expr}).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())"
         ),
         ApiType::Nullable { nullable } => format!(
@@ -351,7 +353,7 @@ fn from_jobject(t: &ApiType, obj: &str) -> String {
         ApiType::Enum { r#enum } => format!(
             "{enum}::parse(&env.get_string(&JString::from({obj})).map(Into::into).unwrap_or_default()).expect(\"enum wire token\")"
         ),
-        ApiType::Union { .. } => format!(
+        ApiType::Union { .. } | ApiType::Foreign { .. } => format!(
             "env.get_string(&JString::from({obj})).map(Into::into).unwrap_or_default()"
         ),
         ApiType::List { list } => format!(
@@ -482,7 +484,7 @@ fn marshal_param(api: &ApiDoc, p: &crate::api::ApiParam) -> (String, String) {
                 "let {n} = {enum}::parse(&env.get_string(&{n}_j).map(Into::into).unwrap_or_default()).expect(\"enum wire token\");"
             ),
         ),
-        ApiType::Union { .. } => (
+        ApiType::Union { .. } | ApiType::Foreign { .. } => (
             "JString<'local>",
             format!("let {n}: String = env.get_string(&{n}_j).map(Into::into).unwrap_or_default();"),
         ),

@@ -38,7 +38,8 @@ fn php_doc_ty(t: &ApiType) -> String {
         ApiType::Enum { .. } => "string".to_string(),
         ApiType::List { .. } => "array".to_string(),
         ApiType::Nullable { nullable } => format!("?{}", php_doc_ty(nullable)),
-        ApiType::Union { .. } => "string".to_string(),
+        // a union envelope and a foreign handle both ride the string carrier here
+        ApiType::Union { .. } | ApiType::Foreign { .. } => "string".to_string(),
     }
 }
 

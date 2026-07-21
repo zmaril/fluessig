@@ -46,7 +46,7 @@ use std::collections::BTreeMap;
 
 use genco::prelude::*;
 
-use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, Shape};
+use crate::api::{ApiDoc, ApiOp, ApiType, ApiUnion, ForeignType, Shape};
 
 /// How a backend lowers a tagged discriminated union crossing the FFI. Shared by
 /// every structured-capable backend (node/python/ruby); the default is
@@ -391,7 +391,40 @@ fn ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
         // a tagged union crosses the FFI as its JSON envelope text
         // `{"kind": tag, "payload": body}` — the same carrier as `Json`
         ApiType::Union { .. } => ("String".into(), "string".into()),
+        // a truly-foreign type lowers to its generated per-type OPAQUE HANDLE
+        // (rust-core emits the handle struct) — NOT a silent `String`/Json. The
+        // handle name is derived deterministically from the source type name, so
+        // every reference site and the emitted struct agree. The same name serves
+        // the ts half (an opaque nominal type).
+        ApiType::Foreign { foreign } => {
+            let h = foreign_handle_name(foreign);
+            (h.clone(), h)
+        }
     }
+}
+
+/// The deterministic opaque-handle type name for a truly-foreign type, e.g.
+/// `http.Server` → `HttpServerHandle`, `ChildProcess` → `ChildProcessHandle`,
+/// `fs.ReadStream` → `FsReadStreamHandle`. Derived PURELY from the source
+/// [`ForeignType::name`] (split on any non-alphanumeric boundary, each segment
+/// initial-upper-cased with its internal casing preserved, `Handle` appended) so
+/// the reference sites (via [`ty`]) and the emitted struct (rust-core) always
+/// agree, and two occurrences of the same foreign type collapse to ONE handle.
+/// A name that would not start with a letter is prefixed `Foreign`.
+pub(super) fn foreign_handle_name(f: &ForeignType) -> String {
+    let mut out = String::new();
+    for seg in f.name.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let mut cs = seg.chars();
+        if let Some(first) = cs.next() {
+            out.push(first.to_ascii_uppercase());
+            out.push_str(cs.as_str());
+        }
+    }
+    if !out.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        out.insert_str(0, "Foreign");
+    }
+    out.push_str("Handle");
+    out
 }
 
 fn param_sig(api: &ApiDoc, op: &ApiOp) -> Vec<(String, String)> {

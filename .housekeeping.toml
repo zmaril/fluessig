@@ -11,11 +11,13 @@ conventional-commits = "required"
 #   - the publish crate's dry-run verifier sits by its tests so `cargo test`
 #     and the README reference it in place;
 #   - the cpp-demo crate's regen.sh / run.sh regenerate and exercise the
-#     committed C/C++ bindgen artifacts in the crate they belong to.
+#     committed C/C++ bindgen artifacts in the crate they belong to;
+#   - the java-demo crate's run.sh builds & runs the committed JNI round-trip.
 allow = [
     "crates/fluessig-publish/tests/verify_dry_run.sh",
     "crates/cpp-demo/regen.sh",
     "crates/cpp-demo/run.sh",
+    "crates/java-demo/run.sh",
 ]
 
 [stray-todos]

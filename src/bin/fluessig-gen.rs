@@ -82,6 +82,13 @@ fn main() {
     let cpp_header = flag("--cpp-header");
     let cpp_hpp = flag("--cpp-hpp");
     let wasm = flag("--wasm");
+    // The Java (JNI) backend emits TWO artifacts: `--java <p>` is the Rust JNI
+    // glue file; `--java-src-out <dir>` is the directory the generated `.java`
+    // classes are written under (one file per DTO / enum / union / interface /
+    // stream cursor). The glue references the `jni` crate — fluessig never
+    // compiles it, exactly like the ext-php-rs / napi surfaces.
+    let java = flag("--java");
+    let java_src_out = flag("--java-src-out");
     let mcp = flag("--mcp");
     // Opt-in package/module fan-out: a patterned path like
     // `out/{package}/{module}.rs`. When the api schema carries `(package,
@@ -93,6 +100,7 @@ fn main() {
     let ruby_out = flag("--ruby-out");
     let php_out = flag("--php-out");
     let wasm_out = flag("--wasm-out");
+    let java_out = flag("--java-out");
     let mcp_out = flag("--mcp-out");
     // The generated ROOT module that ties a language's fanned group files into
     // one crate (the `#[path]` mod-tree + `pub use` re-exports + Python
@@ -103,6 +111,7 @@ fn main() {
     let ruby_mod_out = flag("--ruby-mod-out");
     let php_mod_out = flag("--php-mod-out");
     let wasm_mod_out = flag("--wasm-mod-out");
+    let java_mod_out = flag("--java-mod-out");
     let mcp_mod_out = flag("--mcp-mod-out");
     let py_models = flag("--py-models");
     let ts_tables = flag("--ts-tables");
@@ -155,12 +164,14 @@ fn main() {
         || cpp_header.is_some()
         || cpp_hpp.is_some()
         || wasm.is_some()
+        || java.is_some()
         || mcp.is_some()
         || node_out.is_some()
         || python_out.is_some()
         || ruby_out.is_some()
         || php_out.is_some()
         || wasm_out.is_some()
+        || java_out.is_some()
         || mcp_out.is_some();
     if want_bindings {
         let Some(ap) = api_path.as_deref() else {
@@ -284,6 +295,26 @@ fn main() {
                 fluessig::bindgen::wasm_binding_with_options(&api, &enums, note, opts),
             );
         }
+        if let Some(p) = java {
+            // (a) the Rust JNI glue file.
+            write(&p, fluessig::bindgen::java_binding(&api, &enums, note));
+            // (b) the `.java` source classes, one file per DTO/enum/union/
+            // interface/stream cursor, under `--java-src-out <dir>`.
+            if let Some(dir) = &java_src_out {
+                for (rel, content) in fluessig::bindgen::java_sources(&api, &enums) {
+                    let path = std::path::Path::new(dir).join(&rel);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                            eprintln!("mkdir {}: {e}", parent.display());
+                            std::process::exit(1);
+                        });
+                    }
+                    write(&path.to_string_lossy(), content);
+                }
+            } else {
+                eprintln!("note: --java given without --java-src-out; wrote the Rust JNI glue only (no .java classes)");
+            }
+        }
         if let Some(m) = mcp {
             write(&m, fluessig::bindgen::mcp_module(&api, &enums, note));
         }
@@ -368,6 +399,11 @@ fn main() {
         });
         fan("wasm", wasm_out, wasm_mod_out, &|a, e| {
             fluessig::bindgen::wasm_binding(a, e, note)
+        });
+        // Fan-out splits only the Rust JNI glue's DTO surface (the `.java`
+        // sources are a separate flat tree under `--java-src-out`).
+        fan("java", java_out, java_mod_out, &|a, e| {
+            fluessig::bindgen::java_binding(a, e, note)
         });
         fan("mcp", mcp_out, mcp_mod_out, &|a, e| {
             fluessig::bindgen::mcp_module(a, e, note)

@@ -1,0 +1,18 @@
+[package]
+name = "java-demo"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The Java (JNI) round-trip harness cdylib: fluessig-generated JNI glue (src/generated.rs) + a hand-written core_impl over a trivial deterministic engine, compiled to libfluessig.so and driven from Main.java."
+
+[lib]
+# cdylib → libfluessig.so, the shared library `System.loadLibrary(\"fluessig\")`
+# loads. rlib too so the (excluded-from-default) crate still `cargo check`s
+# normally and could host unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fluessig-runtime = { path = "../fluessig-runtime" }
+jni = "0.21"
+anyhow = "1"

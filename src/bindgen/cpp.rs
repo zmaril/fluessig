@@ -75,6 +75,10 @@ pub(super) enum Cross {
     Void,
     I32,
     I64,
+    U8,
+    U16,
+    U32,
+    F32,
     F64,
     Bool,
     /// UTF-8 string (also the `Json` / date-time / unknown-scalar carrier).
@@ -100,7 +104,11 @@ pub(super) fn classify(api: &ApiDoc, t: &ApiType) -> Cross {
             "void" => Cross::Void,
             "int32" => Cross::I32,
             "int64" => Cross::I64,
-            "float64" => Cross::F64,
+            "uint8" => Cross::U8,
+            "uint16" => Cross::U16,
+            "uint32" => Cross::U32,
+            "float32" => Cross::F32,
+            "float64" | "float" => Cross::F64,
             "boolean" => Cross::Bool,
             "bytes" => Cross::Bytes,
             // `string`/`Json` and every other scalar (utcDateTime, ArrowBatch,
@@ -138,6 +146,10 @@ pub(super) fn list_elem_token(c: &Cross) -> String {
     match c {
         Cross::I32 => "Int32".into(),
         Cross::I64 => "Int64".into(),
+        Cross::U8 => "Uint8".into(),
+        Cross::U16 => "Uint16".into(),
+        Cross::U32 => "Uint32".into(),
+        Cross::F32 => "Float32".into(),
         Cross::F64 => "Float64".into(),
         Cross::Bool => "Bool".into(),
         Cross::Str | Cross::StrEnum | Cross::Union => "String".into(),
@@ -188,6 +200,10 @@ fn list_elem_rust(elem: &Cross) -> String {
     match elem {
         Cross::I32 => "i32".into(),
         Cross::I64 => "i64".into(),
+        Cross::U8 => "u8".into(),
+        Cross::U16 => "u16".into(),
+        Cross::U32 => "u32".into(),
+        Cross::F32 => "f32".into(),
         Cross::F64 => "f64".into(),
         Cross::Bool => "bool".into(),
         Cross::Str | Cross::StrEnum | Cross::Union => "String".into(),
@@ -202,7 +218,14 @@ fn list_elem_rust(elem: &Cross) -> String {
 /// Read one list element from a `p: *const <elem_c>` into its Rust value.
 fn list_in_elem(elem: &Cross) -> String {
     match elem {
-        Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => "*p".into(),
+        Cross::I32
+        | Cross::I64
+        | Cross::U8
+        | Cross::U16
+        | Cross::U32
+        | Cross::F32
+        | Cross::F64
+        | Cross::Bool => "*p".into(),
         Cross::Str | Cross::StrEnum | Cross::Union => "fl_str_in(*p)".into(),
         Cross::Enum(e) => format!("{e}::from_c(*p)"),
         Cross::Model(m) => format!("{}_from_c(&*p)", snake(m)),
@@ -214,7 +237,14 @@ fn list_in_elem(elem: &Cross) -> String {
 /// Move one Rust list element `x: <elem_rust>` into its owned C value `<elem_c>`.
 fn list_out_elem(elem: &Cross) -> String {
     match elem {
-        Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => "x".into(),
+        Cross::I32
+        | Cross::I64
+        | Cross::U8
+        | Cross::U16
+        | Cross::U32
+        | Cross::F32
+        | Cross::F64
+        | Cross::Bool => "x".into(),
         Cross::Str | Cross::StrEnum | Cross::Union => "fl_str_out(x)".into(),
         Cross::Enum(_) => "x as i32".into(),
         Cross::Model(m) => format!("{}_to_c(x)", snake(m)),
@@ -292,6 +322,10 @@ pub(super) fn c_value_type(c: &Cross) -> String {
         Cross::Void => "void".into(),
         Cross::I32 => "int32_t".into(),
         Cross::I64 => "int64_t".into(),
+        Cross::U8 => "uint8_t".into(),
+        Cross::U16 => "uint16_t".into(),
+        Cross::U32 => "uint32_t".into(),
+        Cross::F32 => "float".into(),
         Cross::F64 => "double".into(),
         Cross::Bool => "bool".into(),
         Cross::Str | Cross::StrEnum | Cross::Union => "char*".into(),
@@ -313,6 +347,10 @@ pub(super) fn cpp_value_type(c: &Cross) -> String {
         Cross::Void => "void".into(),
         Cross::I32 => "int32_t".into(),
         Cross::I64 => "int64_t".into(),
+        Cross::U8 => "uint8_t".into(),
+        Cross::U16 => "uint16_t".into(),
+        Cross::U32 => "uint32_t".into(),
+        Cross::F32 => "float".into(),
         Cross::F64 => "double".into(),
         Cross::Bool => "bool".into(),
         // strings, string-enums and unions (JSON) all surface as std::string.
@@ -563,6 +601,10 @@ fn rust_c_member_type(c: &Cross) -> String {
         Cross::Void => "()".into(),
         Cross::I32 | Cross::Enum(_) => "i32".into(),
         Cross::I64 => "i64".into(),
+        Cross::U8 => "u8".into(),
+        Cross::U16 => "u16".into(),
+        Cross::U32 => "u32".into(),
+        Cross::F32 => "f32".into(),
         Cross::F64 => "f64".into(),
         Cross::Bool => "bool".into(),
         Cross::Str | Cross::StrEnum | Cross::Union => "*mut c_char".into(),
@@ -701,7 +743,14 @@ fn member_owns_heap(c: &Cross) -> bool {
 /// source expression.
 fn member_to_c(c: &Cross, name: &str, src: &str) -> String {
     match c {
-        Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => {
+        Cross::I32
+        | Cross::I64
+        | Cross::U8
+        | Cross::U16
+        | Cross::U32
+        | Cross::F32
+        | Cross::F64
+        | Cross::Bool => {
             format!("        {name}: {src},\n")
         }
         Cross::Enum(_) => format!("        {name}: {src} as i32,\n"),
@@ -741,7 +790,14 @@ fn member_to_c(c: &Cross, name: &str, src: &str) -> String {
 /// field name.
 fn member_from_c(c: &Cross, cname: &str, rname: &str) -> String {
     match c {
-        Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => {
+        Cross::I32
+        | Cross::I64
+        | Cross::U8
+        | Cross::U16
+        | Cross::U32
+        | Cross::F32
+        | Cross::F64
+        | Cross::Bool => {
             format!("        {rname}: c.{cname},\n")
         }
         Cross::Enum(e) => format!("        {rname}: {e}::from_c(c.{cname}),\n"),
@@ -833,6 +889,10 @@ fn rust_in_one(c: &Cross, name: &str, decls: &mut Vec<String>, conv: &mut Vec<St
     match c {
         Cross::I32 => decls.push(format!("{name}: i32")),
         Cross::I64 => decls.push(format!("{name}: i64")),
+        Cross::U8 => decls.push(format!("{name}: u8")),
+        Cross::U16 => decls.push(format!("{name}: u16")),
+        Cross::U32 => decls.push(format!("{name}: u32")),
+        Cross::F32 => decls.push(format!("{name}: f32")),
         Cross::F64 => decls.push(format!("{name}: f64")),
         Cross::Bool => decls.push(format!("{name}: bool")),
         Cross::Str | Cross::StrEnum | Cross::Union => {
@@ -864,7 +924,14 @@ fn rust_in_one(c: &Cross, name: &str, decls: &mut Vec<String>, conv: &mut Vec<St
         }
         Cross::Nullable(inner) => {
             match inner.as_ref() {
-                Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => {
+                Cross::I32
+                | Cross::I64
+                | Cross::U8
+                | Cross::U16
+                | Cross::U32
+                | Cross::F32
+                | Cross::F64
+                | Cross::Bool => {
                     let t = rust_c_member_type(inner);
                     decls.push(format!("{name}: *const {t}"));
                     conv.push(format!(
@@ -907,7 +974,14 @@ fn rust_in_one(c: &Cross, name: &str, decls: &mut Vec<String>, conv: &mut Vec<St
 fn rust_out(c: &Cross) -> (Vec<String>, String) {
     match c {
         Cross::Void => (Vec::new(), String::new()),
-        Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => (
+        Cross::I32
+        | Cross::I64
+        | Cross::U8
+        | Cross::U16
+        | Cross::U32
+        | Cross::F32
+        | Cross::F64
+        | Cross::Bool => (
             vec![format!("out: *mut {}", rust_c_member_type(c))],
             "*out = v;".into(),
         ),
@@ -1053,6 +1127,10 @@ fn c_value_type_rust(c: &Cross) -> String {
     match c {
         Cross::I32 | Cross::Enum(_) => "i32".into(),
         Cross::I64 => "i64".into(),
+        Cross::U8 => "u8".into(),
+        Cross::U16 => "u16".into(),
+        Cross::U32 => "u32".into(),
+        Cross::F32 => "f32".into(),
         Cross::F64 => "f64".into(),
         Cross::Bool => "bool".into(),
         Cross::Str | Cross::StrEnum | Cross::Union => "*mut c_char".into(),
@@ -1067,7 +1145,14 @@ fn c_value_type_rust(c: &Cross) -> String {
 /// The write statement for a stream item (`v` in scope, `item_out` the target).
 fn stream_item_write(c: &Cross) -> String {
     match c {
-        Cross::I32 | Cross::I64 | Cross::F64 | Cross::Bool => "*item_out = v;".into(),
+        Cross::I32
+        | Cross::I64
+        | Cross::U8
+        | Cross::U16
+        | Cross::U32
+        | Cross::F32
+        | Cross::F64
+        | Cross::Bool => "*item_out = v;".into(),
         Cross::Enum(_) => "*item_out = v as i32;".into(),
         Cross::Str | Cross::StrEnum | Cross::Union => "*item_out = fl_str_out(v);".into(),
         Cross::Bytes => "*item_out = fl_bytes_out(v);".into(),
@@ -1177,6 +1262,10 @@ fn emit_unary(
             }
             Cross::I32
             | Cross::I64
+            | Cross::U8
+            | Cross::U16
+            | Cross::U32
+            | Cross::F32
             | Cross::F64
             | Cross::Bool
             | Cross::Enum(_)
@@ -1248,6 +1337,10 @@ fn infallible_scalar_return(c: &Cross) -> (String, String) {
     match c {
         Cross::I32 => ("i32".into(), "v".into()),
         Cross::I64 => ("i64".into(), "v".into()),
+        Cross::U8 => ("u8".into(), "v".into()),
+        Cross::U16 => ("u16".into(), "v".into()),
+        Cross::U32 => ("u32".into(), "v".into()),
+        Cross::F32 => ("f32".into(), "v".into()),
         Cross::F64 => ("f64".into(), "v".into()),
         Cross::Bool => ("bool".into(), "v".into()),
         Cross::Enum(_) => ("i32".into(), "v as i32".into()),

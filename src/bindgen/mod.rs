@@ -364,7 +364,12 @@ fn ty(api: &ApiDoc, t: &ApiType) -> (String, String) {
             "boolean" => ("bool".into(), "boolean".into()),
             "int32" => ("i32".into(), "number".into()),
             "int64" => ("i64".into(), "number".into()),
-            "float64" => ("f64".into(), "number".into()),
+            "uint8" => ("u8".into(), "number".into()),
+            "uint16" => ("u16".into(), "number".into()),
+            "uint32" => ("u32".into(), "number".into()),
+            "float32" => ("f32".into(), "number".into()),
+            // `float` is TypeSpec's f64 alias; both spell an f64 → `number`.
+            "float64" | "float" => ("f64".into(), "number".into()),
             "Json" => ("String".into(), "string".into()), // JSON text payload
             "bytes" => ("Bytes".into(), "Buffer".into()),
             "void" => ("()".into(), "void".into()),

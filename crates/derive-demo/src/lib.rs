@@ -47,6 +47,11 @@ pub mod native;
 /// `{ ok, value } | { ok, error }` envelope, proven in `tests/api_gate.rs`.
 pub mod binary;
 
+/// Regression demo: the unsigned + float scalars (`uint8`/`uint16`/`uint32`/
+/// `float32`/`float64`) that used to fall through bindgen's `ty()` catchall and
+/// emit as `String`. Proven per-backend in `tests/numeric_gate.rs`.
+pub mod numeric;
+
 /// A minimal user record — the scalar-only end-to-end skeleton for the derive
 /// front end.
 #[derive(Entity)]

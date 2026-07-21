@@ -1,0 +1,19 @@
+# Standalone crate — its OWN `[workspace]` table keeps it out of fluessig's
+# default cargo workspace, so a bare `cargo build`/`test`/`clippy` at the repo
+# root is unaffected (mirrors how entl-schema lives in its own repo). Build it
+# explicitly from this directory: `cargo run --bin emit`.
+[workspace]
+
+[package]
+name = "django-demo-schema"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A tiny issue-tracker schema authored with the fluessig Rust derives, to drive the Django/SQLite experiment: FK-in-composite-PK, enums (value-vs-name), a to-many edge, and scalar variety."
+publish = false
+
+[dependencies]
+fluessig-derive = { path = "../../../crates/fluessig-derive" }
+# The root `fluessig` lib is used only by the `dump_sql` helper bin, to render
+# the genuinely fluessig-owned SQLite DDL via `fluessig::sql::ddl`.
+fluessig = { path = "../../.." }

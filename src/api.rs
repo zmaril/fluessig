@@ -373,6 +373,60 @@ fn is_void_return(t: &Box<ApiType>) -> bool {
     matches!(t.as_ref(), ApiType::Scalar(s) if s == "void")
 }
 
+/// The set of interface NAMES whose instances something in the API can hand back —
+/// either the interface carries its own [`Shape::Ctor`] op (a public constructor)
+/// or some op ANYWHERE in the API RETURNS that interface type (a FACTORY op). Such
+/// an interface is CONSTRUCTIBLE: a caller can obtain a live instance, so a
+/// `Shape::Subscription`/method op (whose generated method is `&self`) has a real,
+/// stateful receiver to hang itself on — even when the instance can only ever be
+/// HANDED back by a factory, never `new`-ed directly (pi's `RpcProcessInstance`,
+/// returned by `openRpcStream`, is exactly this case).
+///
+/// Unwrapping rule for the factory branch: a return type is followed through the
+/// TRANSPARENT container types [`ApiType::Nullable`] and [`ApiType::List`] (a `T?`
+/// or `T[]` of an interface still MINTS instances of that interface) down to the
+/// innermost named type; if that is an [`ApiType::Model`] whose `model` names an
+/// interface, that interface is constructible. Interfaces are referenced in type
+/// position as `ApiType::Model { model }`, sharing the name namespace with DTO
+/// models — a `Model` naming a plain DTO simply is not in the interface set and is
+/// ignored. Opaque/union/foreign/scalar/enum/callback returns never name an
+/// interface. The factory op may live on ANY interface, including the target's own.
+fn constructible_interfaces(api: &ApiDoc) -> std::collections::BTreeSet<String> {
+    let iface_names: std::collections::BTreeSet<&str> =
+        api.interfaces.iter().map(|i| i.name.as_str()).collect();
+    let mut set = std::collections::BTreeSet::new();
+    for i in &api.interfaces {
+        // 1. interfaces with their own ctor op (public constructor).
+        if i.ops.iter().any(|o| o.shape == Shape::Ctor) {
+            set.insert(i.name.clone());
+        }
+        // 2. interfaces returned by SOME op anywhere (factory-born).
+        for op in &i.ops {
+            if let Some(name) = returned_interface_name(&op.returns, &iface_names) {
+                set.insert(name);
+            }
+        }
+    }
+    set
+}
+
+/// The interface NAME an op-return type ultimately names, if any: unwrap the
+/// transparent containers [`ApiType::Nullable`] and [`ApiType::List`], then match
+/// the innermost [`ApiType::Model`] against the known interface names. `None` for a
+/// scalar/enum/union/foreign/callback return, or a `Model` naming a DTO rather than
+/// an interface. See [`constructible_interfaces`] for the rationale.
+fn returned_interface_name(
+    ty: &ApiType,
+    ifaces: &std::collections::BTreeSet<&str>,
+) -> Option<String> {
+    match ty {
+        ApiType::Nullable { nullable } => returned_interface_name(nullable, ifaces),
+        ApiType::List { list } => returned_interface_name(list, ifaces),
+        ApiType::Model { model } if ifaces.contains(model.as_str()) => Some(model.clone()),
+        _ => None,
+    }
+}
+
 /// Parse `api.json` (with the same format-version gate as the catalog).
 pub fn load_api(json: &str) -> Result<ApiDoc, String> {
     let api: ApiDoc =
@@ -384,6 +438,11 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
             crate::FORMAT_VERSION
         ));
     }
+    // The set of interfaces something can hand a live instance of — either they
+    // carry their own ctor or a FACTORY op somewhere returns them. A
+    // `Shape::Subscription` op's `&self` method needs such a receiver; computed
+    // once so the per-op check below is a cheap membership test.
+    let constructible = constructible_interfaces(&api);
     // the loader validates: a `@streamError` shape is meaningless off the stream
     // shape (nothing else has a post-start boundary to encode an error into).
     for i in &api.interfaces {
@@ -412,7 +471,11 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
             // A `Shape::Subscription` op REGISTERS a listener and returns a
             // `Subscription` handle whose drop/unsubscribe removes it. It must take
             // exactly ONE callback param (the listener), and — since its method is
-            // `&self` — the interface must be stateful (carry a `Shape::Ctor`).
+            // `&self` — the interface must be CONSTRUCTIBLE: either it carries its
+            // own `Shape::Ctor`, or a FACTORY op somewhere returns it (pi's
+            // `RpcProcessInstance`, handed back by `openRpcStream`, is the latter).
+            // An interface that NOTHING constructs — no ctor and no factory return
+            // anywhere — is still rejected: there is no instance to hang `&self` on.
             if op.shape == Shape::Subscription {
                 let callback_params = op
                     .params
@@ -425,12 +488,13 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
                         i.name, op.name
                     ));
                 }
-                let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
-                if !has_ctor {
+                if !constructible.contains(&i.name) {
                     return Err(format!(
-                        "subscription op `{}.{}` requires a stateful interface (its method is \
-                         `&self`), but `{}` has no ctor op",
-                        i.name, op.name, i.name
+                        "subscription op `{}.{}` requires a constructible interface (its method \
+                         is `&self`), but nothing constructs `{}`: it has no ctor op and no \
+                         factory op (an op returning `{}`, optionally wrapped in nullable/list) \
+                         anywhere in the API",
+                        i.name, op.name, i.name, i.name
                     ));
                 }
             }
@@ -533,6 +597,80 @@ mod tests {
             serde_json::from_str::<ConstValue>("3.5").unwrap(),
             ConstValue::Float(f) if (f - 3.5).abs() < f64::EPSILON
         ));
+    }
+
+    /// Build a two-part api.json for the factory-born subscription tests: a
+    /// ctor-less `Session` carrying an `on_event` subscription op, optionally
+    /// preceded by an `Orchestrator` whose `open` op RETURNS `factory_return` (the
+    /// interface-typed return spelling — e.g. `{"model": "Session"}` or
+    /// `{"nullable": {"model": "Session"}}`). `None` omits the factory entirely, so
+    /// nothing constructs `Session`. Centralizing the doc keeps the three tests from
+    /// each spelling out a near-identical literal.
+    fn subscription_api(factory_return: Option<&str>) -> String {
+        let orchestrator = match factory_return {
+            Some(ret) => format!(
+                r#"{{"name": "Orchestrator", "ops": [
+                  {{"name": "new", "shape": "ctor", "params": [], "returns": "void"}},
+                  {{"name": "open", "shape": "unary", "params": [], "returns": {ret}}}
+                ]}},"#
+            ),
+            None => String::new(),
+        };
+        format!(
+            r#"{{
+              "fluessig": {{"format": 1}},
+              "models": [], "unions": [],
+              "interfaces": [
+                {orchestrator}
+                {{"name": "Session", "ops": [
+                  {{"name": "on_event", "shape": "subscription", "params": [
+                    {{"name": "listener", "type": {{"callback": {{"params": ["int32"]}}}}}}
+                  ], "returns": "void"}}
+                ]}}
+              ]
+            }}"#
+        )
+    }
+
+    /// A `Shape::Subscription` op on a FACTORY-BORN interface — one with NO ctor of
+    /// its own, whose instances are handed back by another op — now loads. Mirrors
+    /// pi's `RpcProcessInstance`: `Orchestrator.open` returns it, so `Session`'s
+    /// `on_event` subscription has a real `&self` receiver even with no public
+    /// constructor.
+    #[test]
+    fn subscription_on_factory_born_interface_loads() {
+        let json = subscription_api(Some(r#"{"model": "Session"}"#));
+        assert!(
+            load_api(&json).is_ok(),
+            "a subscription op on a factory-born (ctor-less but returned) interface loads"
+        );
+    }
+
+    /// The factory return is followed through the transparent `Nullable`/`List`
+    /// containers: pi's `openRpcStream` returns `RpcProcessInstance | undefined`
+    /// (nullable), which still MINTS instances, so the target is constructible.
+    #[test]
+    fn subscription_factory_return_unwraps_nullable() {
+        let json = subscription_api(Some(r#"{"nullable": {"model": "Session"}}"#));
+        assert!(
+            load_api(&json).is_ok(),
+            "a factory op returning `Session?` (nullable) makes Session constructible"
+        );
+    }
+
+    /// A `Shape::Subscription` op on an interface that NOTHING constructs — no ctor
+    /// AND no op anywhere returns it — is STILL rejected: there is no live instance
+    /// to hang the `&self` method on. Keeps the relaxed check honest.
+    #[test]
+    fn subscription_on_unconstructible_interface_is_rejected() {
+        let json = subscription_api(None);
+        let err =
+            load_api(&json).expect_err("subscription on an unconstructible interface rejects");
+        assert!(
+            err.contains("requires a constructible interface")
+                && err.contains("nothing constructs"),
+            "clear unconstructible-interface error, got: {err}"
+        );
     }
 
     /// A `consts` key absent from api.json parses as an empty vec (backward-compat)

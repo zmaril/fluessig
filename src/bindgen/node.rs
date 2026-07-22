@@ -1361,6 +1361,13 @@ pub fn node_binding_with_options(
                     quote_in! { t => $['\r']$(format!("// @manual: {}.{} — hand-written in lib.rs.", i.name, op.name)) };
                     continue;
                 }
+                // A subscription op on a ctor-less (factory-born) interface: its
+                // `&self` registration has no stateless free-function form (see the
+                // shared skip-note). Emit the honest marker instead of broken glue.
+                if op.shape == Shape::Subscription {
+                    quote_in! { t => $['\r']$(super::subscription_factory_skip_note(&i.name, &op.name)) };
+                    continue;
+                }
                 let params: Vec<String> = node_param_sig(api, op)
                     .iter()
                     .map(|(n, r)| format!("{n}: {r}"))

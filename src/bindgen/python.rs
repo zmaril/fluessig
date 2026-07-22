@@ -1122,6 +1122,13 @@ pub fn python_binding_with_options(
                     quote_in! { t => $['\r']$(format!("// @manual: {}.{} — hand-written in lib.rs if offered.", i.name, op.name)) };
                     continue;
                 }
+                // A subscription op on a ctor-less (factory-born) interface has no
+                // stateless free-function form (its `&self` registration needs a
+                // receiver). Emit the honest skip-note instead of broken glue.
+                if op.shape == Shape::Subscription {
+                    quote_in! { t => $['\r']$(super::subscription_factory_skip_note(&i.name, &op.name)) };
+                    continue;
+                }
                 fn_names.push(name.clone());
                 let (signature, fn_params, prelude, args) = py_op_pieces(api, op);
                 let (ret, _) = python_ty(api, opts, &op.returns);

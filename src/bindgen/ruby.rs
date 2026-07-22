@@ -1231,6 +1231,13 @@ pub fn ruby_binding_with_options(
                 if op.shape == Shape::Manual {
                     continue;
                 }
+                // A subscription op on a ctor-less (factory-born) interface has no
+                // stateless singleton form (its `&self` registration needs a
+                // receiver). Emit the honest skip-note instead of broken glue.
+                if op.shape == Shape::Subscription {
+                    quote_in! { t => $['\r']$(super::subscription_factory_skip_note(&i.name, &op.name)) };
+                    continue;
+                }
                 let p = rb_op_pieces(api, op);
                 let (fn_params, arity) = (p.fn_params, p.arity);
                 let prelude = format!("{}{}", p.scan.unwrap_or_default(), p.prelude);

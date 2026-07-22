@@ -373,6 +373,24 @@ pub(super) fn api_uses_callback(api: &ApiDoc) -> bool {
     })
 }
 
+/// The one-line skip-note a backend emits IN PLACE OF lowering a
+/// [`Shape::Subscription`] op on a FACTORY-BORN (ctor-less) interface. Such an
+/// interface has no public constructor — its instances are handed back by a factory
+/// op elsewhere ([`crate::api::load_api`] now accepts this) — but no backend can yet
+/// MINT that stateful handle from the factory op (returning an interface instance as
+/// a live handle is itself unimplemented), so a `&self` listener registration has no
+/// receiver to bind to. Rather than emit a stateless free-function registration that
+/// mismatches the `&self` core-trait method (broken code), the backend emits this
+/// honest marker — mirroring cpp/wasm, which already defer subscription lowering.
+/// The `//` line-comment form suits every backend's Rust output. Full factory-born
+/// handle lowering is the documented follow-up.
+pub(super) fn subscription_factory_skip_note(iface: &str, op: &str) -> String {
+    format!(
+        "// subscription `{iface}.{op}`: factory-born (ctor-less) interface — a \
+         stateful handle minted from its factory op is not lowered yet; deferred."
+    )
+}
+
 /// The `(return_type, unsub_expr, ok_expr)` a `Shape::Subscription` op method
 /// splices into its template, keyed on `infallible`: a FALLIBLE op throws on `Err`
 /// (`{result_ty}<Subscription>`, `{call}.map_err(err)?`, `Ok(Subscription{..})`), an

@@ -1,18 +1,57 @@
 # Class-handle return IR — design note (Feature 2)
 
-Status: **design-first (draft).** No lowering is implemented on this branch — only
-this note. Implementation follows once the shapes below are agreed with the hinzu
-converter author.
+Status: **implemented (draft PR).** node + python fully lower the factory-return
+mint; cpp/java/ruby/php/wasm emit honest skip-notes (follow-ups). See
+`tests/class_handle_return.rs`.
 
 ## Problem
 
-pi's `openRpcStream` op RETURNS an inline object of async methods —
-`{ handleRpc(...): Promise<...>; handleUiResponse(...); close(): void } | undefined`
-— i.e. a **handle**. Today fluessig's op-layer IR (`src/api.rs`) has no way to
-spell "this op returns a typed handle to a generated interface", so such a return
-degrades to the `Json` carrier (`ty()` in `src/bindgen/mod.rs:433` maps an
-unrecognised scalar to `String`, and there is no lowering that mints a live handle
-from an op return). The typed methods on that object vanish.
+pi hands back **method-bearing handles** from ops, which today's op-layer IR
+(`src/api.rs`) has no way to spell as "this op returns a typed handle to a generated
+interface" — so such a return degrades to the `Json` carrier (`ty()` in
+`src/bindgen/mod.rs:433` maps an unrecognised scalar to `String`, and there is no
+lowering that mints a live handle from an op return). The typed methods on that
+object vanish.
+
+### The two handles (they are DIFFERENT — do not conflate)
+
+An earlier draft of this note conflated two distinct handles. They are not the same:
+
+- **Handle 1 — the NAMED `RpcProcessInstance`.** Returned by the free function
+  `createRpcProcessInstance` (which returns a bare `RpcProcessInstance`, not
+  wrapped). Its method set is exactly six:
+  - `onEvent` — subscription (listener callback → `void`; unsubscribe synthesized)
+  - `onExit` — subscription
+  - `setUiRequestHandler` — optional `Callback` param → `void`
+  - `handleUiResponse` — `RpcExtensionUIResponse` → `void` (sync unary)
+  - `send` — **async** unary, `RpcCommand` → `RpcResponse`
+  - `dispose` — **async** unary → `void`
+
+  It does **not** have `handleRpc`/`close` — those belong to Handle 2. Note the
+  method spread: async unary ops (`send`, `dispose`) sit alongside sync ops and
+  subscriptions, so the handle-method lowering must cover async-unary-returning-a-
+  value **and** async-unary-void, not just sync. (`RpcCommand`/`RpcResponse` are
+  cross-package types that resolve to real models only with `--context`, else
+  degrade to bare `Json`; the lowering just handles whatever `ApiType` the
+  param/return is.)
+
+- **Handle 2 — the ANONYMOUS `openRpcStream` return.** An inline object of methods
+  with **no name** — `{ handleRpc(cmd: RpcCommand): Promise<RpcResponse>;
+  handleUiResponse(resp): void; close(): void }`. Because it is anonymous, the
+  converter will MINT a name for it in a **later, separate converter PR**; fluessig
+  only ever sees a *declared* interface plus a `Model` ref to it. (There are in fact
+  TWO such anonymous shapes on the supervisor/handler split — supervisor's
+  `{ handleRpc, handleUiResponse, close }` vs src/handler's `{ handleRequest, close }`
+  — so the later anonymous-mint converter PR will produce TWO distinct interfaces.
+  Out of scope here.)
+
+**fluessig's lowering is the general case** — "an op returns `{"model": <declared
+interface name>}` → a typed handle". Whether that interface name was the source's
+own (`RpcProcessInstance`) or converter-minted (Handle 2, later) is entirely out of
+fluessig's concern: it lowers whatever declared interface a `Model` ref names. The
+**named** case (`createRpcProcessInstance`) is delivered first (converter-side +3:
+`createRpcProcessInstance`, `onEvent`, `onExit`); the **anonymous-mint** case
+follows in its own converter PR.
 
 We want: **an op returning an object-of-methods becomes a typed handle reference
 to a generated interface**, reusing the existing handle-class machinery that every
@@ -177,32 +216,44 @@ only **wraps** it into the handle class.
 
 ### 1. api.json declaration (reuse `Model` + the interface set; no new IR field)
 
-- **The returned interface** is an ordinary `ApiInterface` with method ops and **no
-  `Shape::Ctor` op** (factory-born), identical to Feature 1's factory-born
-  interfaces. Example:
+- **The returned interface** (Handle 1, the named `RpcProcessInstance`) is an
+  ordinary `ApiInterface` with method ops and **no `Shape::Ctor` op** (factory-born),
+  identical to Feature 1's factory-born interfaces. Its real methods are the six
+  listed under "The two handles" — a subscription (`onEvent`/`onExit`), an async
+  unary returning a value (`send`), an async unary void (`dispose`), and sync ops
+  (`handleUiResponse`, `setUiRequestHandler`). Abridged:
   ```json
   {
     "name": "RpcProcessInstance",
     "ops": [
-      { "name": "handleRpc", "shape": "unary", "async": true,
-        "params": [ { "name": "req", "type": "Json" } ],
+      { "name": "onEvent", "shape": "subscription",
+        "params": [ { "name": "listener", "type": { "callback": { "params": ["Json"] } } } ],
+        "returns": "void" },
+      { "name": "send", "shape": "unary", "async": true,
+        "params": [ { "name": "cmd", "type": "Json" } ],
         "returns": "Json" },
-      { "name": "close", "shape": "unary", "infallible": true,
-        "params": [], "returns": "void" }
+      { "name": "dispose", "shape": "unary", "async": true,
+        "params": [], "returns": "void" },
+      { "name": "handleUiResponse", "shape": "unary",
+        "params": [ { "name": "resp", "type": "Json" } ], "returns": "void" }
     ]
   }
   ```
+  (`Json` stands in for the cross-package `RpcCommand`/`RpcResponse`/
+  `RpcExtensionUIResponse` a no-context build degrades to.)
 - **The factory op** references it with the **same** `ApiType::Model` used
-  everywhere — no new vocabulary:
+  everywhere — no new vocabulary. The named case delivered first is the free
+  function `createRpcProcessInstance` returning a **bare** `RpcProcessInstance`:
   ```json
   {
-    "name": "openRpcStream", "shape": "unary",
+    "name": "createRpcProcessInstance", "shape": "unary",
     "params": [ { "name": "instanceId", "type": "string" } ],
-    "returns": { "nullable": { "model": "RpcProcessInstance" } }
+    "returns": { "model": "RpcProcessInstance" }
   }
   ```
-  (pi's `openRpcStream` returns `... | undefined`, hence the `nullable` wrapper; a
-  non-optional factory is the bare `{"model":"RpcProcessInstance"}`.)
+  A factory that returns `... | undefined` (e.g. a future `openRpcStream`-shaped op
+  on Handle 2) carries the `nullable` wrapper — `{ "nullable": { "model": "…" } }` —
+  and a list factory the `list` wrapper; the loader/backends unwrap both.
 
 - **Decision: no new IR field is required.** Reusing `ApiType::Model{model}` plus
   the interface-name set (Feature 1's `returned_interface_name`, which already

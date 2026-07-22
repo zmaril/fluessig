@@ -735,8 +735,13 @@ pub fn python_binding_with_options(
     }
 
     // ── per-interface surface ──
+    // A CONSTRUCTIBLE interface (its own ctor OR a factory op somewhere returns it)
+    // gets a `#[pyclass]` handle holding `Arc<Impl>`; a factory-born (ctor-less) one
+    // omits the `#[new]` constructor (minted only by a factory op's return). Every
+    // non-constructible interface stays stateless module-level free functions.
+    let constructible = crate::api::constructible_interfaces(api);
     for i in &api.interfaces {
-        let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
+        let stateful = constructible.contains(&i.name);
         let trait_name = format!("{}Core", i.name);
         let impl_path = format!("crate::core_impl::{}Impl", i.name);
 
@@ -983,7 +988,7 @@ pub fn python_binding_with_options(
             }
         }
 
-        if has_ctor {
+        if stateful {
             let mut methods: rust::Tokens = quote!();
             for op in &i.ops {
                 let name = snake(&op.name);
@@ -1036,7 +1041,25 @@ pub fn python_binding_with_options(
                         // `with_gil`, so the core call runs inline. A callback-free
                         // op keeps the historical GIL-releasing `py.detach` body.
                         let has_cb = py_op_has_callback(op);
-                        if op.infallible {
+                        if let Some((mret, mbody)) = super::interface_mint(
+                            api,
+                            op,
+                            "PyResult",
+                            &format!("self.core.{name}({args})"),
+                            op.infallible,
+                        ) {
+                            // A FACTORY op MINTS the handle from the core-returned
+                            // `Arc<Impl>` — `Ok({Iface} { core: … })`. A cheap wrap, so
+                            // it runs inline (no `py.detach`, like the callback path).
+                            quote_in! { methods =>
+                                $['\r']
+                                #[pyo3(signature = ($(&signature)))]
+                                fn $(&name)(&self, py: Python<$("'_")>, $(&fn_params)) -> $(&mret) {
+                                    $prelude
+                                    $(&mbody)
+                                }
+                            }
+                        } else if op.infallible {
                             if has_cb {
                                 quote_in! { methods =>
                                     $['\r']
@@ -1182,7 +1205,25 @@ pub fn python_binding_with_options(
                 // no `py.detach`. A callback-free op keeps the historical
                 // GIL-releasing body byte-identical.
                 let has_cb = py_op_has_callback(op);
-                if op.infallible && has_cb {
+                if let Some((mret, mbody)) = super::interface_mint(
+                    api,
+                    op,
+                    "PyResult",
+                    &format!("<{impl_path} as {trait_name}>::{name}({args})"),
+                    op.infallible,
+                ) {
+                    // A FACTORY free function (`createRpcProcessInstance`) MINTS the
+                    // handle from the core-returned `Arc<Impl>`, inline (no `py.detach`).
+                    quote_in! { t =>
+                        $['\r']
+                        #[pyo3(signature = ($(&signature)))]
+                        fn $(&name)(py: Python<$("'_")>, $(&fn_params)) -> $(&mret) {
+                            $prelude
+                            $(&mbody)
+                        }
+                        $['\n']
+                    };
+                } else if op.infallible && has_cb {
                     quote_in! { t =>
                         $['\r']
                         #[pyo3(signature = ($(&signature)))]

@@ -757,6 +757,17 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         let trait_name = format!("{}Core", i.name);
         let impl_path = format!("crate::core_impl::{}Impl", i.name);
 
+        // A FACTORY-BORN (ctor-less) interface's handle is minted only from a factory
+        // op's return — node/python only today — so java's JNI glue binds none of its
+        // methods yet; emit the honest interface-level skip-note (deferred).
+        if super::is_factory_born(api, &i.name) {
+            body.push_str(&format!(
+                "{}\n\n",
+                super::factory_born_interface_skip_note(&i.name)
+            ));
+            continue;
+        }
+
         // stream cursor poll/free fns — one pair per stream op.
         for op in i.ops.iter().filter(|o| o.shape == Shape::Stream) {
             let class = pascal(&op.name);
@@ -814,6 +825,16 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
 
         // unary + stream-open methods.
         for op in &i.ops {
+            // A FACTORY op (returns an interface handle): the handle mint is
+            // node/python only today, so skip-note rather than marshal the core's
+            // `Arc<Impl>` across JNI.
+            if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                body.push_str(&format!(
+                    "{}\n\n",
+                    super::interface_return_skip_note(&i.name, &op.name, tgt.iface())
+                ));
+                continue;
+            }
             match op.shape {
                 // Ctor is emitted above; a @manual op is hand-written outside the
                 // generated surface.
@@ -1141,6 +1162,12 @@ pub fn java_sources_with(
 
 /// The Java class for one interface: `native` declarations + public wrappers.
 fn java_interface_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
+    // A FACTORY-BORN (ctor-less) interface's handle is minted only from a factory
+    // op's return — node/python only today — so java emits no class body for it yet;
+    // the file carries the honest skip-note (deferred).
+    if super::is_factory_born(api, &i.name) {
+        return format!("{}\n", super::factory_born_interface_skip_note(&i.name));
+    }
     let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
     let mut needs_future = false;
     let mut needs_list = false;
@@ -1183,6 +1210,16 @@ fn java_interface_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
     }
 
     for op in &i.ops {
+        // A FACTORY op (returns an interface handle): the handle mint is node/python
+        // only today, so skip-note rather than emit a Java method returning a handle
+        // this backend cannot build.
+        if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+            methods.push_str(&format!(
+                "    {}\n\n",
+                super::interface_return_skip_note(&i.name, &op.name, tgt.iface())
+            ));
+            continue;
+        }
         match op.shape {
             Shape::Ctor => {}
             Shape::Manual => {

@@ -45,15 +45,6 @@ fn structured_union<'a>(api: &'a ApiDoc, name: &str) -> Option<&'a ApiUnion> {
     })
 }
 
-/// napi's `Either` family name for an arity: 2 → `Either`, 3..=26 → `Either{n}`.
-fn either_name(n: usize) -> String {
-    if n == 2 {
-        "Either".to_string()
-    } else {
-        format!("Either{n}")
-    }
-}
-
 /// The exact set of `Either{N}` arities the structured projection will emit, so
 /// the prelude imports precisely those (napi's 2-arity is `Either`, 3..=26 are
 /// `Either3`..`Either26`). Importing an arity that never appears would trip a

@@ -309,6 +309,17 @@ fn note_line(note: Option<&str>) -> String {
     note.map(|n| format!("//! {n}\n")).unwrap_or_default()
 }
 
+/// napi's `Either` family name for an arity: 2 → `Either`, 3..=26 → `Either{n}`.
+/// Hoisted here (from `node`) so `node.rs` stays under the file-size cap; still
+/// napi-specific, but colocated with the other shared name helpers.
+fn either_name(n: usize) -> String {
+    if n == 2 {
+        "Either".to_string()
+    } else {
+        format!("Either{n}")
+    }
+}
+
 /// `changes` → `Changes` (stream class names, task names).
 fn pascal(s: &str) -> String {
     let sn = snake(s);

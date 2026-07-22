@@ -821,6 +821,15 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                 // A subscription op REGISTERS the listener (its one callback param,
                 // wrapped into the uniform `Box<dyn Fn>`) and hands Java an opaque
                 // `long` Subscription handle owning the core's unsubscribe closure.
+                // On a ctor-less (factory-born) interface there is no stateful handle
+                // to register against yet, so emit the honest skip-note instead of a
+                // static JNI call that mismatches the `&self` core method.
+                Shape::Subscription if !has_ctor => {
+                    body.push_str(&format!(
+                        "{}\n\n",
+                        super::subscription_factory_skip_note(&i.name, &op.name)
+                    ));
+                }
                 Shape::Subscription => {
                     super::java_callback::emit_subscription_jni(
                         api,
@@ -1180,6 +1189,16 @@ fn java_interface_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
                 methods.push_str(&format!(
                     "    // @manual: {}.{} — hand-written outside the generated surface.\n\n",
                     i.name, op.name
+                ));
+            }
+            // A subscription op on a ctor-less (factory-born) interface: no stateful
+            // handle to register against yet — emit the honest skip-note (its JNI
+            // counterpart is likewise deferred) instead of a static method that
+            // mismatches the `&self` core registration.
+            Shape::Subscription if !has_ctor => {
+                methods.push_str(&format!(
+                    "    {}\n\n",
+                    super::subscription_factory_skip_note(&i.name, &op.name)
                 ));
             }
             // A subscription op: a `native<Op>` returning the opaque handle `long`,

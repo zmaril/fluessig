@@ -45,15 +45,6 @@ fn structured_union<'a>(api: &'a ApiDoc, name: &str) -> Option<&'a ApiUnion> {
     })
 }
 
-/// napi's `Either` family name for an arity: 2 → `Either`, 3..=26 → `Either{n}`.
-fn either_name(n: usize) -> String {
-    if n == 2 {
-        "Either".to_string()
-    } else {
-        format!("Either{n}")
-    }
-}
-
 /// The exact set of `Either{N}` arities the structured projection will emit, so
 /// the prelude imports precisely those (napi's 2-arity is `Either`, 3..=26 are
 /// `Either3`..`Either26`). Importing an arity that never appears would trip a
@@ -1372,6 +1363,13 @@ pub fn node_binding_with_options(
                 let name = snake(&op.name);
                 if op.shape == Shape::Manual {
                     quote_in! { t => $['\r']$(format!("// @manual: {}.{} — hand-written in lib.rs.", i.name, op.name)) };
+                    continue;
+                }
+                // A subscription op on a ctor-less (factory-born) interface: its
+                // `&self` registration has no stateless free-function form (see the
+                // shared skip-note). Emit the honest marker instead of broken glue.
+                if op.shape == Shape::Subscription {
+                    quote_in! { t => $['\r']$(super::subscription_factory_skip_note(&i.name, &op.name)) };
                     continue;
                 }
                 let params: Vec<String> = node_param_sig(api, op)

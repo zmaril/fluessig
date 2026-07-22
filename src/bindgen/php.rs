@@ -449,13 +449,19 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                         quote_in! { methods => $['\r']$(format!("/// {line}")) };
                     }
                 }
+                // A subscription op on a ctor-less (factory-born) interface has no
+                // stateless static-method form (its `&self` registration needs a
+                // receiver). Emit the honest skip-note instead of broken glue.
+                if op.shape == Shape::Subscription {
+                    quote_in! { methods => $['\r']$(super::subscription_factory_skip_note(&i.name, &op.name)) };
+                    continue;
+                }
                 quote_in! { methods => $['\r']$(php_sig_note(&i.name, op)) };
                 // A callback param crosses in as a callable `&Zval`; the conv
                 // prelude wraps it into the uniform core `Box<dyn Fn>` (and forces
-                // the `PhpResult` throw seam, since the conv marshals via `?`). A
-                // stateless subscription op is unreachable (the loader requires a
-                // subscription op's interface to be stateful), so only Ctor/Unary/
-                // Stream land here.
+                // the `PhpResult` throw seam, since the conv marshals via `?`). Only
+                // Ctor/Unary/Stream reach here — a subscription op on a factory-born
+                // interface is skip-noted above (deferred).
                 let sig = super::php_callback::php_param_sig(api, op);
                 let ps = sig
                     .iter()

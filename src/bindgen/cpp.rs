@@ -1055,6 +1055,12 @@ fn rust_out(c: &Cross) -> (Vec<String>, String) {
 // ── per-interface emission ───────────────────────────────────────────────────
 
 fn emit_interface(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
+    // A FACTORY-BORN (ctor-less) interface's handle is minted only from a factory
+    // op's return — node/python only today — so cpp binds none of its methods yet;
+    // emit the honest interface-level skip-note (deferred).
+    if super::is_factory_born(api, &i.name) {
+        return format!("{}\n", super::factory_born_interface_skip_note(&i.name));
+    }
     let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
     let trait_name = format!("{}Core", i.name);
     let impl_path = format!("crate::core_impl::{}Impl", i.name);
@@ -1079,6 +1085,17 @@ fn emit_interface(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
             i.name
         ));
         for op in &i.ops {
+            // A FACTORY op (returns an interface handle): the mint is node/python only
+            // today — skip-note rather than emit glue returning a handle cpp cannot build.
+            if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                s.push_str(&super::interface_return_skip_note(
+                    &i.name,
+                    &op.name,
+                    tgt.iface(),
+                ));
+                s.push('\n');
+                continue;
+            }
             match op.shape {
                 Shape::Ctor => s.push_str(&emit_ctor(api, &i.name, op, &impl_path, &trait_name)),
                 Shape::Unary => {
@@ -1107,6 +1124,17 @@ fn emit_interface(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
         // stateless: free functions (static calls through the core trait)
         s.push_str(&format!("// Stateless `{0}` — free functions.\n", i.name));
         for op in &i.ops {
+            // A FACTORY op (returns an interface handle): the mint is node/python only
+            // today — skip-note rather than marshal the core's handle as a value.
+            if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                s.push_str(&super::interface_return_skip_note(
+                    &i.name,
+                    &op.name,
+                    tgt.iface(),
+                ));
+                s.push('\n');
+                continue;
+            }
             match op.shape {
                 Shape::Unary => s.push_str(&emit_unary(
                     api,

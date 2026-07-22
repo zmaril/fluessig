@@ -391,7 +391,7 @@ fn is_void_return(t: &Box<ApiType>) -> bool {
 /// models — a `Model` naming a plain DTO simply is not in the interface set and is
 /// ignored. Opaque/union/foreign/scalar/enum/callback returns never name an
 /// interface. The factory op may live on ANY interface, including the target's own.
-fn constructible_interfaces(api: &ApiDoc) -> std::collections::BTreeSet<String> {
+pub(crate) fn constructible_interfaces(api: &ApiDoc) -> std::collections::BTreeSet<String> {
     let iface_names: std::collections::BTreeSet<&str> =
         api.interfaces.iter().map(|i| i.name.as_str()).collect();
     let mut set = std::collections::BTreeSet::new();
@@ -427,6 +427,62 @@ fn returned_interface_name(
     }
 }
 
+/// The transparent wrapper an interface-typed op RETURN sits behind, carrying the
+/// declared interface NAME — what a backend needs to MINT the handle(s) from the
+/// core-returned `Arc<crate::core_impl::{name}Impl>`. Only the single-level
+/// `Nullable`/`List` shapes (and the bare `Model`) are recognised as lowerable
+/// factories; deeper nesting still counts for constructibility (via the recursive
+/// [`returned_interface_name`]) but is not a first-cut mint site.
+pub(crate) enum InterfaceReturn {
+    /// `{"model": "Iface"}` → core returns `Arc<Impl>`, wrap into one handle.
+    Bare(String),
+    /// `{"nullable": {"model": "Iface"}}` → core returns `Option<Arc<Impl>>`.
+    Nullable(String),
+    /// `{"list": {"model": "Iface"}}` → core returns `Vec<Arc<Impl>>`.
+    List(String),
+}
+
+impl InterfaceReturn {
+    /// The named interface, regardless of wrapper.
+    pub(crate) fn iface(&self) -> &str {
+        match self {
+            InterfaceReturn::Bare(n) | InterfaceReturn::Nullable(n) | InterfaceReturn::List(n) => n,
+        }
+    }
+}
+
+/// If `ty` (an op RETURN) names a DECLARED interface — bare or behind a single
+/// transparent `Nullable`/`List` — the interface plus its wrapper, so a backend can
+/// lower the FACTORY mint (`Ok({Iface} { core: … })`, `Option`/`Vec`-mapped). `None`
+/// for a non-interface return or a `Model` naming a plain DTO. See [`InterfaceReturn`].
+pub(crate) fn returned_interface(api: &ApiDoc, ty: &ApiType) -> Option<InterfaceReturn> {
+    let ifaces: std::collections::BTreeSet<&str> =
+        api.interfaces.iter().map(|i| i.name.as_str()).collect();
+    match ty {
+        ApiType::Nullable { nullable } => {
+            returned_interface_name(nullable, &ifaces).map(InterfaceReturn::Nullable)
+        }
+        ApiType::List { list } => returned_interface_name(list, &ifaces).map(InterfaceReturn::List),
+        ApiType::Model { model } if ifaces.contains(model.as_str()) => {
+            Some(InterfaceReturn::Bare(model.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The innermost `Model` NAME an op-return type references, following the
+/// transparent `Nullable`/`List` containers — regardless of whether it names an
+/// interface or a DTO. Used by the loader to reject a RETURN whose `Model` names
+/// neither a declared model nor a declared interface (a dangling reference).
+fn returned_model_name(ty: &ApiType) -> Option<&str> {
+    match ty {
+        ApiType::Nullable { nullable } => returned_model_name(nullable),
+        ApiType::List { list } => returned_model_name(list),
+        ApiType::Model { model } => Some(model.as_str()),
+        _ => None,
+    }
+}
+
 /// Parse `api.json` (with the same format-version gate as the catalog).
 pub fn load_api(json: &str) -> Result<ApiDoc, String> {
     let api: ApiDoc =
@@ -443,10 +499,33 @@ pub fn load_api(json: &str) -> Result<ApiDoc, String> {
     // `Shape::Subscription` op's `&self` method needs such a receiver; computed
     // once so the per-op check below is a cheap membership test.
     let constructible = constructible_interfaces(&api);
+    // The names a return-position `Model` may legitimately name: a declared DTO
+    // (`models`) OR a declared interface (an interface-typed return is a FACTORY op
+    // that mints a handle — see [`returned_interface`]). A `Model` naming neither is
+    // a dangling reference and is rejected below rather than silently degrading to a
+    // `Json`/`String` carrier.
+    let declared_models: std::collections::BTreeSet<&str> =
+        api.models.iter().map(|m| m.name.as_str()).collect();
+    let declared_ifaces: std::collections::BTreeSet<&str> =
+        api.interfaces.iter().map(|i| i.name.as_str()).collect();
     // the loader validates: a `@streamError` shape is meaningless off the stream
     // shape (nothing else has a post-start boundary to encode an error into).
     for i in &api.interfaces {
         for op in &i.ops {
+            // An op RETURN whose innermost `Model` names neither a declared model
+            // nor a declared interface is a dangling reference (e.g. a factory op
+            // pointing at a `{"model": "Ghost"}` that was never declared). Reject it
+            // rather than lower a handle mint / DTO marshal against a type that does
+            // not exist.
+            if let Some(name) = returned_model_name(&op.returns) {
+                if !declared_models.contains(name) && !declared_ifaces.contains(name) {
+                    return Err(format!(
+                        "op `{}.{}` returns `{{\"model\": \"{}\"}}`, but `{}` is neither a \
+                         declared model nor a declared interface",
+                        i.name, op.name, name, name
+                    ));
+                }
+            }
             if op.stream_error.is_some() && op.shape != Shape::Stream {
                 return Err(format!(
                     "op `{}.{}`: stream_error (@streamError) is only valid on a stream op, but its shape is {:?}",
@@ -670,6 +749,22 @@ mod tests {
             err.contains("requires a constructible interface")
                 && err.contains("nothing constructs"),
             "clear unconstructible-interface error, got: {err}"
+        );
+    }
+
+    /// An op RETURN whose `Model` names neither a declared model nor a declared
+    /// interface is a dangling reference and is REJECTED — the loader does not
+    /// silently accept `{"model": "Ghost"}` and degrade it to a `Json` carrier.
+    /// Reuses the shared [`subscription_api`] builder (the `open` factory op simply
+    /// points at an undeclared `Ghost`).
+    #[test]
+    fn op_returning_undeclared_model_is_rejected() {
+        let json = subscription_api(Some(r#"{"model": "Ghost"}"#));
+        let err = load_api(&json).expect_err("a return naming an undeclared model rejects");
+        assert!(
+            err.contains("neither a declared model nor a declared interface")
+                && err.contains("Ghost"),
+            "clear dangling-model error, got: {err}"
         );
     }
 

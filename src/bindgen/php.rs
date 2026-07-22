@@ -258,6 +258,14 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
         let trait_name = format!("{}Core", i.name);
         let impl_path = format!("crate::core_impl::{}Impl", i.name);
 
+        // A FACTORY-BORN (ctor-less) interface's handle is minted only from a factory
+        // op's return — node/python only today — so php binds none of its methods
+        // yet; emit the honest interface-level skip-note and move on (deferred).
+        if super::is_factory_born(api, &i.name) {
+            quote_in! { t => $['\r']$(super::factory_born_interface_skip_note(&i.name)) };
+            continue;
+        }
+
         // stream cursor classes — one `#[php_class]` per stream op, `next()`
         // returning the next item or null (PHP calls it until it resolves null).
         for op in i.ops.iter().filter(|o| o.shape == Shape::Stream) {
@@ -304,6 +312,13 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                         }
                     }
                     quote_in! { methods => $['\r']$(php_sig_note(&i.name, op)) };
+                }
+                // A FACTORY op (returns an interface handle): php cannot marshal the
+                // core's `Arc<Impl>` as a value — the handle mint is node/python only
+                // today. Skip-note honestly instead of broken glue.
+                if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                    quote_in! { methods => $['\r']$(super::interface_return_skip_note(&i.name, &op.name, tgt.iface())) };
+                    continue;
                 }
                 // A callback param crosses in as a raw callable `&Zval` (not the
                 // uniform core box); the conv prelude wraps it. Every other param
@@ -454,6 +469,12 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
                 // receiver). Emit the honest skip-note instead of broken glue.
                 if op.shape == Shape::Subscription {
                     quote_in! { methods => $['\r']$(super::subscription_factory_skip_note(&i.name, &op.name)) };
+                    continue;
+                }
+                // A FACTORY op (returns an interface handle): the handle mint is
+                // node/python only today, so skip-note rather than marshal `Arc<Impl>`.
+                if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                    quote_in! { methods => $['\r']$(super::interface_return_skip_note(&i.name, &op.name, tgt.iface())) };
                     continue;
                 }
                 quote_in! { methods => $['\r']$(php_sig_note(&i.name, op)) };

@@ -678,7 +678,7 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
         if is_string_enum(api, name) {
             continue;
         }
-        let vs: Vec<String> = variants.iter().map(|v| pascal(&v.name)).collect();
+        let vs: Vec<String> = variants.iter().map(|v| variant_ident(&v.name)).collect();
         let expect = variants
             .iter()
             .map(|v| variant_token(v, LANG))
@@ -690,7 +690,7 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
                 format!(
                     "            {:?} => Ok(Self::{}),\n",
                     variant_token(v, LANG),
-                    pascal(&v.name)
+                    variant_ident(&v.name)
                 )
             })
             .collect();
@@ -699,7 +699,7 @@ pub fn java_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>)
             .map(|v| {
                 format!(
                     "            Self::{} => {:?},\n",
-                    pascal(&v.name),
+                    variant_ident(&v.name),
                     variant_token(v, LANG)
                 )
             })
@@ -999,7 +999,7 @@ pub fn java_sources_with(
         for v in variants {
             consts.push(format!(
                 "    {}(\"{}\")",
-                pascal(&v.name),
+                variant_ident(&v.name),
                 variant_token(v, LANG)
             ));
         }

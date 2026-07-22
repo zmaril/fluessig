@@ -62,7 +62,7 @@ pub fn rust_core_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&
             // Rust type is needed (and none is referenced).
             continue;
         }
-        let arms: Vec<String> = variants.iter().map(|v| pascal(&v.name)).collect();
+        let arms: Vec<String> = variants.iter().map(|v| variant_ident(&v.name)).collect();
         quote_in! { t =>
             #[derive(Debug, Clone, PartialEq, Eq)]
             pub enum $name {
@@ -265,21 +265,13 @@ fn float_lit(f: f64) -> String {
 }
 
 /// A field name as a valid Rust ident: raw-escape a keyword (`type` → `r#type`),
-/// or suffix the handful of keywords that cannot be raw identifiers.
+/// or suffix the handful of keywords that cannot be raw identifiers. The keyword
+/// set + escaping rule live once in [`super::escape_rust_keyword`] (shared with
+/// the node/python backends); this only adds rust-core's placeholder fallback for
+/// a rendered destructured/odd name.
 fn field_ident(name: &str) -> String {
-    // Keywords that CANNOT be spelled `r#…`.
-    const HARD: &[&str] = &["self", "Self", "super", "crate"];
-    // Reserved words legal as raw identifiers.
-    const RAW: &[&str] = &[
-        "as", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn", "for",
-        "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
-        "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while", "async",
-        "await", "box",
-    ];
-    if HARD.contains(&name) {
-        format!("{name}_")
-    } else if RAW.contains(&name) {
-        format!("r#{name}")
+    if is_rust_keyword(name) {
+        escape_rust_keyword(name)
     } else if is_valid_ident(name) {
         name.to_string()
     } else {

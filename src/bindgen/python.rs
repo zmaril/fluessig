@@ -118,7 +118,17 @@ fn emit_py_union_variants(
             struct_fields.push(quote!($(format!("pub {ident}: String,"))));
             let mut from_fields: Vec<String> = Vec::new();
             from_fields.push(format!("{ident}: {:?}.into(),", v.tag));
-            for f in &m.fields {
+            // The variant model's real fields, minus any that mirror the tag: a
+            // data field named like the discriminant (`type`) is dropped, since
+            // the literal-set tag field below already carries it — otherwise the
+            // pyclass would declare two `r#type` fields (a duplicate-field
+            // compile error) and expose `type` twice.
+            let data_fields: Vec<&crate::api::ApiField> = m
+                .fields
+                .iter()
+                .filter(|f| !field_is_tag(&f.name, &field))
+                .collect();
+            for f in &data_fields {
                 let (r, _) = python_ty(api, opts, &f.ty);
                 let r = if f.nullable {
                     format!("Option<{r}>")
@@ -137,11 +147,11 @@ fn emit_py_union_variants(
                 from_fields.push(format!("{fname}: v.{fname},"));
             }
             // ctor param order: required fields first, then `=None` optionals
-            let ctor_fields: Vec<&crate::api::ApiField> = m
-                .fields
+            let ctor_fields: Vec<&crate::api::ApiField> = data_fields
                 .iter()
+                .copied()
                 .filter(|f| !f.nullable)
-                .chain(m.fields.iter().filter(|f| f.nullable))
+                .chain(data_fields.iter().copied().filter(|f| f.nullable))
                 .collect();
             let sig = ctor_fields
                 .iter()

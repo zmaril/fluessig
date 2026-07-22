@@ -114,6 +114,43 @@ pub(super) fn union_tag_field(u: &ApiUnion, global: &str) -> String {
     u.tag_field.clone().unwrap_or_else(|| global.to_string())
 }
 
+/// Does a variant model's data field collide with the union's discriminant tag
+/// field? The structured projection prepends the tag field to every tagged
+/// struct AND then flattens the variant model's real fields inline; a variant
+/// model that ALSO carries a field of the tag's name (the discriminant mirrored
+/// into the payload — e.g. an `AgentSessionEvent` union tagged on `type` whose
+/// variant models each declare their own `type` field) would otherwise emit the
+/// field TWICE — invalid Rust (a duplicate `r#type` struct field / an
+/// unescaped `type` ident) and a duplicate exposed napi/pyo3 key.
+///
+/// The deterministic, wire-preserving dedupe rule: the TAG WINS. When a data
+/// field's name equals the tag field's name, the backend skips re-emitting that
+/// data field — the literal-set tag field already carries it, embedding the
+/// variant's discriminant (`"started"`, `"stopped"`, …) exactly as the wire
+/// `type` key requires. The exposed field name and its wire value are unchanged;
+/// only the redundant second Rust field is dropped. Compared on the snake-cased
+/// source names so the check is language-neutral (node snake→camel, python
+/// snake, ruby snake all agree on the collision).
+pub(super) fn field_is_tag(field_name: &str, tag_field: &str) -> bool {
+    snake(field_name) == snake(tag_field)
+}
+
+/// The node (napi) rendering of a struct field whose SOURCE name is already
+/// `snake`-cased to `raw`: the raw-escaped Rust ident, paired with the `js_name`
+/// value (if any) that must pin the ORIGINAL exposed JS spelling. An explicit
+/// `pin` (a `bindings[node].name`) always pins; otherwise a keyword field pins
+/// the camelCased original so raw-escaping the ident (`type` → `r#type`) never
+/// changes the JS-visible field name; a plain, unpinned field pins nothing
+/// (`None`) and emits byte-identically to the pre-escape output. Shared by the
+/// DTO-field and structured-union-variant-field paths so both escape identically.
+pub(super) fn napi_field_render(raw: &str, pin: Option<&str>) -> (String, Option<String>) {
+    let ident = escape_rust_keyword(raw);
+    let js = pin
+        .map(str::to_string)
+        .or_else(|| is_rust_keyword(raw).then(|| crate::ir::camel(raw)));
+    (ident, js)
+}
+
 /// Re-exported so backends (and the php backend when `php.rs` lands its own
 /// consumer) reach the pinning type through `crate::bindgen`.
 pub use crate::api::SymbolBinding;

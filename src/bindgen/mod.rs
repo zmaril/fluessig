@@ -309,6 +309,17 @@ fn note_line(note: Option<&str>) -> String {
     note.map(|n| format!("//! {n}\n")).unwrap_or_default()
 }
 
+/// napi's `Either` family name for an arity: 2 → `Either`, 3..=26 → `Either{n}`.
+/// Hoisted here (from `node`) so `node.rs` stays under the file-size cap; still
+/// napi-specific, but colocated with the other shared name helpers.
+fn either_name(n: usize) -> String {
+    if n == 2 {
+        "Either".to_string()
+    } else {
+        format!("Either{n}")
+    }
+}
+
 /// `changes` → `Changes` (stream class names, task names).
 fn pascal(s: &str) -> String {
     let sn = snake(s);
@@ -434,6 +445,24 @@ pub(super) fn api_uses_callback(api: &ApiDoc) -> bool {
             .iter()
             .any(|p| matches!(&p.ty, ApiType::Callback { .. }))
     })
+}
+
+/// The one-line skip-note a backend emits IN PLACE OF lowering a
+/// [`Shape::Subscription`] op on a FACTORY-BORN (ctor-less) interface. Such an
+/// interface has no public constructor — its instances are handed back by a factory
+/// op elsewhere ([`crate::api::load_api`] now accepts this) — but no backend can yet
+/// MINT that stateful handle from the factory op (returning an interface instance as
+/// a live handle is itself unimplemented), so a `&self` listener registration has no
+/// receiver to bind to. Rather than emit a stateless free-function registration that
+/// mismatches the `&self` core-trait method (broken code), the backend emits this
+/// honest marker — mirroring cpp/wasm, which already defer subscription lowering.
+/// The `//` line-comment form suits every backend's Rust output. Full factory-born
+/// handle lowering is the documented follow-up.
+pub(super) fn subscription_factory_skip_note(iface: &str, op: &str) -> String {
+    format!(
+        "// subscription `{iface}.{op}`: factory-born (ctor-less) interface — a \
+         stateful handle minted from its factory op is not lowered yet; deferred."
+    )
 }
 
 /// The `(return_type, unsub_expr, ok_expr)` a `Shape::Subscription` op method

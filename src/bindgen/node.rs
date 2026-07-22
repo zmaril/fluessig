@@ -280,20 +280,32 @@ fn emit_union_variants(t: &mut rust::Tokens, api: &ApiDoc, opts: &NodeOptions) {
             let Some(m) = api.models.iter().find(|m| &m.name == model) else {
                 continue;
             };
-            // struct fields: the tag first, then the variant model's real fields
+            // struct fields: the tag first, then the variant model's real fields.
+            // A data field whose name equals the tag (the discriminant mirrored
+            // into the payload) is skipped — the literal-set tag field below
+            // already carries it, so the struct never emits `type` twice.
             let mut struct_fields: Vec<rust::Tokens> = Vec::new();
             struct_fields.push(quote!($(format!("pub {ident}: String,"))));
             let mut from_fields: Vec<String> = Vec::new();
             from_fields.push(format!("{ident}: {:?}.into(),", v.tag));
             for f in &m.fields {
+                if field_is_tag(&f.name, &field) {
+                    continue;
+                }
                 let (r, _) = node_ty(api, opts, &f.ty);
                 let r = if f.nullable {
                     format!("Option<{r}>")
                 } else {
                     r
                 };
-                let fname = snake(&f.name);
-                struct_fields.push(quote!($(format!("pub {fname}: {r},"))));
+                // Raw-escape a keyword data field (`type` → `r#type`), pinning the
+                // ORIGINAL exposed JS name via `js_name` (shared with the DTO path).
+                let (fname, js) = napi_field_render(&snake(&f.name), None);
+                match js {
+                    Some(js) => struct_fields
+                        .push(quote!($(format!("#[napi(js_name = {js:?})] pub {fname}: {r},")))),
+                    None => struct_fields.push(quote!($(format!("pub {fname}: {r},")))),
+                }
                 from_fields.push(format!("{fname}: v.{fname},"));
             }
             quote_in! { *t =>
@@ -723,23 +735,14 @@ pub fn node_binding_with_options(
                 };
                 // The Rust field ident is `snake(&f.name)`, raw-escaped when it
                 // collides with a Rust keyword (`type` → `r#type`, mirroring
-                // rust-core) so the struct compiles. A `node` pin puts the exact
-                // JS spelling ONLY in a `#[napi(js_name = "…")]` attr, overriding
-                // napi's default snake→camel casing. Un-pinned & non-keyword ⇒ no
-                // attr, byte-identical.
-                let raw = snake(&f.name);
-                let n = escape_rust_keyword(&raw);
-                match pinned_name(&f.bindings, LANG) {
+                // rust-core) so the struct compiles. A `node` pin — or a keyword
+                // escape — puts the exact JS spelling ONLY in a `#[napi(js_name =
+                // "…")]` attr, overriding napi's default snake→camel casing.
+                // Un-pinned & non-keyword ⇒ no attr, byte-identical.
+                let (n, js) =
+                    napi_field_render(&snake(&f.name), pinned_name(&f.bindings, LANG).as_deref());
+                match js {
                     Some(js) => {
-                        let attr = format!("#[napi(js_name = {js:?})]");
-                        quote!($attr pub $n: $r,)
-                    }
-                    // A keyword field carries an explicit `js_name` pinning the
-                    // ORIGINAL exposed name (what napi's default snake→camel would
-                    // have produced), so raw-escaping the Rust ident never changes
-                    // the JS-visible field name.
-                    None if is_rust_keyword(&raw) => {
-                        let js = crate::ir::camel(&raw);
                         let attr = format!("#[napi(js_name = {js:?})]");
                         quote!($attr pub $n: $r,)
                     }

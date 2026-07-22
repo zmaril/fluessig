@@ -317,15 +317,6 @@ fn emit_union_variants(t: &mut rust::Tokens, api: &ApiDoc, opts: &NodeOptions) {
     }
 }
 
-/// The two `#[napi(object)]` arm names of a `#[fluessig(result)]` op's envelope,
-/// keyed off the op name: `readBinaryFile` → (`ReadBinaryFileOk`,
-/// `ReadBinaryFileErr`). The struct emission and the method return type read this
-/// same helper so they always agree.
-fn result_envelope_names(op_name: &str) -> (String, String) {
-    let p = pascal(op_name);
-    (format!("{p}Ok"), format!("{p}Err"))
-}
-
 /// Feature 2 — emit the two `#[napi(object)]` arms of every `#[fluessig(result)]`
 /// op's envelope: `<Op>Ok { ok, value: T }` and `<Op>Err { ok, error: E }`. The
 /// op's handle method / free function returns `Either<<Op>Ok, <Op>Err>`, which
@@ -469,13 +460,20 @@ impl NodePrelude {
             .any(|o| o.shape == Shape::Ctor);
         // an ORDINARY (async-capable) handle holds `Arc<Impl>`; a `single_threaded`
         // handle does NOT (it is thread-confined, `RefCell<Impl>`). So `Arc` is
-        // needed only for a NON-single_threaded ctor interface (or a stream).
-        let ordinary_ctor = api
+        // needed by a NON-single_threaded CONSTRUCTIBLE interface — one carrying a
+        // ctor OR a factory-born (ctor-less) one whose handle class still holds
+        // `Arc<Impl>` and whose factory op's core-return is `Arc<Impl>` — or a stream.
+        let constructible = crate::api::constructible_interfaces(api);
+        let ordinary_handle = api
             .interfaces
             .iter()
-            .filter(|i| !i.single_threaded)
-            .flat_map(|i| &i.ops)
-            .any(|o| o.shape == Shape::Ctor);
+            .any(|i| !i.single_threaded && constructible.contains(&i.name));
+        // a FALLIBLE subscription or factory-mint op throws (`.map_err(err)?`).
+        let throwing_handle_op = api.interfaces.iter().flat_map(|i| &i.ops).any(|o| {
+            !o.infallible
+                && (o.shape == Shape::Subscription
+                    || crate::api::returned_interface(api, &o.returns).is_some())
+        });
         // any `single_threaded` ctor interface → the handle holds `RefCell<Impl>`.
         let single_threaded = api
             .interfaces
@@ -495,11 +493,11 @@ impl NodePrelude {
         Self {
             stream,
             async_task: async_unary || stream,
-            arc: ordinary_ctor || stream,
+            arc: ordinary_handle || stream,
             single_threaded,
             // the ctor of a single_threaded handle still throws (`.map_err(err)?`),
             // so it too needs `Result` + `err` — `ctor` (any ctor) already covers it.
-            result: async_unary || stream || ctor || sync_fallible || arrow,
+            result: async_unary || stream || ctor || sync_fallible || arrow || throwing_handle_op,
             callback: api_uses_callback(api),
         }
     }
@@ -795,8 +793,13 @@ pub fn node_binding_with_options(
     }
 
     // ── per-interface surface ──
+    // A CONSTRUCTIBLE interface (its own ctor OR a factory op somewhere returns it)
+    // gets a handle CLASS holding `Arc<Impl>`; a factory-born (ctor-less) one omits
+    // the public constructor (its instances are minted only by a factory op's
+    // return). Every non-constructible interface stays stateless free functions.
+    let constructible = crate::api::constructible_interfaces(api);
     for i in &api.interfaces {
-        let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
+        let stateful = constructible.contains(&i.name);
         let trait_name = format!("{}Core", i.name);
         let impl_path = format!("crate::core_impl::{}Impl", i.name);
 
@@ -1107,12 +1110,13 @@ pub fn node_binding_with_options(
 
         // unary op tasks — a SYNCHRONOUS op (the default; `#[fluessig(async)]`
         // opts back into async) needs NO off-thread Task (it is emitted as a plain
-        // `#[napi] fn`), so only the async unary ops generate one here.
-        for op in i
-            .ops
-            .iter()
-            .filter(|o| o.shape == Shape::Unary && o.is_async)
-        {
+        // `#[napi] fn`), so only the async unary ops generate one here. An async
+        // FACTORY op is skip-noted (its mint is deferred), so it gets no Task.
+        for op in i.ops.iter().filter(|o| {
+            o.shape == Shape::Unary
+                && o.is_async
+                && crate::api::returned_interface(api, &o.returns).is_none()
+        }) {
             let task = format!("{}Task", pascal(&op.name));
             let name = snake(&op.name);
             let (ret, _) = node_ty(api, opts, &op.returns);
@@ -1125,12 +1129,12 @@ pub fn node_binding_with_options(
                 .map(|(n, _)| format!("self.{n}.clone()"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let call = if has_ctor {
+            let call = if stateful {
                 format!("self.core.{name}({args})")
             } else {
                 format!("<{impl_path} as {trait_name}>::{name}({args})")
             };
-            let core_field = if has_ctor {
+            let core_field = if stateful {
                 format!("core: Arc<{impl_path}>,")
             } else {
                 String::new()
@@ -1155,7 +1159,7 @@ pub fn node_binding_with_options(
             };
         }
 
-        if has_ctor {
+        if stateful {
             // the handle class. A `single_threaded` interface diverges from the
             // ordinary (async-capable) handle: it holds its core by plain
             // ownership inside a `RefCell` — NO `Arc`, NO `Send`/`Sync` — so a
@@ -1228,13 +1232,11 @@ pub fn node_binding_with_options(
                                 }
                             }
                         } else if !op.is_async {
-                            // DEFAULT: a synchronous method — no `AsyncTask`, no
-                            // `Promise`. Infallible (bare-`T` core) passes the value
-                            // straight through; fallible (`Result<T>` core) throws.
-                            // A callback param crosses in as its `ThreadsafeFunction`
-                            // (via `node_binding_param_sig`) and is bridged into the
-                            // core `Box<dyn Fn>` by `wrappers` before the call; a
-                            // callback-free op keeps `ps`/`names` byte-identical.
+                            // DEFAULT: a synchronous method (no `AsyncTask`/`Promise`).
+                            // A FACTORY op MINTS the handle (`Ok({Iface}{core:..})`); an
+                            // infallible op returns the value; a fallible op throws — all
+                            // via `unary_body_parts`. A callback param crosses in as its
+                            // `ThreadsafeFunction` and is bridged by `wrappers` first.
                             let (ret, _) = node_ty(api, opts, &op.returns);
                             let attr = sync_napi_attr(pin);
                             let ps = node_binding_param_sig(api, op)
@@ -1243,23 +1245,25 @@ pub fn node_binding_with_options(
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             let (call_names, wrappers) = node_call_bridge(api, op);
-                            if op.infallible {
-                                quote_in! { methods =>
-                                    $['\r']
-                                    $attr
-                                    pub fn $(&name)(&self, $(&ps)) -> $(&ret) {
-                                        $(&wrappers)$(core_recv).$(&name)($(&call_names))
-                                    }
-                                }
-                            } else {
-                                quote_in! { methods =>
-                                    $['\r']
-                                    $attr
-                                    pub fn $(&name)(&self, $(&ps)) -> Result<$(&ret)> {
-                                        $(&wrappers)$(core_recv).$(&name)($(&call_names)).map_err(err)
-                                    }
+                            let call = format!("{core_recv}.{name}({call_names})");
+                            let (mret, mbody) = super::unary_body_parts(
+                                api,
+                                op,
+                                "Result",
+                                &ret,
+                                &call,
+                                op.infallible,
+                            );
+                            quote_in! { methods =>
+                                $['\r']
+                                $attr
+                                pub fn $(&name)(&self, $(&ps)) -> $(&mret) {
+                                    $(&wrappers)$(&mbody)
                                 }
                             }
+                        } else if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                            // ASYNC factory op (mint wrapped in a Promise) — deferred.
+                            quote_in! { methods => $['\r']$(super::interface_return_skip_note(&i.name, &op.name, tgt.iface())) }
                         } else {
                             let task = format!("{}Task", pascal(&op.name));
                             let attr = with_js_name(
@@ -1409,12 +1413,12 @@ pub fn node_binding_with_options(
                         $['\n']
                     };
                 } else if !op.is_async {
-                    // DEFAULT: a synchronous free function — a direct call into
-                    // the core trait, no `AsyncTask`/`Promise`. Infallible returns
-                    // the value; fallible throws on `Err`. A callback param crosses
-                    // in as its `ThreadsafeFunction` (via `node_binding_param_sig`)
-                    // and is bridged into the core `Box<dyn Fn>` by `wrappers` before
-                    // the call; a callback-free op keeps `ps`/`names` byte-identical.
+                    // DEFAULT: a synchronous free function — a direct call into the
+                    // core trait, no `AsyncTask`/`Promise`. A FACTORY free function
+                    // (`createRpcProcessInstance`) MINTS the handle; an infallible op
+                    // returns the value; a fallible op throws — all via the shared
+                    // `unary_body_parts`. A callback param is bridged into the core
+                    // `Box<dyn Fn>` by `wrappers` before the call.
                     let (ret, _) = node_ty(api, opts, &op.returns);
                     let attr = sync_napi_attr(pin);
                     let ps = node_binding_param_sig(api, op)
@@ -1424,25 +1428,19 @@ pub fn node_binding_with_options(
                         .join(", ");
                     let (call_names, wrappers) = node_call_bridge(api, op);
                     let call = format!("<{impl_path} as {trait_name}>::{name}({call_names})");
-                    if op.infallible {
-                        quote_in! { t =>
-                            $['\r']
-                            $attr
-                            pub fn $(&name)($(&ps)) -> $(&ret) {
-                                $(&wrappers)$(&call)
-                            }
-                            $['\n']
-                        };
-                    } else {
-                        quote_in! { t =>
-                            $['\r']
-                            $attr
-                            pub fn $(&name)($(&ps)) -> Result<$(&ret)> {
-                                $(&wrappers)$(&call).map_err(err)
-                            }
-                            $['\n']
-                        };
-                    }
+                    let (mret, mbody) =
+                        super::unary_body_parts(api, op, "Result", &ret, &call, op.infallible);
+                    quote_in! { t =>
+                        $['\r']
+                        $attr
+                        pub fn $(&name)($(&ps)) -> $(&mret) {
+                            $(&wrappers)$(&mbody)
+                        }
+                        $['\n']
+                    };
+                } else if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                    // ASYNC factory free function — deferred.
+                    quote_in! { t => $['\r']$(super::interface_return_skip_note(&i.name, &op.name, tgt.iface())) };
                 } else {
                     let task = format!("{}Task", pascal(&op.name));
                     let attr = with_js_name(

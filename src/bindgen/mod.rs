@@ -320,6 +320,16 @@ fn either_name(n: usize) -> String {
     }
 }
 
+/// The two `#[napi(object)]` arm names of a `#[fluessig(result)]` op's envelope,
+/// keyed off the op name: `readBinaryFile` → (`ReadBinaryFileOk`,
+/// `ReadBinaryFileErr`). The struct emission and the method return type read this
+/// same helper so they always agree. Hoisted here (from `node`) so `node.rs`
+/// stays under the file-size cap; `node` reaches it via `use super::*`.
+fn result_envelope_names(op_name: &str) -> (String, String) {
+    let p = pascal(op_name);
+    (format!("{p}Ok"), format!("{p}Err"))
+}
+
 /// `changes` → `Changes` (stream class names, task names).
 fn pascal(s: &str) -> String {
     let sn = snake(s);
@@ -491,6 +501,135 @@ pub(super) fn subscription_method_parts(
             format!("Ok({handle})"),
         )
     }
+}
+
+/// The CORE-trait return spelling for an op, given its ordinary `base` spelling: a
+/// FACTORY op — one whose `returns` names a DECLARED interface (bare or behind a
+/// single `Nullable`/`List`) — returns the CORE object
+/// `Arc<crate::core_impl::{Iface}Impl>` (the exact type the handle class holds in
+/// its `core` field), `Option`/`Vec`-wrapped through the container; the binding then
+/// wraps that into the handle class. Every non-factory op keeps `base` unchanged, so
+/// existing goldens are byte-identical (nothing currently returns an interface).
+pub(super) fn core_return_ty(api: &ApiDoc, op: &ApiOp, base: String) -> String {
+    match crate::api::returned_interface(api, &op.returns) {
+        Some(ir) => {
+            let core = format!("Arc<crate::core_impl::{}Impl>", ir.iface());
+            match ir {
+                crate::api::InterfaceReturn::Bare(_) => core,
+                crate::api::InterfaceReturn::Nullable(_) => format!("Option<{core}>"),
+                crate::api::InterfaceReturn::List(_) => format!("Vec<{core}>"),
+            }
+        }
+        None => base,
+    }
+}
+
+/// The `(return_type, body)` a node/python FACTORY-op method splices in to MINT the
+/// handle(s) from the core-returned `Arc<Impl>` — `Ok({Iface} { core: … })`, mapped
+/// through the `Nullable`/`List` container — mirroring the `Shape::Stream` wrap (a
+/// class built from `self.core.{op}(..)`). `call` is the core-call expression;
+/// `result_ty` the throwing-result spelling (`Result`/`PyResult`). `None` for a
+/// non-factory op. Shared by node and python so their mint lowering agrees.
+pub(super) fn interface_mint(
+    api: &ApiDoc,
+    op: &ApiOp,
+    result_ty: &str,
+    call: &str,
+    infallible: bool,
+) -> Option<(String, String)> {
+    let ir = crate::api::returned_interface(api, &op.returns)?;
+    let iface = ir.iface().to_string();
+    // The core value handed back: `Arc<Impl>` straight (infallible) or through the
+    // `?`-unwrapped fallible call. Each `Arc<Impl>` (`c`) becomes `{Iface}{core:c}`.
+    let cv = if infallible {
+        call.to_string()
+    } else {
+        format!("{call}.map_err(err)?")
+    };
+    let (ret_inner, value) = match &ir {
+        crate::api::InterfaceReturn::Bare(_) => {
+            (iface.clone(), format!("{iface} {{ core: {cv} }}"))
+        }
+        crate::api::InterfaceReturn::Nullable(_) => (
+            format!("Option<{iface}>"),
+            format!("{cv}.map(|c| {iface} {{ core: c }})"),
+        ),
+        crate::api::InterfaceReturn::List(_) => (
+            format!("Vec<{iface}>"),
+            format!("{cv}.into_iter().map(|c| {iface} {{ core: c }}).collect()"),
+        ),
+    };
+    if infallible {
+        Some((ret_inner, value))
+    } else {
+        Some((format!("{result_ty}<{ret_inner}>"), format!("Ok({value})")))
+    }
+}
+
+/// The `(return_type, body)` for a SYNCHRONOUS unary op's node/python method,
+/// covering all three cases uniformly: a FACTORY op mints the handle (see
+/// [`interface_mint`]); an infallible op returns the `base_ret` value straight
+/// (`{call}`); a fallible op throws (`{result_ty}<base_ret>`, `{call}.map_err(err)`).
+/// Collapsing the three into one seam keeps the per-backend arm a single spliced
+/// block (node's line budget) and both backends' lowering in agreement.
+pub(super) fn unary_body_parts(
+    api: &ApiDoc,
+    op: &ApiOp,
+    result_ty: &str,
+    base_ret: &str,
+    call: &str,
+    infallible: bool,
+) -> (String, String) {
+    if let Some(m) = interface_mint(api, op, result_ty, call, infallible) {
+        return m;
+    }
+    if infallible {
+        (base_ret.to_string(), call.to_string())
+    } else {
+        (
+            format!("{result_ty}<{base_ret}>"),
+            format!("{call}.map_err(err)"),
+        )
+    }
+}
+
+/// Whether `iface` is FACTORY-BORN: constructible (a factory op somewhere returns
+/// it) yet carrying NO `Shape::Ctor` of its own — the case node/python lower to a
+/// ctor-less handle class, and the follow-up backends (cpp/java/ruby/php/wasm)
+/// skip-note wholesale (they cannot yet MINT the handle from a factory return).
+pub(super) fn is_factory_born(api: &ApiDoc, iface: &str) -> bool {
+    let i = match api.interfaces.iter().find(|i| i.name == iface) {
+        Some(i) => i,
+        None => return false,
+    };
+    let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
+    !has_ctor && crate::api::constructible_interfaces(api).contains(iface)
+}
+
+/// The one-line skip-note a FOLLOW-UP backend (cpp/java/ruby/php/wasm) emits in
+/// place of lowering a FACTORY op (an op RETURNING an interface handle) — the
+/// interface-return sibling of [`subscription_factory_skip_note`]. Minting a live
+/// handle from an op return is lowered for node/python only today; rather than
+/// marshal the core's `Arc<Impl>` as an ordinary value (broken code), the backend
+/// emits this honest marker. Full factory-mint lowering is the documented follow-up.
+pub(super) fn interface_return_skip_note(iface: &str, op: &str, target: &str) -> String {
+    format!(
+        "// op `{iface}.{op}` returns handle `{target}` — minting a live handle from a \
+         factory op return is not lowered for this backend yet; deferred."
+    )
+}
+
+/// The skip-note a FOLLOW-UP backend (cpp/java/ruby/php/wasm) emits for an entire
+/// FACTORY-BORN (ctor-less) interface it does not yet bind — the interface's handle
+/// is minted only from a factory op's return, which is lowered for node/python only
+/// today, so this backend emits no trait-method glue for it (its `&self` methods
+/// have no minted receiver). Sibling of [`interface_return_skip_note`]. Deferred.
+pub(super) fn factory_born_interface_skip_note(iface: &str) -> String {
+    format!(
+        "// interface `{iface}`: factory-born (ctor-less) handle — minting its instance \
+         from a factory op return is lowered for node/python only today; this backend \
+         binds none of its methods. Deferred."
+    )
 }
 
 /// The field carrying an Arrow `RecordBatch`, when this model is an
@@ -706,9 +845,16 @@ pub(super) fn emit_core_traits_full(
     param_sig_fn: impl Fn(&ApiDoc, &ApiOp) -> Vec<(String, String)>,
     result_err: impl Fn(&ApiOp) -> Option<String>,
 ) {
+    // An op on a CONSTRUCTIBLE interface (its own ctor OR a factory op somewhere
+    // returns it) gets the stateful `&self` receiver — a factory-born (ctor-less)
+    // interface's methods must be `&self` so the minted handle class can call them
+    // through `self.core`. Computed once; every non-constructible interface keeps
+    // its free-function (`fn {name}(..)`) spelling, so existing goldens are
+    // byte-identical (no current interface is factory-born).
+    let constructible = crate::api::constructible_interfaces(api);
     for i in &api.interfaces {
         let trait_name = format!("{}Core", i.name);
-        let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
+        let stateful = constructible.contains(&i.name);
         // A `single_threaded` interface lowers to a THREAD-CONFINED handle: the
         // generated node class holds the core in a `RefCell` and reaches it via
         // `borrow_mut()`, so its handle-bound ops take `&mut self` (not `&self`),
@@ -728,7 +874,10 @@ pub(super) fn emit_core_traits_full(
                 .map(|(n, r)| format!("{n}: {r}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let ret = ret_ty(op);
+            // A FACTORY op's core method returns the CORE object
+            // `Arc<crate::core_impl::{Iface}Impl>` (Option/Vec-wrapped), which the
+            // binding wraps into the handle class; every other op keeps `ret_ty`.
+            let ret = core_return_ty(api, op, ret_ty(op));
             let re = result_err(op);
             let sig = match op.shape {
                 Shape::Ctor => format!("fn {name}({ps}) -> anyhow::Result<Self>"),
@@ -754,7 +903,7 @@ pub(super) fn emit_core_traits_full(
                 // method is `Result<T, E>` with the EXPLICIT error record `E`, so
                 // the binding can build the `{ ok, value } | { ok, error }` envelope
                 // instead of throwing. Rides the same `has_ctor` receiver split.
-                _ if re.is_some() && has_ctor => {
+                _ if re.is_some() && stateful => {
                     format!(
                         "fn {name}({recv}, {ps}) -> ::core::result::Result<{ret}, {}>",
                         re.as_deref().unwrap()
@@ -770,9 +919,9 @@ pub(super) fn emit_core_traits_full(
                 // drops the `Result` seam entirely — the core method IS the value.
                 // `infallible` is only ever set on a unary op, so this rides the
                 // same `has_ctor` receiver split as the fallible unary arms below.
-                _ if has_ctor && op.infallible => format!("fn {name}({recv}, {ps}) -> {ret}"),
+                _ if stateful && op.infallible => format!("fn {name}({recv}, {ps}) -> {ret}"),
                 _ if op.infallible => format!("fn {name}({ps}) -> {ret}"),
-                _ if has_ctor => format!("fn {name}({recv}, {ps}) -> anyhow::Result<{ret}>"),
+                _ if stateful => format!("fn {name}({recv}, {ps}) -> anyhow::Result<{ret}>"),
                 _ => format!("fn {name}({ps}) -> anyhow::Result<{ret}>"),
             };
             methods.push(quote!($sig;));

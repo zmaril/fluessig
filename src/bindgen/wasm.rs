@@ -732,6 +732,16 @@ pub fn wasm_binding_with_options(
         let trait_name = format!("{}Core", i.name);
         let impl_path = format!("crate::core_impl::{}Impl", i.name);
 
+        // A FACTORY-BORN (ctor-less) interface's handle is minted node/python only
+        // today — wasm binds none of its methods yet; skip-note (deferred).
+        if super::is_factory_born(api, &i.name) {
+            body.push_str(&format!(
+                "{}\n\n",
+                super::factory_born_interface_skip_note(&i.name)
+            ));
+            continue;
+        }
+
         if has_ctor {
             push_doc(&mut body, &i.doc);
             body.push_str(&format!(
@@ -739,6 +749,16 @@ pub fn wasm_binding_with_options(
                 i.name, impl_path
             ));
             for op in &i.ops {
+                // A FACTORY op (returns an interface handle) is minted node/python
+                // only today — skip-note rather than emit glue returning a handle.
+                if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                    body.push_str(&format!(
+                        "{}\n",
+                        super::interface_return_skip_note(&i.name, &op.name, tgt.iface())
+                    ));
+                    body.push('\n');
+                    continue;
+                }
                 match op.shape {
                     Shape::Ctor => {
                         let name = snake(&op.name);
@@ -779,6 +799,16 @@ pub fn wasm_binding_with_options(
         } else {
             push_doc(&mut body, &i.doc);
             for op in &i.ops {
+                // A FACTORY op (returns an interface handle) is minted node/python
+                // only today — skip-note rather than marshal the core's handle.
+                if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                    body.push_str(&format!(
+                        "{}\n",
+                        super::interface_return_skip_note(&i.name, &op.name, tgt.iface())
+                    ));
+                    body.push('\n');
+                    continue;
+                }
                 match op.shape {
                     Shape::Unary => {
                         let call = format!("<{impl_path} as {trait_name}>::{}", snake(&op.name));

@@ -241,7 +241,24 @@ pub fn cpp_header(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) -
     for i in &api.interfaces {
         let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
         s.push_str(&format!("/* {} */\n", i.name));
+        // A FACTORY-BORN (ctor-less) interface's handle is minted node/python only
+        // today — no C prototypes emitted for it yet (deferred).
+        if super::is_factory_born(api, &i.name) {
+            s.push_str(&format!(
+                "{}\n\n",
+                super::factory_born_interface_skip_note(&i.name)
+            ));
+            continue;
+        }
         for op in &i.ops {
+            // A FACTORY op (returns an interface handle) is likewise deferred.
+            if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+                s.push_str(&format!(
+                    "{}\n",
+                    super::interface_return_skip_note(&i.name, &op.name, tgt.iface())
+                ));
+                continue;
+            }
             s.push_str(&op_prototype(api, &i.name, op, has_ctor));
         }
         s.push('\n');

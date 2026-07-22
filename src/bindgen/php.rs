@@ -130,20 +130,26 @@ pub fn php_binding(api: &ApiDoc, enums: &[EnumDesc], banner_note: Option<&str>) 
         // The wire token comes from the shared resolver (a `php` pin wins, then
         // the neutral `Variant.value`, else `to_lowercase()`); un-pinned is
         // exactly the old `to_lowercase()`, so the emission is byte-identical.
-        let vs: Vec<String> = variants.iter().map(|v| pascal(&v.name)).collect();
+        let vs: Vec<String> = variants.iter().map(|v| variant_ident(&v.name)).collect();
         let arms: Vec<String> = variants
             .iter()
             .map(|v| {
                 format!(
                     "{:?} => Ok(Self::{}),",
                     variant_token(v, LANG),
-                    pascal(&v.name)
+                    variant_ident(&v.name)
                 )
             })
             .collect();
         let wire_arms: Vec<String> = variants
             .iter()
-            .map(|v| format!("Self::{} => {:?},", pascal(&v.name), variant_token(v, LANG)))
+            .map(|v| {
+                format!(
+                    "Self::{} => {:?},",
+                    variant_ident(&v.name),
+                    variant_token(v, LANG)
+                )
+            })
             .collect();
         let expect = variants
             .iter()

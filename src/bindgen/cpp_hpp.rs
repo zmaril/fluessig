@@ -109,6 +109,15 @@ pub fn cpp_hpp(api: &ApiDoc, _enums: &[EnumDesc], banner_note: Option<&str>) -> 
 
     // ── per-interface class / free-function surface ──
     for i in &api.interfaces {
+        // A FACTORY-BORN (ctor-less) interface's handle is minted node/python only
+        // today — no C++ wrapper emitted for it yet (deferred).
+        if super::is_factory_born(api, &i.name) {
+            s.push_str(&format!(
+                "{}\n\n",
+                super::factory_born_interface_skip_note(&i.name)
+            ));
+            continue;
+        }
         let has_ctor = i.ops.iter().any(|o| o.shape == Shape::Ctor);
         if has_ctor {
             s.push_str(&emit_handle_class(api, i));
@@ -242,6 +251,14 @@ fn emit_handle_class(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
 
     // methods
     for op in &i.ops {
+        // A FACTORY op (returns an interface handle) is minted node/python only today.
+        if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+            s.push_str(&format!(
+                "    {}\n",
+                super::interface_return_skip_note(iface, &op.name, tgt.iface())
+            ));
+            continue;
+        }
         match op.shape {
             Shape::Ctor => {}
             Shape::Manual => s.push_str(&format!(
@@ -272,6 +289,14 @@ fn emit_stateless(api: &ApiDoc, i: &crate::api::ApiInterface) -> String {
     }
     s.push_str(&format!("namespace {} {{\n", snake(iface)));
     for op in &i.ops {
+        // A FACTORY op (returns an interface handle) is minted node/python only today.
+        if let Some(tgt) = crate::api::returned_interface(api, &op.returns) {
+            s.push_str(&format!(
+                "{}\n",
+                super::interface_return_skip_note(iface, &op.name, tgt.iface())
+            ));
+            continue;
+        }
         match op.shape {
             Shape::Manual => s.push_str(&format!(
                 "// @manual {iface}::{} — hand-written by the consumer.\n",

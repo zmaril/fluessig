@@ -639,15 +639,16 @@ pub fn node_binding_with_options(
         // each line: `#[napi(value = "<wire token>")] <PascalVariant>,` — the
         // token comes from the shared resolver (a `node` pin wins, then the
         // neutral `Variant.value`, else the catalog member lowercased, identical
-        // to ruby's `wire()`). The Rust variant ident is always `pascal(name)`,
-        // independent of the wire token.
+        // to ruby's `wire()`). The Rust variant ident is `variant_ident(name)`
+        // (pascal-cased, hyphens/other separators sanitized to a valid ident),
+        // independent of — and never mutating — the wire token.
         let vs: Vec<String> = variants
             .iter()
             .map(|v| {
                 format!(
                     "#[napi(value = {:?})] {},",
                     variant_token(v, LANG),
-                    pascal(&v.name)
+                    variant_ident(&v.name)
                 )
             })
             .collect();
@@ -680,7 +681,7 @@ pub fn node_binding_with_options(
                 .iter()
                 .map(|f| {
                     let (r, _) = ty(api, &f.ty);
-                    let n = snake(&f.name);
+                    let n = escape_rust_keyword(&snake(&f.name));
                     quote!(pub(crate) $n: $r,)
                 })
                 .collect();
@@ -688,7 +689,7 @@ pub fn node_binding_with_options(
                 .iter()
                 .map(|f| {
                     let (r, _) = ty(api, &f.ty);
-                    let n = snake(&f.name);
+                    let n = escape_rust_keyword(&snake(&f.name));
                     quote! {
                         #[napi(getter)]
                         pub fn $(&n)(&self) -> $r {
@@ -731,13 +732,25 @@ pub fn node_binding_with_options(
                 } else {
                     r
                 };
-                // The Rust field ident is always `snake(&f.name)` (a valid
-                // ident); a `node` pin puts the exact JS spelling ONLY in a
-                // `#[napi(js_name = "…")]` attr, overriding napi's default
-                // snake→camel casing. Un-pinned ⇒ no attr, byte-identical.
-                let n = snake(&f.name);
+                // The Rust field ident is `snake(&f.name)`, raw-escaped when it
+                // collides with a Rust keyword (`type` → `r#type`, mirroring
+                // rust-core) so the struct compiles. A `node` pin puts the exact
+                // JS spelling ONLY in a `#[napi(js_name = "…")]` attr, overriding
+                // napi's default snake→camel casing. Un-pinned & non-keyword ⇒ no
+                // attr, byte-identical.
+                let raw = snake(&f.name);
+                let n = escape_rust_keyword(&raw);
                 match pinned_name(&f.bindings, LANG) {
                     Some(js) => {
+                        let attr = format!("#[napi(js_name = {js:?})]");
+                        quote!($attr pub $n: $r,)
+                    }
+                    // A keyword field carries an explicit `js_name` pinning the
+                    // ORIGINAL exposed name (what napi's default snake→camel would
+                    // have produced), so raw-escaping the Rust ident never changes
+                    // the JS-visible field name.
+                    None if is_rust_keyword(&raw) => {
+                        let js = crate::ir::camel(&raw);
                         let attr = format!("#[napi(js_name = {js:?})]");
                         quote!($attr pub $n: $r,)
                     }

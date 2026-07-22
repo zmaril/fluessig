@@ -628,14 +628,14 @@ pub fn ruby_binding_with_options(
         // The wire token comes from the shared resolver (a `ruby` pin wins, then
         // the neutral `Variant.value`, else `to_lowercase()`); un-pinned is
         // exactly the old `to_lowercase()`, so the emission is byte-identical.
-        let vs: Vec<String> = variants.iter().map(|v| pascal(&v.name)).collect();
+        let vs: Vec<String> = variants.iter().map(|v| variant_ident(&v.name)).collect();
         let arms: Vec<String> = variants
             .iter()
             .map(|v| {
                 format!(
                     "{:?} => Ok(Self::{}),",
                     variant_token(v, LANG),
-                    pascal(&v.name)
+                    variant_ident(&v.name)
                 )
             })
             .collect();
@@ -665,7 +665,13 @@ pub fn ruby_binding_with_options(
         if crossing.contains(name) {
             let wire_arms: Vec<String> = variants
                 .iter()
-                .map(|v| format!("Self::{} => {:?},", pascal(&v.name), variant_token(v, LANG)))
+                .map(|v| {
+                    format!(
+                        "Self::{} => {:?},",
+                        variant_ident(&v.name),
+                        variant_token(v, LANG)
+                    )
+                })
                 .collect();
             quote_in! { t =>
                 $['\r']

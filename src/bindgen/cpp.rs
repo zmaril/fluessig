@@ -563,7 +563,7 @@ fn emit_rust_enum(name: &str, variants: &[EnumVariant]) -> String {
     s.push_str("#[repr(i32)]\n");
     s.push_str(&format!("pub enum {name} {{\n"));
     for (idx, v) in variants.iter().enumerate() {
-        s.push_str(&format!("    {} = {idx},\n", pascal(&v.name)));
+        s.push_str(&format!("    {} = {idx},\n", variant_ident(&v.name)));
     }
     s.push_str("}\n");
     s.push_str(&format!("impl {name} {{\n"));
@@ -576,12 +576,12 @@ fn emit_rust_enum(name: &str, variants: &[EnumVariant]) -> String {
         }
         s.push_str(&format!(
             "            {idx} => Self::{},\n",
-            pascal(&v.name)
+            variant_ident(&v.name)
         ));
     }
     let first = variants
         .first()
-        .map(|v| pascal(&v.name))
+        .map(|v| variant_ident(&v.name))
         .unwrap_or_else(|| "Unknown".into());
     s.push_str(&format!("            _ => Self::{first},\n"));
     s.push_str("        }\n");

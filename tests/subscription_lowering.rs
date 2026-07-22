@@ -243,10 +243,14 @@ fn loader_rejects_wrong_callback_arity() {
     );
 }
 
-/// A `Shape::Subscription` op requires a STATEFUL interface (its method is
-/// `&self`); the loader rejects a subscription op on a ctor-less interface.
+/// A `Shape::Subscription` op requires a CONSTRUCTIBLE interface (its method is
+/// `&self`). The loader rejects a subscription op on an interface that NOTHING
+/// constructs — here `Ticker` has no ctor of its own AND no op anywhere returns it,
+/// so there is no live instance to hang the `&self` method on. (A ctor-less
+/// interface that a FACTORY op DOES return is now accepted — see
+/// `subscription_on_factory_born_interface_loads` in `src/api.rs`.)
 #[test]
-fn loader_rejects_stateless_subscription() {
+fn loader_rejects_unconstructible_subscription() {
     let stateless = r#"{
       "fluessig": {"format": 1},
       "models": [], "unions": [],
@@ -258,10 +262,10 @@ fn loader_rejects_stateless_subscription() {
         ]}
       ]
     }"#;
-    let err =
-        load_api(stateless).expect_err("subscription op on a ctor-less interface is rejected");
+    let err = load_api(stateless)
+        .expect_err("subscription op on an unconstructible interface is rejected");
     assert!(
-        err.contains("requires a stateful interface"),
-        "clear stateful-requirement error, got: {err}"
+        err.contains("requires a constructible interface") && err.contains("nothing constructs"),
+        "clear unconstructible-interface error, got: {err}"
     );
 }

@@ -125,8 +125,15 @@ fn emit_py_union_variants(
                 } else {
                     r
                 };
-                let fname = py_reserved(&snake(&f.name));
-                struct_fields.push(quote!($(format!("pub {fname}: {r},"))));
+                let fname = py_rust_ident(&f.name);
+                let exposed = py_exposed_ident(&f.name);
+                if is_rust_keyword(&exposed) {
+                    // keyword field: raw-escaped Rust ident, exposed name pinned.
+                    struct_fields
+                        .push(quote!($(format!("#[pyo3(name = {exposed:?})] pub {fname}: {r},"))));
+                } else {
+                    struct_fields.push(quote!($(format!("pub {fname}: {r},"))));
+                }
                 from_fields.push(format!("{fname}: v.{fname},"));
             }
             // ctor param order: required fields first, then `=None` optionals
@@ -139,7 +146,7 @@ fn emit_py_union_variants(
             let sig = ctor_fields
                 .iter()
                 .map(|f| {
-                    let n = py_reserved(&snake(&f.name));
+                    let n = py_rust_ident(&f.name);
                     if f.nullable {
                         format!("{n}=None")
                     } else {
@@ -157,13 +164,13 @@ fn emit_py_union_variants(
                     } else {
                         r
                     };
-                    format!("{}: {}", py_reserved(&snake(&f.name)), r)
+                    format!("{}: {}", py_rust_ident(&f.name), r)
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
             let ctor_names = ctor_fields
                 .iter()
-                .map(|f| py_reserved(&snake(&f.name)))
+                .map(|f| py_rust_ident(&f.name))
                 .collect::<Vec<_>>()
                 .join(", ");
             quote_in! { *t =>
@@ -227,6 +234,24 @@ fn py_reserved(name: &str) -> String {
         | "True" | "False" => format!("{name}_"),
         _ => name.to_string(),
     }
+}
+
+/// The Python-exposed attribute/param name for a field: `snake`-cased, then
+/// Python-keyword-escaped (`from` → `from_`). This is what pyo3 sees as the
+/// member/kwarg name and what a `#[pyo3(name = "…")]` attr pins.
+fn py_exposed_ident(name: &str) -> String {
+    py_reserved(&snake(name))
+}
+
+/// The emitted RUST field/param ident for a Python binding field: the exposed
+/// name, additionally raw-escaped when it collides with a RUST keyword (`type` →
+/// `r#type`), mirroring rust-core so the generated pyclass compiles. A non-Rust-
+/// keyword name is unchanged, so this is byte-identical to the prior emission for
+/// every existing field. Since a raw-escaped ident is exposed by pyo3 WITHOUT the
+/// `r#`, the caller pairs it with a `#[pyo3(name = …)]` attr to pin the exposed
+/// name (see the DTO struct emitter).
+fn py_rust_ident(name: &str) -> String {
+    escape_rust_keyword(&py_exposed_ident(name))
 }
 
 /// Flatten an op's params for Python: scalars pass through; model-typed params
@@ -428,7 +453,7 @@ fn emit_py_arrow_model(
         .iter()
         .map(|f| {
             let (r, _) = ty(api, &f.ty);
-            let n = py_reserved(&snake(&f.name));
+            let n = py_rust_ident(&f.name);
             quote!(pub(crate) $n: $r,)
         })
         .collect();
@@ -436,7 +461,7 @@ fn emit_py_arrow_model(
         .iter()
         .map(|f| {
             let (r, _) = ty(api, &f.ty);
-            let n = py_reserved(&snake(&f.name));
+            let n = py_rust_ident(&f.name);
             quote! {
                 #[getter]
                 fn $(&n)(&self) -> $r {
@@ -445,7 +470,7 @@ fn emit_py_arrow_model(
             }
         })
         .collect();
-    let ipc = py_reserved(&snake(&af.name));
+    let ipc = py_rust_ident(&af.name);
     if let Some(doc) = &m.doc {
         for line in doc.lines() {
             quote_in! { *t => $['\r']$(format!("/// {line}")) };
@@ -561,8 +586,8 @@ pub fn python_binding_with_options(
         let vs: Vec<String> = variants
             .iter()
             .map(|v| match pinned_name(&v.bindings, LANG) {
-                Some(nm) => format!("#[pyo3(name = {:?})] {},", nm, pascal(&v.name)),
-                None => format!("{},", pascal(&v.name)),
+                Some(nm) => format!("#[pyo3(name = {:?})] {},", nm, variant_ident(&v.name)),
+                None => format!("{},", variant_ident(&v.name)),
             })
             .collect();
         quote_in! { t =>
@@ -594,13 +619,22 @@ pub fn python_binding_with_options(
                 } else {
                     r
                 };
-                // The Rust field ident stays `snake` (a valid ident); a `python`
-                // pin puts the exact Python attribute name ONLY in a
-                // `#[pyo3(name = "…")]` attr (overriding pyo3's default, which is
-                // the Rust ident). Un-pinned ⇒ no attr, byte-identical.
-                let n = py_reserved(&snake(&f.name));
+                // The Rust field ident is `snake`, raw-escaped when it collides
+                // with a Rust keyword (`type` → `r#type`, mirroring rust-core) so
+                // the pyclass compiles; a `python` pin puts the exact Python
+                // attribute name ONLY in a `#[pyo3(name = "…")]` attr (overriding
+                // pyo3's default, the Rust ident). Un-pinned & non-keyword ⇒ no
+                // attr, byte-identical.
+                let n = py_rust_ident(&f.name);
                 match pinned_name(&f.bindings, LANG) {
                     Some(nm) => {
+                        let attr = format!("#[pyo3(name = {nm:?})]");
+                        quote!($attr pub $n: $r,)
+                    }
+                    // A keyword field pins its ORIGINAL exposed name so escaping
+                    // the Rust ident never changes the Python-visible attribute.
+                    None if is_rust_keyword(&py_exposed_ident(&f.name)) => {
+                        let nm = py_exposed_ident(&f.name);
                         let attr = format!("#[pyo3(name = {nm:?})]");
                         quote!($attr pub $n: $r,)
                     }
@@ -618,7 +652,7 @@ pub fn python_binding_with_options(
         let sig = ctor_fields
             .iter()
             .map(|f| {
-                let n = py_reserved(&snake(&f.name));
+                let n = py_rust_ident(&f.name);
                 if f.nullable {
                     format!("{n}=None")
                 } else {
@@ -636,13 +670,13 @@ pub fn python_binding_with_options(
                 } else {
                     r
                 };
-                format!("{}: {}", py_reserved(&snake(&f.name)), r)
+                format!("{}: {}", py_rust_ident(&f.name), r)
             })
             .collect::<Vec<_>>()
             .join(", ");
         let names = ctor_fields
             .iter()
-            .map(|f| py_reserved(&snake(&f.name)))
+            .map(|f| py_rust_ident(&f.name))
             .collect::<Vec<_>>()
             .join(", ");
         if let Some(doc) = &m.doc {

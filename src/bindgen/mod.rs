@@ -153,7 +153,9 @@ pub fn pinned_group(
 /// backend consumes — no backend takes a bespoke enum shape any more.
 #[derive(Clone, Debug)]
 pub struct EnumVariant {
-    /// The catalog member name; the Rust variant ident is always `pascal(name)`.
+    /// The catalog member name; the Rust variant ident is [`variant_ident`] of
+    /// it (`pascal`-cased, with hyphens/other separators sanitized to word
+    /// boundaries), while the wire discriminant rides [`variant_token`].
     pub name: String,
     /// The neutral wire override (`Variant.value`), when present as a string.
     pub value: Option<String>,
@@ -318,6 +320,67 @@ fn pascal(s: &str) -> String {
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// Reserved Rust words that are ILLEGAL even as raw identifiers — escaped with a
+/// trailing underscore instead of `r#`.
+const RUST_HARD_KEYWORDS: &[&str] = &["self", "Self", "super", "crate"];
+/// Reserved Rust words that ARE legal as raw identifiers (`r#kw`).
+const RUST_RAW_KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while", "async",
+    "await", "box",
+];
+
+/// Would emitting `ident` as a bare Rust identifier collide with a keyword (so it
+/// must be raw-escaped / suffixed to compile)? The node + python backends use
+/// this to decide whether a DTO field also needs an explicit `js_name`/`name`
+/// attr pinning the ORIGINAL exposed name.
+pub(super) fn is_rust_keyword(ident: &str) -> bool {
+    RUST_HARD_KEYWORDS.contains(&ident) || RUST_RAW_KEYWORDS.contains(&ident)
+}
+
+/// Raw-escape an (already language-cased) identifier that collides with a Rust
+/// keyword so it is a valid Rust ident: `type` → `r#type`, `self` → `self_`. A
+/// non-keyword ident is returned UNCHANGED (byte-identical to the pre-escape
+/// emission). Mirrors rust-core's field escaping so the node and python backends
+/// escape exactly the SAME keyword set rust-core already does.
+pub(super) fn escape_rust_keyword(ident: &str) -> String {
+    if RUST_HARD_KEYWORDS.contains(&ident) {
+        format!("{ident}_")
+    } else if RUST_RAW_KEYWORDS.contains(&ident) {
+        format!("r#{ident}")
+    } else {
+        ident.to_string()
+    }
+}
+
+/// Sanitize a source enum-variant discriminant into a valid Rust variant
+/// IDENTIFIER. Every run of non-alphanumeric characters (a hyphen in a kebab
+/// discriminant like `openai-completions`, plus dots / spaces / slashes) is
+/// treated as a word boundary and the segments are PascalCased
+/// (`openai-completions` → `OpenaiCompletions`); a leading digit is prefixed
+/// with `_` (a Rust ident cannot start with a digit).
+///
+/// Determinism & collision-safety: this is a pure function of the input string,
+/// so the same discriminant always maps to the same ident. The ORIGINAL wire
+/// discriminant is NEVER emitted through this function — every backend keeps the
+/// wire value separately (the neutral [`variant_token`] → node's
+/// `#[napi(value = "…")]`, ruby/php `wire()`, java's string map), so only the
+/// language-level identifier is sanitized, never the wire value. A source name
+/// that is already a valid ident sanitizes to itself, so this is byte-identical
+/// to the prior `pascal(name)` emission for every existing (hyphen-free) variant.
+pub(super) fn variant_ident(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let p = pascal(&cleaned);
+    match p.chars().next() {
+        Some(c) if c.is_ascii_digit() => format!("_{p}"),
+        _ => p,
+    }
 }
 
 /// Enums whose variants carry wire values are projected as plain strings in the
@@ -708,4 +771,39 @@ pub(super) fn emit_core_traits_full(
 /// carrier python/ruby and the node envelope default all share.
 fn emit_core_traits(t: &mut rust::Tokens, api: &ApiDoc) {
     emit_core_traits_with(t, api, |op| ty(api, &op.returns).0);
+}
+
+#[cfg(test)]
+mod ident_tests {
+    use super::*;
+
+    /// The variant-ident sanitizer is byte-identical to the prior `pascal(name)`
+    /// emission for every hyphen-free name (guaranteeing existing goldens are
+    /// unaffected), and pascal-cases across hyphens/other separators for the
+    /// full-orch discriminants (`openai-completions` → `OpenaiCompletions`).
+    #[test]
+    fn variant_ident_sanitizes_and_stays_byte_identical_for_valid_names() {
+        // Identity to pascal() for the shapes existing goldens contain:
+        for n in ["dispatch", "Dispatch", "someThing", "some_thing", "http2"] {
+            assert_eq!(variant_ident(n), pascal(n), "must equal pascal() for `{n}`");
+        }
+        // The bug-1 inputs: hyphens (and friends) become word boundaries.
+        assert_eq!(variant_ident("openai-completions"), "OpenaiCompletions");
+        assert_eq!(variant_ident("source-origin"), "SourceOrigin");
+        assert_eq!(variant_ident("a.b c/d"), "ABCD");
+        // A leading digit is prefixed so the ident is legal.
+        assert_eq!(variant_ident("3d"), "_3d");
+    }
+
+    /// The keyword escaper mirrors rust-core: raw idents for the `r#`-legal
+    /// keywords, a trailing underscore for the hard ones, unchanged otherwise.
+    #[test]
+    fn escape_rust_keyword_matches_rust_core() {
+        assert_eq!(escape_rust_keyword("type"), "r#type");
+        assert_eq!(escape_rust_keyword("match"), "r#match");
+        assert_eq!(escape_rust_keyword("self"), "self_");
+        assert_eq!(escape_rust_keyword("id"), "id");
+        assert!(is_rust_keyword("type") && is_rust_keyword("self"));
+        assert!(!is_rust_keyword("id"));
+    }
 }

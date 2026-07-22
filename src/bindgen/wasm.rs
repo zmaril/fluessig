@@ -681,7 +681,7 @@ pub fn wasm_binding_with_options(
                 "#[serde(rename = {:?})]\n",
                 variant_token(v, LANG)
             ));
-            body.push_str(&format!("{},\n", pascal(&v.name)));
+            body.push_str(&format!("{},\n", variant_ident(&v.name)));
         }
         body.push_str("}\n\n");
     }
